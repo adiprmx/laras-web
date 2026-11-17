@@ -20,9 +20,9 @@ import {
 } from './config';
 import {
   ResolveError,
-  SpikeResolver,
+  StreamResolver,
   type ResolvedTrack,
-} from './resolve';
+} from '../extractor/resolve';
 import {
   formatDurationMs,
   formatReport,
@@ -91,7 +91,7 @@ export default function SpikePage() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const resultsRef = useRef<SongResult[]>(freshResults());
   const runRef = useRef({ cancelled: false, runId: 0 });
-  const resolverRef = useRef<SpikeResolver | null>(null);
+  const resolverRef = useRef<StreamResolver | null>(null);
   const cancelWaitRef = useRef<(() => void) | null>(null);
   const metaRef = useRef<{
     startedAt: string;
@@ -404,7 +404,7 @@ export default function SpikePage() {
         // Wake lock tidak tersedia: uji tetap jalan.
       }
 
-      const resolver = new SpikeResolver();
+      const resolver = new StreamResolver();
       resolverRef.current = resolver;
       try {
         const config = await withCancel(resolver.init());

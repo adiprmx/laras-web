@@ -1,29 +1,58 @@
-import { Suspense, lazy } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { strings } from './strings/id';
+import { getPlayerService } from './player/service';
+import MiniPlayer from './components/MiniPlayer';
+import FullPlayer from './components/FullPlayer';
+import TrySongs from './components/TrySongs';
 
-// Rute /spike TERSEMBUNYI: halaman uji integrasi P1, hanya untuk
-// verifikasi manual dari browser nyata. Tidak ditautkan dari mana pun
-// di beranda. Lazy-load menjaga bundle awal tetap di bawah anggaran.
+// Rute tersembunyi (tidak ditautkan dari mana pun di beranda):
+// /spike = halaman uji integrasi P1, /player-test = halaman uji
+// pemutar P2 (nada lokal). Lazy-load menjaga bundle awal tetap
+// di bawah anggaran.
 const SpikePage = lazy(() => import('./spike/SpikePage'));
+const PlayerTestPage = lazy(() => import('./test-pages/PlayerTestPage'));
 
-function isSpikeRoute(): boolean {
+function hiddenRoute(): 'spike' | 'player-test' | null {
   const path = window.location.pathname;
-  return path === '/spike' || path === '/spike/';
+  if (path === '/spike' || path === '/spike/') return 'spike';
+  if (path === '/player-test' || path === '/player-test/') {
+    return 'player-test';
+  }
+  return null;
 }
 
-// P0: skeleton beranda — kosong yang jujur, tanpa data contoh.
-// P2-P4 mengisi beranda dengan seksi nyata (lokal dulu, jaringan belakangan).
+function LoadingPage() {
+  return (
+    <div className="min-h-dvh bg-black px-4 py-16 text-center text-sm text-zinc-400">
+      Memuat halaman uji.
+    </div>
+  );
+}
+
+// P2: beranda berisi seksi "Coba pemutar" (5 lagu nyata) + pencarian
+// yang masih nonaktif. P3-P4 mengisi beranda dengan konten nyata
+// (lokal dulu, jaringan belakangan).
 export default function App() {
-  if (isSpikeRoute()) {
+  // Service pemutar diinisialisasi sekali (idempotent, aman di
+  // StrictMode): pulihkan antrean, pasang listener, nyalakan watchdog.
+  useEffect(() => {
+    getPlayerService().init();
+  }, []);
+
+  const route = hiddenRoute();
+  if (route === 'spike') {
     return (
-      <Suspense
-        fallback={
-          <div className="min-h-dvh bg-black px-4 py-16 text-center text-sm text-zinc-400">
-            Memuat halaman uji.
-          </div>
-        }
-      >
+      <Suspense fallback={<LoadingPage />}>
         <SpikePage />
+      </Suspense>
+    );
+  }
+  if (route === 'player-test') {
+    return (
+      <Suspense fallback={<LoadingPage />}>
+        <PlayerTestPage />
+        <MiniPlayer />
+        <FullPlayer />
       </Suspense>
     );
   }
@@ -35,12 +64,9 @@ export default function App() {
           {strings.comingSoon}
         </span>
       </header>
-      <main className="mx-auto max-w-2xl px-4 py-16 text-center">
-        <h2 className="text-2xl font-semibold tracking-tight">{strings.homeEmptyTitle}</h2>
-        <p className="mx-auto mt-3 max-w-prose text-sm leading-relaxed text-zinc-400">
-          {strings.homeEmptyBody}
-        </p>
-        <div className="mt-8 flex items-center justify-center gap-2">
+      {/* Padding bawah memberi ruang untuk bar putar (64 px + garis). */}
+      <main className="mx-auto max-w-2xl px-4 pb-28 pt-8">
+        <div className="flex items-center justify-center gap-2">
           <input
             type="search"
             placeholder={strings.searchPlaceholder}
@@ -56,8 +82,13 @@ export default function App() {
             {strings.searchButton}
           </button>
         </div>
-        <p className="mt-4 text-xs text-zinc-500">{strings.searchNotReady}</p>
+        <p className="mt-4 text-center text-xs text-zinc-400">
+          {strings.searchNotReady}
+        </p>
+        <TrySongs />
       </main>
+      <MiniPlayer />
+      <FullPlayer />
     </div>
   );
 }

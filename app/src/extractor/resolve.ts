@@ -1,5 +1,5 @@
 /**
- * Resolve lagu dari browser lewat proxy byte-only (halaman spike P1).
+ * Resolve lagu dari browser lewat proxy byte-only.
  *
  * Alur: config remote (fetch langsung, CORS terbuka) lalu request
  * player dan base.js lewat proxy (fetch langsung diblokir CORS,
@@ -7,6 +7,11 @@
  * browser (S1/S4). URL stream hasil resolve dipakai langsung oleh
  * elemen audio, BUKAN lewat proxy (arsitektur produksi; proxy audio
  * untuk streaming dilarang).
+ *
+ * Modul ini adalah wiring resolve P1 yang terbukti (halaman spike),
+ * dipromosikan ke kode produksi P2 tanpa mengubah alurnya. Satu
+ * perubahan: `SpikeResolver` menjadi `StreamResolver` dan lagu
+ * diwakili `SongRef` umum (bukan hanya lagu kanari).
  *
  * Solver di-lazy-load: modul solver (termasuk WASM sekitar 250 KB
  * gzip) hanya diunduh saat format cipher pertama ditemui. Jalur
@@ -29,9 +34,14 @@ import {
   PLAYER_TIMEOUT_MS,
   PROXY_BASE_URL,
   SEARCH_TIMEOUT_MS,
-  type CanarySong,
   type ClientDefinition,
-} from './config';
+} from '../spike/config';
+
+/** Lagu yang bisa di-resolve: cukup videoId dan judul tampil. */
+export interface SongRef {
+  videoId: string;
+  title: string;
+}
 
 export interface PlayerConfig {
   stsByHash: Record<string, number>;
@@ -332,10 +342,10 @@ export async function loadPlayerConfig(): Promise<PlayerConfig> {
 type SolverClientType = import('../solver/solverClient').SolverClient;
 
 /**
- * Resolver spike: satu instance melayani kelima lagu (config dan
- * visitorData dimuat sekali, solver dipakai ulang).
+ * Resolver produksi: satu instance melayani semua lagu dalam sesi
+ * (config dan visitorData dimuat sekali, solver dipakai ulang).
  */
-export class SpikeResolver {
+export class StreamResolver {
   private config: PlayerConfig | null = null;
   private sts = 0;
   private hash: string | null = null;
@@ -470,7 +480,7 @@ export class SpikeResolver {
   }
 
   private async fetchPlayer(
-    song: CanarySong,
+    song: SongRef,
     client: ClientDefinition,
   ): Promise<{ playability: string; picked: AudioFormat | null }> {
     const context = { ...client.context };
@@ -509,7 +519,7 @@ export class SpikeResolver {
    * dipecahkan solver di browser; URL langsung dipakai apa adanya
    * sesudah lolos allowlist.
    */
-  async resolve(song: CanarySong): Promise<ResolvedTrack> {
+  async resolve(song: SongRef): Promise<ResolvedTrack> {
     if (!this.config) {
       throw new ResolveError('resolver belum init', 'Resolver belum siap.');
     }
