@@ -29,13 +29,26 @@ jobs:
             const fs = require('node:fs');
             const zlib = require('node:zlib');
             const path = require('node:path');
-            const assets = fs.readdirSync('dist/assets').filter((f) => f.endsWith('.js'));
-            let total = 0;
-            for (const f of assets) {
-              total += zlib.gzipSync(fs.readFileSync(path.join('dist/assets', f))).length;
+            // Anggaran K4 mengikat BUNDLE AWAL: JS yang diunduh browser saat
+            // pertama memuat halaman, yaitu yang dirujuk dist/index.html
+            // (script entry + modulepreload). Chunk lazy (halaman spike,
+            // solver QuickJS-WASM ~262 KB gzip) TIDAK dihitung karena hanya
+            // diunduh saat dibutuhkan. Skrip lama menjumlah SEMUA JS di
+            // dist/assets sehingga gagal keliru sejak P1 (total 359.987 byte).
+            const html = fs.readFileSync('dist/index.html', 'utf8');
+            const refs = new Set();
+            for (const m of html.matchAll(/(?:src|href)=\"(\/assets\/[^\"/]+\.js)\"/g)) {
+              refs.add(m[1].replace(/^\//, ''));
             }
-            console.log('Total JS gzip:', total, 'byte (batas 204800)');
-            if (total > 204800) { console.error('BUNDLE MELEBIHI ANGGARAN'); process.exit(1); }
+            if (refs.size === 0) { console.error('TIDAK ADA JS AWAL DI index.html'); process.exit(1); }
+            let total = 0;
+            for (const f of refs) {
+              const gz = zlib.gzipSync(fs.readFileSync(path.join('dist', f))).length;
+              console.log('awal:', f, gz, 'byte gzip');
+              total += gz;
+            }
+            console.log('Total bundle awal gzip:', total, 'byte (batas 204800)');
+            if (total > 204800) { console.error('BUNDLE AWAL MELEBIHI ANGGARAN'); process.exit(1); }
           "
       - uses: actions/upload-artifact@v4
         with:
