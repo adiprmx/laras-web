@@ -52,7 +52,15 @@ test.describe('S3 pemutaran <audio> + MediaSession', () => {
   let resolver: Resolver;
   const resolved: ResolvedSong[] = [];
 
-  test.beforeAll(async () => {
+  test.beforeAll(async ({ baseURL }) => {
+    // Pertahanan lapis kedua (lapis pertama: testIgnore di
+    // playwright.config.ts): bila berkas ini dijalankan langsung di
+    // bawah konfigurasi utama (preview build, port 4173), semua uji
+    // di-skip oleh test.skip di atas — tetapi beforeAll TETAP jalan
+    // (Playwright mengevaluasi skip kondisional sesudah beforeAll).
+    // Tanpa pengembalian dini ini, resolve live di bawah akan
+    // melempar LOGIN_REQUIRED dari IP runner CI dan mematahkan CI.
+    if ((baseURL ?? '').includes('4173')) return;
     test.setTimeout(240000);
     resolver = await createResolver();
     console.log(

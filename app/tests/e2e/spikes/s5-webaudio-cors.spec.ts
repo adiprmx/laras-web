@@ -42,7 +42,11 @@ import {
 test.describe('S5 Web Audio CORS', () => {
   let resolver: Resolver;
 
-  test.beforeAll(async () => {
+  test.beforeAll(async ({ baseURL }) => {
+    // Sama seperti s3-playback.spec.ts: jangan lakukan kerja live
+    // bila berkas ini dijalankan di bawah konfigurasi utama (semua
+    // uji di-skip, tetapi beforeAll tetap jalan).
+    if ((baseURL ?? '').includes('4173')) return;
     if (test.info().project.name !== 'chromium') {
       test.skip(true, 'S5: mesin Blink sama di kedua proyek, cukup desktop');
     }
