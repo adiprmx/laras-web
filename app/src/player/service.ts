@@ -17,17 +17,17 @@ import {
   StreamResolver,
   type ResolvedTrack,
 } from '../extractor/resolve';
+import { getLibraryService, MIN_PLAY_EVENT_MS } from '../data/library';
+import {
+  migrateLocalStorageQueue,
+  restoreQueueState,
+  saveQueueState,
+  type QueueStateToSave,
+} from '../data/queuePersistence';
 import { usePlayerStore, selectCurrentTrack, type PlayerState } from '../store/player';
 import { strings } from '../strings/id';
 import { AudioGraphManager } from './audioGraph';
 import { MediaSessionManager } from './mediaSession';
-import {
-  clearPersistedPlayerState,
-  loadPersistedPlayerState,
-  sanitizeQueueForSave,
-  savePersistedPlayerState,
-  type PersistedPlayerState,
-} from './persistence';
 import { HtmlAudioPort, type AudioPlayerPort } from './port';
 import {
   decideOnError,
@@ -102,6 +102,13 @@ export class PlayerService {
   private currentKind: 'stream' | 'local' | null = null;
   private initialized = false;
   private detachPort: Array<() => void> = [];
+  private persistChain: Promise<void> = Promise.resolve();
+  private historySession: {
+    trackId: string;
+    accumulatedMs: number;
+    countingSince: number | null;
+    upsertDone: Promise<void>;
+  } | null = null;
 
   constructor(port: AudioPlayerPort = new HtmlAudioPort()) {
     this.port = port;
@@ -111,7 +118,7 @@ export class PlayerService {
   init(): void {
     if (this.initialized) return;
     this.initialized = true;
-    this.restore();
+    void this.restore();
     this.mediaSession.setHandlers({
       onPlay: () => void this.play(),
       onPause: () => this.pause(),
@@ -131,8 +138,17 @@ export class PlayerService {
     this.watchdog = setInterval(() => void this.watchdogTick(), WATCHDOG_INTERVAL_MS);
     document.addEventListener('visibilitychange', this.onVisibilityChange);
     window.addEventListener('beforeunload', this.onBeforeUnload);
+    // pagehide lebih andal dari beforeunload di mobile (tab
+    // ditutup dari pengalih tugas); tulis IndexedDB bersifat
+    // async, jadi ini hanya kesempatan terakhir — simpan berkala
+    // 5 detik + saat jeda adalah pengaman utamanya.
+    window.addEventListener('pagehide', this.onPageHide);
     window.__larasPlayer = { getState: () => this.debugState() };
   }
+
+  private onPageHide = (): void => {
+    this.persistNow();
+  };
 
   private onVisibilityChange = (): void => {
     if (document.visibilityState === 'hidden') this.persistNow();
@@ -472,6 +488,10 @@ export class PlayerService {
     this.preResolvedFor = null;
     this.pendingSeek = null;
     this.pendingPlay = false;
+    // Ganti lagu: tutup sesi riwayat lagu sebelumnya, lalu mulai
+    // sesi baru + simpan metadata lagu ini (bukan ke Library).
+    void this.finishHistorySession(false);
+    this.startHistorySession(track);
     usePlayerStore.getState().setPlayerState({
       status: 'loading',
       position: opts.startPosition,
@@ -616,6 +636,9 @@ export class PlayerService {
       errorMessage: null,
     });
     this.mediaSession.setPlaybackState('playing');
+    if (this.historySession && this.historySession.countingSince === null) {
+      this.historySession.countingSince = Date.now();
+    }
   }
 
   private onPaused(): void {
@@ -625,9 +648,13 @@ export class PlayerService {
       this.mediaSession.setPlaybackState('paused');
       this.persistNow();
     }
+    this.accumulateHistory();
   }
 
   private async onEnded(): Promise<void> {
+    // Lagu selesai diputar: catat sesi riwayat (PRD B2.7:
+    // selesai dihitung walau di bawah ambang 10 detik).
+    await this.finishHistorySession(true);
     const queue = queueFromStore();
     const state = usePlayerStore.getState();
     if (state.repeat === 'one') {
@@ -737,6 +764,7 @@ export class PlayerService {
     this.port.pause();
     this.currentKind = null;
     this.mediaSession.clear();
+    void this.finishHistorySession(false);
     usePlayerStore.getState().setPlayerState({
       status: 'idle',
       position: 0,
@@ -746,7 +774,19 @@ export class PlayerService {
       errorMessage: null,
       notice: null,
     });
-    clearPersistedPlayerState();
+    this.clearStoredQueue();
+  }
+
+  /** Kosongkan antrean + status pemutar tersimpan di IndexedDB. */
+  private clearStoredQueue(): void {
+    void getLibraryService()
+      .then(async (service) => {
+        await service.clearQueue();
+        await service.clearPlaybackState();
+      })
+      .catch(() => {
+        // IndexedDB tidak tersedia: tidak ada yang perlu dibersihkan.
+      });
   }
 
   // ---------- Watchdog + pra-resolve ----------
@@ -804,25 +844,44 @@ export class PlayerService {
     }
   }
 
-  // ---------- Pulih + simpan ----------
+  // ---------- Pulih + simpan (IndexedDB, P3) ----------
 
-  private restore(): void {
-    const saved = loadPersistedPlayerState();
-    if (!saved) {
+  /**
+   * Pulihkan antrean dari IndexedDB. Sebelum itu, migrasi satu
+   * kali antrean localStorage lama (P2) bila masih ada. Gagal
+   * buka database (mode privat) berarti mulai kosong, bukan crash.
+   * Restore hanya diterapkan bila antrean masih kosong, supaya
+   * tidak menimpa antrean yang sudah dibuat pengguna.
+   */
+  private async restore(): Promise<void> {
+    let restored: Awaited<ReturnType<typeof restoreQueueState>> = null;
+    try {
+      const service = await getLibraryService();
+      try {
+        await migrateLocalStorageQueue(service);
+      } catch {
+        // Migrasi gagal: lanjut restore IndexedDB apa adanya.
+      }
+      restored = await restoreQueueState(service);
+    } catch {
+      restored = null;
+    }
+    if (!restored) {
       this.port.setRate(1);
       this.port.setVolume(1);
       return;
     }
-    let { orderPos } = saved;
-    let position = saved.positionSeconds;
+    if (usePlayerStore.getState().queue.length > 0) return;
+    let { orderPos } = restored;
+    let position = restored.positionSeconds;
     const track =
-      saved.queue[saved.order[orderPos]] ?? null;
+      restored.tracks[restored.order[orderPos]] ?? null;
     const decision = decideRestorePosition(
-      saved.positionSeconds,
+      restored.positionSeconds,
       track?.durationSeconds,
     );
     if (decision.action === 'next') {
-      if (orderPos < saved.order.length - 1) {
+      if (orderPos < restored.order.length - 1) {
         orderPos += 1;
         position = 0;
       } else {
@@ -831,44 +890,40 @@ export class PlayerService {
     } else {
       position = decision.position;
     }
-    const restoredTrack = saved.queue[saved.order[orderPos]] ?? null;
+    const restoredTrack = restored.tracks[restored.order[orderPos]] ?? null;
     usePlayerStore.getState().setPlayerState({
-      queue: saved.queue,
-      order: saved.order,
+      queue: restored.tracks,
+      order: restored.order,
       orderPos,
       status: 'paused',
       position,
       duration: restoredTrack?.durationSeconds ?? 0,
-      shuffle: saved.shuffle,
-      repeat: saved.repeat,
-      rate: saved.rate,
-      volume: saved.volume,
+      shuffle: restored.shuffle,
+      repeat: restored.repeat,
+      rate: restored.rate,
+      volume: restored.volume,
     });
-    this.port.setRate(saved.rate);
-    this.graph.setVolume(saved.volume);
-    this.port.setVolume(saved.volume);
+    this.port.setRate(restored.rate);
+    this.graph.setVolume(restored.volume);
+    this.port.setVolume(restored.volume);
     if (restoredTrack) {
       this.mediaSession.setTrack(restoredTrack);
       this.mediaSession.setPlaybackState('paused');
     }
   }
 
-  private buildPersisted(): PersistedPlayerState | null {
+  private buildQueueState(): QueueStateToSave | null {
     const s = usePlayerStore.getState();
     if (s.queue.length === 0) return null;
-    const sanitized = sanitizeQueueForSave(s.queue, s.order, s.orderPos);
-    if (!sanitized) return null;
     return {
-      version: 1,
-      queue: sanitized.queue,
-      order: sanitized.order,
-      orderPos: sanitized.orderPos,
+      tracks: s.queue,
+      order: s.order,
+      orderPos: s.orderPos,
       positionSeconds: s.position,
       shuffle: s.shuffle,
       repeat: s.repeat,
       rate: s.rate,
       volume: s.volume,
-      updatedAt: Date.now(),
     };
   }
 
@@ -880,11 +935,112 @@ export class PlayerService {
     }, PERSIST_DEBOUNCE_MS);
   }
 
+  /**
+   * Simpan antrean ke IndexedDB. Tulis dirantai berurutan supaya
+   * dua simpan tidak saling menyela (transaksi Dexie berurutan).
+   * State dibaca saat giliran tulis tiba, jadi simpan yang
+   * menumpuk otomatis memakai state terbaru. Gagal simpan tidak
+   * pernah merusak pemutaran; kesempatan berikutnya mencoba lagi.
+   */
   private persistNow(): void {
-    const persisted = this.buildPersisted();
-    if (!persisted) return;
-    if (savePersistedPlayerState(persisted)) {
-      this.lastPersistAt = Date.now();
+    this.persistChain = this.persistChain
+      .then(async () => {
+        const state = this.buildQueueState();
+        if (!state) return;
+        try {
+          const service = await getLibraryService();
+          await saveQueueState(service, state);
+          this.lastPersistAt = Date.now();
+        } catch {
+          // Simpan gagal (mis. IndexedDB penuh): abaikan, coba lagi
+          // di kesempatan berikutnya.
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  // ---------- Riwayat putar (P3) ----------
+
+  /**
+   * Mulai sesi riwayat untuk lagu yang akan diputar + simpan
+   * metadata lagunya (bukan ke Library). Lagu lokal blob/data
+   * dilewati: id-nya tidak bisa dipulihkan sesudah tutup browser.
+   */
+  private startHistorySession(track: Track): void {
+    const isRestorableLocal =
+      track.source.kind === 'local' &&
+      !track.source.url.startsWith('blob:') &&
+      !track.source.url.startsWith('data:');
+    const upsertDone =
+      track.source.kind === 'stream' || isRestorableLocal
+        ? getLibraryService()
+            .then((service) =>
+              service.upsertSong(
+                {
+                  id: track.id,
+                  title: track.title,
+                  albumId: null,
+                  durationSeconds: track.durationSeconds ?? null,
+                  thumbnailUrl: track.artwork ?? null,
+                  liked: 0,
+                  totalPlayTimeMs: 0,
+                  inLibrary: 0,
+                  downloadState: 0,
+                  filePath: null,
+                  fileSizeBytes: null,
+                  downloadedAt: null,
+                  formatId: null,
+                  unplayable: 0,
+                },
+                {
+                  artistNames: track.artist ? [track.artist] : [],
+                  addToLibrary: false,
+                },
+              ),
+            )
+            .catch(() => undefined)
+        : Promise.resolve();
+    this.historySession = {
+      trackId: track.id,
+      accumulatedMs: 0,
+      countingSince: null,
+      upsertDone,
+    };
+  }
+
+  /** Akumulasikan waktu putar sejak terakhir dihitung. */
+  private accumulateHistory(): void {
+    const session = this.historySession;
+    if (!session || session.countingSince === null) return;
+    session.accumulatedMs += Date.now() - session.countingSince;
+    session.countingSince = null;
+  }
+
+  /**
+   * Tutup sesi riwayat lagu saat ini. Dicatat bila lagu diputar
+   * minimal 10 detik (PRD B2.7) atau sampai selesai (`completed`).
+   * Menunggu upsert metadata selesai dulu supaya total waktu
+   * putar lagu ikut terhitung.
+   */
+  private async finishHistorySession(completed: boolean): Promise<void> {
+    const session = this.historySession;
+    if (!session) return;
+    // Akumulasi DULU selagi sesi masih terpasang, baru lepas.
+    this.accumulateHistory();
+    this.historySession = null;
+    const playTimeMs = Math.round(session.accumulatedMs);
+    if (playTimeMs <= 0) return;
+    if (!completed && playTimeMs < MIN_PLAY_EVENT_MS) return;
+    try {
+      await session.upsertDone;
+      const service = await getLibraryService();
+      await service.recordPlay({
+        songId: session.trackId,
+        timestamp: Date.now(),
+        playTimeMs,
+      });
+    } catch {
+      // Gagal catat riwayat tidak boleh merusak pemutaran.
     }
   }
 
@@ -894,6 +1050,7 @@ export class PlayerService {
     for (const fn of this.detachPort) fn();
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     window.removeEventListener('beforeunload', this.onBeforeUnload);
+    window.removeEventListener('pagehide', this.onPageHide);
     this.port.dispose();
     this.initialized = false;
   }

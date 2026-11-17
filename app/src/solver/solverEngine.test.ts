@@ -64,7 +64,13 @@ import {
 async function initEngine(script: PlayerScript): Promise<QuickJsEngine> {
   const engine = new QuickJsEngine();
   await engine.ensureReady();
-  const init = engine.eval(buildSolverInitScript(script));
+  // Init mengevaluasi base.js penuh (~2,6 MiB): di browser nyata
+  // ~2,7 dtk (S1), tapi di VM ini (Node + WASM, CPU bersama 1,5 core)
+  // bisa melewati batas produksi 10 dtk saat suite berjalan paralel.
+  // Tenggat init dinaikkan ke 60 dtk HANYA di tes ini; evaluasi solve
+  // tetap memakai batas produksi 10 dtk, dan jalur produksi tidak
+  // berubah (default QuickJsLimits.timeoutMs).
+  const init = engine.eval(buildSolverInitScript(script), 60_000);
   expect(init.ok, `init ${script.hash} gagal: ${init.error}`).toBe(true);
   return engine;
 }

@@ -23,6 +23,7 @@ import { formatTime } from '../player/format';
 import { PLAYBACK_RATES } from '../player/types';
 import { strings } from '../strings/id';
 import QueueList from './QueueList';
+import FavoriteButton from './library/FavoriteButton';
 
 function formatRate(rate: number): string {
   return `${rate}x`.replace('.0x', 'x');
@@ -126,6 +127,16 @@ export default function FullPlayer() {
           {track.artist && (
             <p className="mt-1 text-sm text-zinc-400">{track.artist}</p>
           )}
+          <div className="mt-2 flex justify-center">
+            <FavoriteButton
+              songId={track.id}
+              title={track.title}
+              artist={track.artist}
+              durationSeconds={track.durationSeconds ?? null}
+              artwork={track.artwork ?? null}
+              testId="full-favorite"
+            />
+          </div>
         </div>
 
         {/* Bilah cari: angka mengikuti seret, seek dikirim saat lepas. */}

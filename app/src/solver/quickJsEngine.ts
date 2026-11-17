@@ -78,15 +78,19 @@ export class QuickJsEngine {
   }
 
   /**
-   * Evaluasi `code` di konteks solver dengan tenggat 10 detik.
+   * Evaluasi `code` di konteks solver dengan tenggat `timeoutMs`
+   * (default batas produksi 10 detik dari `QuickJsLimits`).
+   * Pemanggil tes boleh menaikkan tenggat untuk evaluasi init yang
+   * berat (base.js penuh ~2,6 MiB) di lingkungan lambat; jalur
+   * produksi SELALU memakai default dan perilakunya tidak berubah.
    * Mengembalikan nilai penyelesaian sebagai string (bila string),
    * atau string kosong untuk nilai bukan string (dipakai init).
    */
-  eval(code: string): EvalOutcome {
+  eval(code: string, timeoutMs: number = QuickJsLimits.timeoutMs): EvalOutcome {
     if (!this.context) {
       return { ok: false, error: 'mesin solver belum siap' };
     }
-    this.deadlineMs = Date.now() + QuickJsLimits.timeoutMs;
+    this.deadlineMs = Date.now() + timeoutMs;
     try {
       const result = this.context.evalCode(code);
       if (result.error !== undefined) {
