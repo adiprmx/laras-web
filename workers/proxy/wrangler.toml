@@ -1,0 +1,9 @@
+name = "laras-proxy-spike"
+main = "src/index.js"
+compatibility_date = "2026-11-17"
+
+# Deployment spike memakai API langsung (cfw_t.py), bukan wrangler,
+# supaya tidak menambah dependensi npm. File ini adalah dokumentasi
+# konfigurasi untuk deployment produksi nanti.
+[vars]
+ALLOWED_ORIGINS = "https://laras.adipmusic.my.id,http://127.0.0.1:4173,https://preview.laras-web.pages.dev"

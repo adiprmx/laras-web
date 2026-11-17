@@ -1,0 +1,26 @@
+{
+  "at": "2026-11-17T15:37:29.937Z",
+  "file": "media/gv251-first1m.webm (1.048.576 byte pertama itag 251 dari googlevideo)",
+  "url": "http://127.0.0.1:4181/gv251-first1m.webm",
+  "serviceWorker": "TIDAK dipakai (uji format murni)",
+  "playResult": {
+    "played": true
+  },
+  "ms": 2452,
+  "state": {
+    "src": "http://127.0.0.1:4181/gv251-first1m.webm",
+    "duration": 268.461,
+    "currentTime": 1.496315,
+    "paused": false,
+    "readyState": 4,
+    "buffered": [
+      [
+        0,
+        268.461
+      ]
+    ],
+    "error": null
+  },
+  "consoleErrors": [],
+  "verdict": "FORMAT TERBUKTI DIPUTAR"
+}

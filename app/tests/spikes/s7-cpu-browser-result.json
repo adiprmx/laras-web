@@ -1,0 +1,30 @@
+{
+  "origin": "http://127.0.0.1:4173/",
+  "proxy": "https://laras-proxy-spike.hiroohengkerr.workers.dev",
+  "at": "2026-11-17T15:39:09.676Z",
+  "results": [
+    {
+      "label": "OPTIONS preflight (baca header CPU)",
+      "ok": true,
+      "ms": 13151,
+      "status": 204,
+      "cpuMs": "0.000"
+    },
+    {
+      "label": "GET rute tidak dikenal 404 (baca header CPU)",
+      "ok": true,
+      "ms": 2047,
+      "status": 404,
+      "code": "NOT_FOUND",
+      "cpuMs": "0.000"
+    },
+    {
+      "label": "GET player-script (baca header CPU)",
+      "ok": true,
+      "ms": 2942,
+      "status": 200,
+      "bytes": 3037039,
+      "cpuMs": "0.000"
+    }
+  ]
+}

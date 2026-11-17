@@ -1,0 +1,3 @@
+# Cloudflare Pages: semua rute dilayani index.html (SPA fallback).
+# Tanpa ini, rute /spike mengembalikan 404 di preview dan produksi.
+/* /index.html 200

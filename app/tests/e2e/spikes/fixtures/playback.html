@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#000000" />
+    <title>Spike Pemutaran Laras</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <style>
+      body { background: #000; color: #f4f4f5; font-family: system-ui, sans-serif; margin: 0; padding: 24px; }
+      h1 { font-size: 20px; }
+      p { color: #a1a1aa; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <h1 id="judul">Halaman spike pemutaran Laras</h1>
+    <p id="keterangan">Halaman ini hanya untuk pengujian otomatis, bukan bagian dari aplikasi.</p>
+    <audio id="player" preload="auto"></audio>
+    <script>
+      // API harness spike S3/S5/S9. Dipanggil dari spesifikasi Playwright
+      // lewat page.evaluate. Bukan kode aplikasi.
+      (() => {
+        let audio = document.getElementById('player');
+        let events = [];
+        let ctx = null;
+        let analyser = null;
+        let graphConnected = false;
+        const msInvocations = [];
+
+        const EVENT_NAMES = [
+          'loadstart', 'loadedmetadata', 'loadeddata', 'canplay',
+          'canplaythrough', 'playing', 'waiting', 'stalled', 'suspend',
+          'pause', 'ended', 'error', 'seeking', 'seeked', 'ratechange',
+        ];
+
+        function attach(el) {
+          for (const name of EVENT_NAMES) {
+            el.addEventListener(name, () => {
+              events.push({
+                ev: name,
+                t: Math.round(performance.now()),
+                ct: +el.currentTime.toFixed(3),
+                rs: el.readyState,
+                err: el.error ? el.error.code : 0,
+              });
+              // TEMUAN SPIKE S3/S9: Chromium TIDAK memperbarui
+              // navigator.mediaSession.playbackState otomatis dari
+              // elemen media (tetap 'none' saat lagu berbunyi, terukur
+              // 17 Nov 2026). App produksi WAJIB menyetelnya eksplisit
+              // di handler play/pause/ended; harness meniru perilaku itu.
+              if ('mediaSession' in navigator) {
+                if (name === 'playing') navigator.mediaSession.playbackState = 'playing';
+                else if (name === 'pause') navigator.mediaSession.playbackState = 'paused';
+                else if (name === 'ended') navigator.mediaSession.playbackState = 'none';
+              }
+            });
+          }
+        }
+        attach(audio);
+
+        function bufferedEnd() {
+          if (!audio.buffered.length) return 0;
+          return +audio.buffered.end(audio.buffered.length - 1).toFixed(2);
+        }
+
+        window.__spike = {
+          /** Ganti elemen audio dengan yang baru (createMediaElementSource
+           * hanya boleh sekali per elemen, jadi tiap skenario graph butuh
+           * elemen segar). */
+          newAudio() {
+            if (ctx) { try { void ctx.close(); } catch (_) { /* abaikan */ } }
+            ctx = null; analyser = null; graphConnected = false;
+            const fresh = document.createElement('audio');
+            fresh.id = 'player';
+            fresh.preload = 'auto';
+            audio.replaceWith(fresh);
+            audio = fresh;
+            events = [];
+            attach(audio);
+            return true;
+          },
+
+          load(url) {
+            events = [];
+            audio.src = url;
+            audio.load();
+            return true;
+          },
+
+          async play() {
+            try {
+              await audio.play();
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, name: e.name, message: e.message };
+            }
+          },
+
+          pause() { audio.pause(); return true; },
+
+          seekTo(seconds) {
+            audio.currentTime = seconds;
+            return true;
+          },
+
+          setRate(rate) {
+            audio.playbackRate = rate;
+            return audio.playbackRate;
+          },
+
+          state() {
+            return {
+              ct: +audio.currentTime.toFixed(3),
+              dur: Number.isFinite(audio.duration) ? +audio.duration.toFixed(3) : null,
+              paused: audio.paused,
+              ended: audio.ended,
+              rs: audio.readyState,
+              ns: audio.networkState,
+              decoded: audio.webkitAudioDecodedByteCount || 0,
+              bufferedEnd: bufferedEnd(),
+              err: audio.error ? audio.error.code : 0,
+              src: audio.currentSrc ? 'terpasang' : 'kosong',
+            };
+          },
+
+          events() { return events.slice(); },
+          resetEvents() { events = []; return true; },
+
+          setMediaSession(meta) {
+            if (!('mediaSession' in navigator)) return { supported: false };
+            navigator.mediaSession.metadata = new MediaMetadata({
+              title: meta.title,
+              artist: meta.artist,
+              album: meta.album,
+              artwork: [{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' }],
+            });
+            const handlers = {
+              play: () => { msInvocations.push('play'); void audio.play(); },
+              pause: () => { msInvocations.push('pause'); audio.pause(); },
+              previoustrack: () => { msInvocations.push('previoustrack'); },
+              nexttrack: () => { msInvocations.push('nexttrack'); },
+              seekto: (d) => {
+                msInvocations.push('seekto:' + (d && d.seekTime));
+                if (d && typeof d.seekTime === 'number') audio.currentTime = d.seekTime;
+              },
+            };
+            for (const [action, fn] of Object.entries(handlers)) {
+              try { navigator.mediaSession.setActionHandler(action, fn); }
+              catch (_) { /* aksi tidak didukung browser ini */ }
+            }
+            return { supported: true };
+          },
+
+          mediaSessionInfo() {
+            if (!('mediaSession' in navigator)) return { supported: false };
+            const md = navigator.mediaSession.metadata;
+            return {
+              supported: true,
+              title: md ? md.title : null,
+              artist: md ? md.artist : null,
+              album: md ? md.album : null,
+              playbackState: navigator.mediaSession.playbackState,
+              invocations: msInvocations.slice(),
+            };
+          },
+
+          /** Sambungkan graph Web Audio: elemen -> analyser -> tujuan.
+           * Mengembalikan status konteks. Hanya boleh sekali per elemen. */
+          connectGraph() {
+            if (graphConnected) return { ok: true, reused: true, ctxState: ctx.state };
+            if (typeof AudioContext === 'undefined') return { ok: false, reason: 'tanpa AudioContext' };
+            ctx = new AudioContext();
+            const source = ctx.createMediaElementSource(audio);
+            analyser = ctx.createAnalyser();
+            analyser.fftSize = 2048;
+            source.connect(analyser);
+            analyser.connect(ctx.destination);
+            graphConnected = true;
+            return { ok: true, reused: false, ctxState: ctx.state };
+          },
+
+          async resumeGraph() {
+            if (!ctx) return { ok: false };
+            if (ctx.state !== 'running') { try { await ctx.resume(); } catch (_) { /* abaikan */ } }
+            return { ok: true, ctxState: ctx.state };
+          },
+
+          /** Sampel data frekuensi analyser selama durationMs.
+           * max > 0 berarti graph mengeluarkan suara; max 0 berarti sunyi
+           * (graph tercemar CORS atau elemen tidak memutar apa pun). */
+          analyserSample(durationMs) {
+            return new Promise((resolve) => {
+              if (!analyser) { resolve({ ok: false, reason: 'graph belum tersambung' }); return; }
+              const data = new Uint8Array(analyser.frequencyBinCount);
+              let max = 0;
+              let sum = 0;
+              let samples = 0;
+              let nonZeroMax = 0;
+              const started = performance.now();
+              const tick = () => {
+                analyser.getByteFrequencyData(data);
+                let nonZero = 0;
+                for (let i = 0; i < data.length; i++) {
+                  if (data[i] > max) max = data[i];
+                  sum += data[i];
+                  if (data[i] > 0) nonZero++;
+                }
+                if (nonZero > nonZeroMax) nonZeroMax = nonZero;
+                samples++;
+                if (performance.now() - started < durationMs) {
+                  setTimeout(tick, 100);
+                } else {
+                  resolve({
+                    ok: true,
+                    samples,
+                    max,
+                    avg: samples ? +(sum / (samples * data.length)).toFixed(3) : 0,
+                    nonZeroBinsMax: nonZeroMax,
+                    bins: data.length,
+                  });
+                }
+              };
+              tick();
+            });
+          },
+
+          disconnectGraph() {
+            if (ctx) { void ctx.close().catch(() => {}); }
+            ctx = null; analyser = null; graphConnected = false;
+            return true;
+          },
+
+          /** Uji fetch CORS dari halaman (deteksi runtime arsitektur §3.4).
+           * Mengembalikan ok:true bila respons terbaca (CORS terbuka). */
+          async probeFetchCors(url, withRange) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 25000);
+            try {
+              const headers = {};
+              if (withRange) headers.Range = 'bytes=0-999';
+              const res = await fetch(url, {
+                mode: 'cors',
+                headers,
+                signal: controller.signal,
+              });
+              const buf = await res.arrayBuffer();
+              return { ok: true, status: res.status, bytes: buf.byteLength };
+            } catch (e) {
+              return { ok: false, name: e.name, message: String(e.message || e).slice(0, 160) };
+            } finally {
+              clearTimeout(timer);
+            }
+          },
+
+          async registerSW() {
+            if (!('serviceWorker' in navigator)) return { supported: false };
+            try {
+              const reg = await navigator.serviceWorker.register('/sw.js');
+              return {
+                supported: true,
+                registered: true,
+                scope: reg.scope,
+                active: !!reg.active,
+                installing: !!reg.installing,
+                waiting: !!reg.waiting,
+              };
+            } catch (e) {
+              return { supported: true, registered: false, error: String(e).slice(0, 160) };
+            }
+          },
+
+          async swInfo() {
+            if (!('serviceWorker' in navigator)) return { supported: false };
+            const reg = await navigator.serviceWorker.getRegistration();
+            return {
+              supported: true,
+              hasRegistration: !!reg,
+              active: !!(reg && reg.active),
+              controlling: !!navigator.serviceWorker.controller,
+            };
+          },
+
+          async manifestInfo() {
+            try {
+              const res = await fetch('/manifest.webmanifest');
+              const json = await res.json();
+              return { ok: true, status: res.status, manifest: json };
+            } catch (e) {
+              return { ok: false, error: String(e).slice(0, 160) };
+            }
+          },
+
+          visibility() {
+            return { state: document.visibilityState, hidden: document.hidden };
+          },
+        };
+      })();
+    </script>
+  </body>
+</html>

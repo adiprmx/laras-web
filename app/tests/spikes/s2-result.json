@@ -1,0 +1,100 @@
+{
+  "origin": "http://127.0.0.1:4173/",
+  "videoId": "hhn-nGSuenM",
+  "baseJs": "https://www.youtube.com/s/player/ad8d59ae/player_ias.vflset/en_US/base.js",
+  "at": "2026-11-17T14:39:29.772Z",
+  "results": [
+    {
+      "label": "POST player WEB_REMIX (id 67, sts 20768)",
+      "ok": false,
+      "ms": 9342,
+      "errorName": "TypeError",
+      "errorMessage": "Failed to fetch"
+    },
+    {
+      "label": "POST player MWEB (id 2, sts 20768)",
+      "ok": false,
+      "ms": 2212,
+      "errorName": "TypeError",
+      "errorMessage": "Failed to fetch"
+    },
+    {
+      "label": "POST player ANDROID_VR (id 14, sts 20768)",
+      "ok": false,
+      "ms": 2110,
+      "errorName": "TypeError",
+      "errorMessage": "Failed to fetch"
+    },
+    {
+      "label": "GET base.js (mode cors, baca body)",
+      "ok": false,
+      "ms": 1885,
+      "errorName": "TypeError",
+      "errorMessage": "Failed to fetch"
+    },
+    {
+      "label": "GET base.js (mode no-cors, opaque)",
+      "ok": true,
+      "ms": 2012,
+      "status": 0,
+      "type": "opaque"
+    },
+    {
+      "label": "KONTROL positif: GET lrclib.net/api/search",
+      "ok": false,
+      "ms": 30001,
+      "errorName": "AbortError",
+      "errorMessage": "signal is aborted without reason"
+    },
+    {
+      "label": "KONTROL positif: GET raw.githubusercontent.com player-config.json",
+      "ok": true,
+      "ms": 3227,
+      "status": 200,
+      "bytes": 869,
+      "hasClients": true
+    }
+  ],
+  "consoleErrors": [
+    "Access to fetch at 'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false' from origin 'http://127.0.0.1:4173' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.",
+    "Failed to load resource: net::ERR_FAILED",
+    "Access to fetch at 'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false' from origin 'http://127.0.0.1:4173' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.",
+    "Failed to load resource: net::ERR_FAILED",
+    "Access to fetch at 'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false' from origin 'http://127.0.0.1:4173' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.",
+    "Failed to load resource: net::ERR_FAILED",
+    "Access to fetch at 'https://www.youtube.com/s/player/ad8d59ae/player_ias.vflset/en_US/base.js' from origin 'http://127.0.0.1:4173' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.",
+    "Failed to load resource: net::ERR_FAILED"
+  ],
+  "netEvents": [
+    {
+      "url": "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false",
+      "failure": "net::ERR_FAILED"
+    },
+    {
+      "url": "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false",
+      "failure": "net::ERR_FAILED"
+    },
+    {
+      "url": "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false",
+      "failure": "net::ERR_FAILED"
+    },
+    {
+      "url": "https://www.youtube.com/s/player/ad8d59ae/player_ias.vflset/en_US/base.js",
+      "failure": "net::ERR_FAILED"
+    },
+    {
+      "url": "https://www.youtube.com/s/player/ad8d59ae/player_ias.vflset/en_US/base.js",
+      "status": 200,
+      "acao": null
+    },
+    {
+      "url": "https://lrclib.net/api/search?q=Semua%20Tentang%20Kita",
+      "failure": "net::ERR_ABORTED"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/adiprmx/laras/config-v1/player-config.json",
+      "status": 200,
+      "acao": "*"
+    }
+  ]
+}

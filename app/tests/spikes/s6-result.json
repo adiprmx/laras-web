@@ -1,0 +1,218 @@
+{
+  "at": "2026-11-17T14:42:20.953Z",
+  "sw": {
+    "scope": "http://127.0.0.1:4180/",
+    "controlling": true
+  },
+  "tests": {
+    "A_lokal": {
+      "url": "http://127.0.0.1:4181/test-60s.wav",
+      "playOnline": {
+        "ok": true,
+        "ms": 2285,
+        "value": {
+          "src": "http://127.0.0.1:4181/test-60s.wav",
+          "duration": 60,
+          "currentTime": 2.24531,
+          "paused": false,
+          "readyState": 4,
+          "buffered": [
+            [
+              0,
+              60
+            ]
+          ],
+          "error": null
+        }
+      },
+      "stateAfterOnline": {
+        "src": "http://127.0.0.1:4181/test-60s.wav",
+        "duration": 60,
+        "currentTime": 5.248864,
+        "paused": false,
+        "readyState": 4,
+        "buffered": [
+          [
+            0,
+            60
+          ]
+        ],
+        "error": null
+      },
+      "cacheAfterOnline": {
+        "keys": [
+          {
+            "key": "http://127.0.0.1:4181/test-60s.wav?__laras_range=bytes%3D0-",
+            "status": 0,
+            "type": "opaque"
+          }
+        ],
+        "bodyReadable": "bisa dibaca, 0 byte"
+      },
+      "playOffline": {
+        "ok": true,
+        "ms": 1455,
+        "value": {
+          "src": "http://127.0.0.1:4181/test-60s.wav",
+          "duration": 60,
+          "currentTime": 1.166732,
+          "paused": false,
+          "readyState": 4,
+          "buffered": [
+            [
+              0,
+              60
+            ]
+          ],
+          "error": null
+        }
+      },
+      "seek30": {
+        "ok": true,
+        "ms": 1296,
+        "value": {
+          "src": "http://127.0.0.1:4181/test-60s.wav",
+          "duration": 60,
+          "currentTime": 31.150983,
+          "paused": false,
+          "readyState": 4,
+          "buffered": [
+            [
+              0,
+              60
+            ]
+          ],
+          "error": null
+        }
+      },
+      "seek55": {
+        "ok": true,
+        "ms": 1402,
+        "value": {
+          "src": "http://127.0.0.1:4181/test-60s.wav",
+          "duration": 60,
+          "currentTime": 56.001851,
+          "paused": false,
+          "readyState": 4,
+          "buffered": [
+            [
+              0,
+              60
+            ]
+          ],
+          "error": null
+        }
+      },
+      "stateOfflineEnd": {
+        "src": "http://127.0.0.1:4181/test-60s.wav",
+        "duration": 60,
+        "currentTime": 56.004386,
+        "paused": false,
+        "readyState": 4,
+        "buffered": [
+          [
+            0,
+            60
+          ]
+        ],
+        "error": null
+      }
+    },
+    "B0_googlevideo_tanpa_sw": {
+      "playResult": {
+        "played": false,
+        "playError": "NotSupportedError: Failed to load because no supported source was found."
+      },
+      "playOnline": {
+        "ok": false,
+        "ms": 60226,
+        "label": "putar googlevideo tanpa SW sampai 2 dtk",
+        "value": null
+      },
+      "stateAfter": {
+        "src": "https://rr2---sn-a5mlrnek.googlevideo.com/videoplayback?expire=1794948097&ei=oWf8ar7eCfaTsfIP2YHX-Q8&ip=2a04%3A4e41%3A8%3A32d2%3A%3A219d%3Ab2d2&id=o-ADtog9TA68VvlgvPGYYgadunIdwlQycmalsl_WbMbjb0&itag=251&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=454&met=1794926497%2C&mh=1h&mm=18%2C29&mn=sn-a5mlrnek%2Csn-a5meknzr&ms=aub%2Crdu&mv=m&mvi=2&pl=49&rms=aub%2Caub&pcm2=no&initcwndbps=4955000&bui=AZFAFb_YQr8JFtw0muyF2J_TqSH55kj0B0qgxuAgq8xgMBDM7Zhh2Gpwp9ZArkGnKVuk8IGOc93yuAXW&spc=nfZ8ZkvddpJDWb_yie-R3CwecWIM72x-3bh4BytOYg&vprv=1&svpuc=1&mime=audio%2Fwebm&rqh=1&gir=yes&clen=4808098&dur=268.461&lmt=1791028528145293&mt=1794926279&fvip=1&epbp=1&keepalive=yes&fexp=51565116&c=ANDROID_VR&txp=5532234&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cpcm2%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Cgir%2Cclen%2Cdur%2Clmt&sig=AE0s2JYwRAIgRF0kVMMpfrwCZqayqrQZK5g2_eSXXH3KEpM6xyx2T-ACIDuDbN6biQ0ANA98eWVuft4RvafvpOKJujH9tkodjbRZ&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=APaTxxMwRAIgcHwyNIjbTq0Ovh3NrQMsHHiEeW-FwdbiPRprjXy2h0oCIEENTrhhxJBTYfi7Hb1pMZcp4TVbXx6N-5y3V4su8IuS",
+        "duration": null,
+        "currentTime": 0,
+        "paused": true,
+        "readyState": 0,
+        "buffered": [],
+        "error": {
+          "code": 4,
+          "message": ""
+        }
+      },
+      "net": [
+        {
+          "url": "https://rr2---sn-a5mlrnek.googlevideo.com/videoplayback?expire=1794948097&ei=oWf8ar7eCfaTsfIP2YHX-Q8&ip=2a04%3A4e41%3A8%",
+          "status": 302
+        },
+        {
+          "url": "https://rr1---sn-ajhp55-5p.googlevideo.com/videoplayback?expire=1794948097&ei=oWf8ar7eCfaTsfIP2YHX-Q8&ip=2a04%3A4e41%3A8",
+          "failure": "net::ERR_BLOCKED_BY_ORB"
+        }
+      ]
+    },
+    "B_googlevideo": {
+      "urlHost": "rr2---sn-a5mlrnek.googlevideo.com",
+      "playResult": {
+        "played": false,
+        "playError": "NotSupportedError: Failed to load because no supported source was found."
+      },
+      "playOnline": {
+        "ok": false,
+        "ms": 60173,
+        "label": "putar googlevideo online sampai 2 dtk",
+        "value": null
+      },
+      "stateAfterOnline": {
+        "src": "https://rr2---sn-a5mlrnek.googlevideo.com/videoplayback?expire=1794948097&ei=oWf8ar7eCfaTsfIP2YHX-Q8&ip=2a04%3A4e41%3A8%3A32d2%3A%3A219d%3Ab2d2&id=o-ADtog9TA68VvlgvPGYYgadunIdwlQycmalsl_WbMbjb0&itag=251&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=454&met=1794926497%2C&mh=1h&mm=18%2C29&mn=sn-a5mlrnek%2Csn-a5meknzr&ms=aub%2Crdu&mv=m&mvi=2&pl=49&rms=aub%2Caub&pcm2=no&initcwndbps=4955000&bui=AZFAFb_YQr8JFtw0muyF2J_TqSH55kj0B0qgxuAgq8xgMBDM7Zhh2Gpwp9ZArkGnKVuk8IGOc93yuAXW&spc=nfZ8ZkvddpJDWb_yie-R3CwecWIM72x-3bh4BytOYg&vprv=1&svpuc=1&mime=audio%2Fwebm&rqh=1&gir=yes&clen=4808098&dur=268.461&lmt=1791028528145293&mt=1794926279&fvip=1&epbp=1&keepalive=yes&fexp=51565116&c=ANDROID_VR&txp=5532234&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cpcm2%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Cgir%2Cclen%2Cdur%2Clmt&sig=AE0s2JYwRAIgRF0kVMMpfrwCZqayqrQZK5g2_eSXXH3KEpM6xyx2T-ACIDuDbN6biQ0ANA98eWVuft4RvafvpOKJujH9tkodjbRZ&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=APaTxxMwRAIgcHwyNIjbTq0Ovh3NrQMsHHiEeW-FwdbiPRprjXy2h0oCIEENTrhhxJBTYfi7Hb1pMZcp4TVbXx6N-5y3V4su8IuS",
+        "duration": null,
+        "currentTime": 0,
+        "paused": true,
+        "readyState": 0,
+        "buffered": [],
+        "error": {
+          "code": 4,
+          "message": "MEDIA_ELEMENT_ERROR: Format error"
+        }
+      },
+      "cacheAfterOnline": {
+        "keys": [],
+        "bodyReadable": "belum diuji"
+      },
+      "playOffline": {
+        "ok": false,
+        "ms": 30090,
+        "label": "putar googlevideo offline dari cache",
+        "value": null
+      },
+      "seek20": null,
+      "stateOfflineEnd": {
+        "src": "https://rr2---sn-a5mlrnek.googlevideo.com/videoplayback?expire=1794948097&ei=oWf8ar7eCfaTsfIP2YHX-Q8&ip=2a04%3A4e41%3A8%3A32d2%3A%3A219d%3Ab2d2&id=o-ADtog9TA68VvlgvPGYYgadunIdwlQycmalsl_WbMbjb0&itag=251&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=454&met=1794926497%2C&mh=1h&mm=18%2C29&mn=sn-a5mlrnek%2Csn-a5meknzr&ms=aub%2Crdu&mv=m&mvi=2&pl=49&rms=aub%2Caub&pcm2=no&initcwndbps=4955000&bui=AZFAFb_YQr8JFtw0muyF2J_TqSH55kj0B0qgxuAgq8xgMBDM7Zhh2Gpwp9ZArkGnKVuk8IGOc93yuAXW&spc=nfZ8ZkvddpJDWb_yie-R3CwecWIM72x-3bh4BytOYg&vprv=1&svpuc=1&mime=audio%2Fwebm&rqh=1&gir=yes&clen=4808098&dur=268.461&lmt=1791028528145293&mt=1794926279&fvip=1&epbp=1&keepalive=yes&fexp=51565116&c=ANDROID_VR&txp=5532234&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cpcm2%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Cgir%2Cclen%2Cdur%2Clmt&sig=AE0s2JYwRAIgRF0kVMMpfrwCZqayqrQZK5g2_eSXXH3KEpM6xyx2T-ACIDuDbN6biQ0ANA98eWVuft4RvafvpOKJujH9tkodjbRZ&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=APaTxxMwRAIgcHwyNIjbTq0Ovh3NrQMsHHiEeW-FwdbiPRprjXy2h0oCIEENTrhhxJBTYfi7Hb1pMZcp4TVbXx6N-5y3V4su8IuS",
+        "duration": null,
+        "currentTime": 0,
+        "paused": true,
+        "readyState": 0,
+        "buffered": [],
+        "error": {
+          "code": 4,
+          "message": "MEDIA_ELEMENT_ERROR: Format error"
+        }
+      }
+    }
+  },
+  "errors": [
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: net::ERR_FAILED"
+  ],
+  "netLog": [
+    {
+      "url": "https://rr2---sn-a5mlrnek.googlevideo.com/videoplayback?expire=1794948097&ei=oWf8ar7eCfaTsfIP2YHX-Q8&ip=2a04%3A4e41%3A8%",
+      "failure": "net::ERR_FAILED"
+    },
+    {
+      "url": "https://rr2---sn-a5mlrnek.googlevideo.com/videoplayback?expire=1794948097&ei=oWf8ar7eCfaTsfIP2YHX-Q8&ip=2a04%3A4e41%3A8%",
+      "failure": "net::ERR_FAILED"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+MULAI: 2026-11-17 15:45:02 UTC
+
+Running 3 tests using 1 worker
+
+  ✘  1 [chromium] › tests/e2e/spikes/s3-playback.spec.ts:182:3 › S3 pemutaran <audio> + MediaSession › byte Opus asli diputar 90 detik via relay + MediaSession (87ms)
+  -  2 [chromium] › tests/e2e/spikes/s3-playback.spec.ts:255:3 › S3 pemutaran <audio> + MediaSession › lagu penuh sampai habis via relay (Rahasia Hati)
+  -  3 [chromium] › tests/e2e/spikes/s3-playback.spec.ts:313:3 › S3 pemutaran <audio> + MediaSession › seek tengah lagu via relay (Semua Tentang Kita)
+
+
+  1) [chromium] › tests/e2e/spikes/s3-playback.spec.ts:182:3 › S3 pemutaran <audio> + MediaSession › byte Opus asli diputar 90 detik via relay + MediaSession 
+
+    TimeoutError: The operation was aborted due to timeout
+
+    Error Context: test-results/s3-playback-S3-pemutaran-a-25d92-etik-via-relay-MediaSession-chromium/error-context.md
+
+  1 failed
+    [chromium] › tests/e2e/spikes/s3-playback.spec.ts:182:3 › S3 pemutaran <audio> + MediaSession › byte Opus asli diputar 90 detik via relay + MediaSession 
+  2 did not run
+EXIT=1 SELESAI: 2026-11-17 15:45:59 UTC

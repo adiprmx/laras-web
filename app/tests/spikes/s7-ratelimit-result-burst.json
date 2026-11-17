@@ -1,0 +1,769 @@
+{
+  "proxy": "https://laras-proxy-spike.hiroohengkerr.workers.dev",
+  "at": "2026-11-17T15:48:38.307631+00:00",
+  "innertube_limit_per_min": 60,
+  "media_limit_per_min": 10,
+  "innertube": {
+    "kind": "innertube",
+    "n": 70,
+    "conc": 70,
+    "total_ms": 91367,
+    "dist": {
+      "0": 70
+    },
+    "first429": null,
+    "results": [
+      {
+        "i": 1,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.314071+00:00"
+      },
+      {
+        "i": 2,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.321057+00:00"
+      },
+      {
+        "i": 3,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90002,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.324262+00:00"
+      },
+      {
+        "i": 4,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90002,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.326742+00:00"
+      },
+      {
+        "i": 5,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90008,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.327196+00:00"
+      },
+      {
+        "i": 6,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90014,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.332256+00:00"
+      },
+      {
+        "i": 7,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90005,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.350303+00:00"
+      },
+      {
+        "i": 8,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90004,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.366230+00:00"
+      },
+      {
+        "i": 9,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90007,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.371536+00:00"
+      },
+      {
+        "i": 10,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90002,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.374270+00:00"
+      },
+      {
+        "i": 11,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90009,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.373775+00:00"
+      },
+      {
+        "i": 12,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90016,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.378419+00:00"
+      },
+      {
+        "i": 13,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90003,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.379456+00:00"
+      },
+      {
+        "i": 14,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90031,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.403784+00:00"
+      },
+      {
+        "i": 15,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90025,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.385772+00:00"
+      },
+      {
+        "i": 16,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90002,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.389080+00:00"
+      },
+      {
+        "i": 17,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90003,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.396151+00:00"
+      },
+      {
+        "i": 18,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90005,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.403435+00:00"
+      },
+      {
+        "i": 19,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90010,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.406984+00:00"
+      },
+      {
+        "i": 20,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90003,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.406338+00:00"
+      },
+      {
+        "i": 21,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90020,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.440420+00:00"
+      },
+      {
+        "i": 22,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.450297+00:00"
+      },
+      {
+        "i": 23,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90002,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.468331+00:00"
+      },
+      {
+        "i": 24,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.492328+00:00"
+      },
+      {
+        "i": 25,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90003,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.500287+00:00"
+      },
+      {
+        "i": 26,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90000,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.514434+00:00"
+      },
+      {
+        "i": 27,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.522395+00:00"
+      },
+      {
+        "i": 28,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.539548+00:00"
+      },
+      {
+        "i": 29,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90004,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.540087+00:00"
+      },
+      {
+        "i": 30,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90015,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.567363+00:00"
+      },
+      {
+        "i": 31,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.568366+00:00"
+      },
+      {
+        "i": 32,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90005,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.571232+00:00"
+      },
+      {
+        "i": 33,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90003,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.587271+00:00"
+      },
+      {
+        "i": 34,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.628384+00:00"
+      },
+      {
+        "i": 35,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90037,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.733519+00:00"
+      },
+      {
+        "i": 36,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90005,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.807840+00:00"
+      },
+      {
+        "i": 37,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.810350+00:00"
+      },
+      {
+        "i": 38,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90009,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.813785+00:00"
+      },
+      {
+        "i": 39,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90005,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.816391+00:00"
+      },
+      {
+        "i": 40,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90034,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.817604+00:00"
+      },
+      {
+        "i": 41,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90010,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.818177+00:00"
+      },
+      {
+        "i": 42,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90000,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.829710+00:00"
+      },
+      {
+        "i": 43,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90002,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.837382+00:00"
+      },
+      {
+        "i": 44,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.857070+00:00"
+      },
+      {
+        "i": 45,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90009,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.860218+00:00"
+      },
+      {
+        "i": 46,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.862591+00:00"
+      },
+      {
+        "i": 47,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.867278+00:00"
+      },
+      {
+        "i": 48,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90016,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.871290+00:00"
+      },
+      {
+        "i": 49,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.869870+00:00"
+      },
+      {
+        "i": 50,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90005,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.881154+00:00"
+      },
+      {
+        "i": 51,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 64493,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.890566+00:00"
+      },
+      {
+        "i": 52,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 63830,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.896235+00:00"
+      },
+      {
+        "i": 53,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.900576+00:00"
+      },
+      {
+        "i": 54,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 65827,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.909386+00:00"
+      },
+      {
+        "i": 55,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90028,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.914934+00:00"
+      },
+      {
+        "i": 56,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 65482,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.919432+00:00"
+      },
+      {
+        "i": 57,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.011362+00:00"
+      },
+      {
+        "i": 58,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90003,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.962703+00:00"
+      },
+      {
+        "i": 59,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.010199+00:00"
+      },
+      {
+        "i": 60,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 64245,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.016225+00:00"
+      },
+      {
+        "i": 61,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.017323+00:00"
+      },
+      {
+        "i": 62,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.022103+00:00"
+      },
+      {
+        "i": 63,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.025097+00:00"
+      },
+      {
+        "i": 64,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 65220,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.969527+00:00"
+      },
+      {
+        "i": 65,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.969979+00:00"
+      },
+      {
+        "i": 66,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:38.996825+00:00"
+      },
+      {
+        "i": 67,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90004,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.001496+00:00"
+      },
+      {
+        "i": 68,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90002,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.020465+00:00"
+      },
+      {
+        "i": 69,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90001,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.109205+00:00"
+      },
+      {
+        "i": 70,
+        "kind": "innertube",
+        "status": 0,
+        "ms": 90004,
+        "retry_after": null,
+        "cpu_ms": null,
+        "at": "2026-11-17T15:48:39.177444+00:00"
+      }
+    ]
+  },
+  "media": {
+    "kind": "media",
+    "n": 12,
+    "conc": 12,
+    "total_ms": 78834,
+    "dist": {
+      "206": 11,
+      "403": 1
+    },
+    "first429": null,
+    "results": [
+      {
+        "i": 1,
+        "kind": "media",
+        "status": 206,
+        "ms": 75048,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.676402+00:00"
+      },
+      {
+        "i": 2,
+        "kind": "media",
+        "status": 206,
+        "ms": 75581,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.679953+00:00"
+      },
+      {
+        "i": 3,
+        "kind": "media",
+        "status": 206,
+        "ms": 78103,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.683240+00:00"
+      },
+      {
+        "i": 4,
+        "kind": "media",
+        "status": 206,
+        "ms": 78203,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.700464+00:00"
+      },
+      {
+        "i": 5,
+        "kind": "media",
+        "status": 206,
+        "ms": 74533,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.723157+00:00"
+      },
+      {
+        "i": 6,
+        "kind": "media",
+        "status": 206,
+        "ms": 74444,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.739288+00:00"
+      },
+      {
+        "i": 7,
+        "kind": "media",
+        "status": 206,
+        "ms": 71053,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.756744+00:00"
+      },
+      {
+        "i": 8,
+        "kind": "media",
+        "status": 206,
+        "ms": 70745,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.770292+00:00"
+      },
+      {
+        "i": 9,
+        "kind": "media",
+        "status": 206,
+        "ms": 71967,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.772372+00:00"
+      },
+      {
+        "i": 10,
+        "kind": "media",
+        "status": 403,
+        "ms": 78515,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.777254+00:00"
+      },
+      {
+        "i": 11,
+        "kind": "media",
+        "status": 206,
+        "ms": 74327,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.779333+00:00"
+      },
+      {
+        "i": 12,
+        "kind": "media",
+        "status": 206,
+        "ms": 74327,
+        "retry_after": null,
+        "cpu_ms": "0.000",
+        "at": "2026-11-17T15:50:09.781232+00:00"
+      }
+    ]
+  }
+}

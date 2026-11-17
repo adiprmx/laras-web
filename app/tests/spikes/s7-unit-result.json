@@ -1,0 +1,85 @@
+{
+  "at": "2026-11-17T15:44:43.751Z",
+  "worker": "workers/proxy/src/index.js (modul asli, fetch upstream di-stub)",
+  "upstream_calls": 71,
+  "results": [
+    {
+      "label": "Rate limit InnerTube: 60 lolos dari 70",
+      "status": 60,
+      "expect": 60,
+      "pass": true,
+      "note": "429=10, 429 pertama=#61, Retry-After=60"
+    },
+    {
+      "label": "Rate limit InnerTube: 10 ditolak 429",
+      "status": 10,
+      "expect": 10,
+      "pass": true
+    },
+    {
+      "label": "Rate limit InnerTube: 429 pertama di #61",
+      "status": 61,
+      "expect": 61,
+      "pass": true
+    },
+    {
+      "label": "Rate limit InnerTube: Retry-After 60 dtk",
+      "status": "60",
+      "expect": "60",
+      "pass": true
+    },
+    {
+      "label": "Rate limit media: 10 lolos dari 12",
+      "status": 10,
+      "expect": 10,
+      "pass": true,
+      "note": "429=2, 429 pertama=#11"
+    },
+    {
+      "label": "Rate limit media: 2 ditolak 429",
+      "status": 2,
+      "expect": 2,
+      "pass": true
+    },
+    {
+      "label": "Rate limit media: 429 pertama di #11",
+      "status": 11,
+      "expect": 11,
+      "pass": true
+    },
+    {
+      "label": "Cap body POST 1 MB + 7 byte -> 413",
+      "status": 413,
+      "expect": 413,
+      "pass": true,
+      "note": "code=BODY_TOO_BIG"
+    },
+    {
+      "label": "Gerbang host media example.com -> 403",
+      "status": 403,
+      "expect": 403,
+      "pass": true
+    },
+    {
+      "label": "Gerbang hash player 00000000 -> 403",
+      "status": 403,
+      "expect": 403,
+      "pass": true
+    },
+    {
+      "label": "Hash player ad8d59ae lolos -> 200",
+      "status": 200,
+      "expect": 200,
+      "pass": true,
+      "note": "byte=100018"
+    },
+    {
+      "label": "Header x-proxy-cpu-ms < 10 ms (404 + OPTIONS)",
+      "cpu_404_ms": "0.028",
+      "cpu_options_ms": "0.008",
+      "pass": true
+    }
+  ],
+  "passed": 12,
+  "total": 12
+}

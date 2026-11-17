@@ -1,0 +1,16 @@
+MULAI: 2026-11-17 16:26:54 UTC
+
+Running 1 test using 1 worker
+
+  ✘  1 [chromium] › tests/e2e/spikes/s3-playback.spec.ts:370:3 › S3 pemutaran <audio> + MediaSession › ganti sumber di posisi yang sama (mekanisme re-resolve sisi browser) (0ms)
+
+
+  1) [chromium] › tests/e2e/spikes/s3-playback.spec.ts:370:3 › S3 pemutaran <audio> + MediaSession › ganti sumber di posisi yang sama (mekanisme re-resolve sisi browser) 
+
+    TimeoutError: The operation was aborted due to timeout
+
+    Error Context: test-results/s3-playback-S3-pemutaran-a-df7e5-me-re-resolve-sisi-browser--chromium/error-context.md
+
+  1 failed
+    [chromium] › tests/e2e/spikes/s3-playback.spec.ts:370:3 › S3 pemutaran <audio> + MediaSession › ganti sumber di posisi yang sama (mekanisme re-resolve sisi browser) 
+EXIT=1 SELESAI: 2026-11-17 16:27:32 UTC

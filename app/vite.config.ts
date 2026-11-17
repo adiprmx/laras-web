@@ -15,4 +15,10 @@ export default defineConfig({
     // Peta sumber terpisah untuk debugging rilis tanpa membebani bundle.
     sourcemap: true,
   },
+  worker: {
+    // Worker solver dibuat dengan `{ type: 'module' }`; format 'es'
+    // wajib karena format default 'iife' ditolak Vite untuk build
+    // dengan code-splitting (chunk lazy solverClient).
+    format: 'es',
+  },
 });

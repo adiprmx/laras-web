@@ -8,3 +8,7 @@ app/playwright/.cache/
 *.local
 .env
 .env.*
+# Fixture media lokal saja (tidak masuk repo publik):
+# - gv251-first1m.webm = 1 MB pertama audio lagu berhak cipta (bukti uji S6, hanya lokal)
+# - test-60s.wav = fixture WAV 2,6 MB untuk harness manual S6 (hanya lokal)
+app/tests/spikes/media/

@@ -1,8 +1,32 @@
+import { Suspense, lazy } from 'react';
 import { strings } from './strings/id';
+
+// Rute /spike TERSEMBUNYI: halaman uji integrasi P1, hanya untuk
+// verifikasi manual dari browser nyata. Tidak ditautkan dari mana pun
+// di beranda. Lazy-load menjaga bundle awal tetap di bawah anggaran.
+const SpikePage = lazy(() => import('./spike/SpikePage'));
+
+function isSpikeRoute(): boolean {
+  const path = window.location.pathname;
+  return path === '/spike' || path === '/spike/';
+}
 
 // P0: skeleton beranda — kosong yang jujur, tanpa data contoh.
 // P2-P4 mengisi beranda dengan seksi nyata (lokal dulu, jaringan belakangan).
 export default function App() {
+  if (isSpikeRoute()) {
+    return (
+      <Suspense
+        fallback={
+          <div className="min-h-dvh bg-black px-4 py-16 text-center text-sm text-zinc-400">
+            Memuat halaman uji.
+          </div>
+        }
+      >
+        <SpikePage />
+      </Suspense>
+    );
+  }
   return (
     <div className="min-h-dvh bg-black text-zinc-100">
       <header className="flex items-center justify-between px-4 py-3">

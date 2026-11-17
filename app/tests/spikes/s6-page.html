@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="id">
+<head><meta charset="utf-8"><title>Spike S6</title></head>
+<body>
+<h1>Spike S6 — cache media</h1>
+<audio id="player" muted preload="auto"></audio>
+<pre id="log"></pre>
+<script>
+  const logEl = document.getElementById('log');
+  function log(msg) { logEl.textContent += msg + '\n'; }
+  const audio = document.getElementById('player');
+
+  function swMessage(type) {
+    return new Promise((resolve) => {
+      const ch = new MessageChannel();
+      ch.port1.onmessage = (e) => resolve(e.data);
+      navigator.serviceWorker.controller.postMessage({ type }, [ch.port2]);
+    });
+  }
+
+  // API yang dipakai driver Playwright.
+  window.__s6 = {
+    async registerSw() {
+      const reg = await navigator.serviceWorker.register('/s6-sw.js', { scope: '/' });
+      await navigator.serviceWorker.ready;
+      // Tunggu sampai SW aktif mengendalikan halaman ini.
+      for (let i = 0; i < 50 && !navigator.serviceWorker.controller; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return { scope: reg.scope, controlling: !!navigator.serviceWorker.controller };
+    },
+    inspectCache() { return swMessage('inspect'); },
+    clearCache() { return swMessage('clear'); },
+    audioState() {
+      const b = [];
+      for (let i = 0; i < audio.buffered.length; i++) {
+        b.push([audio.buffered.start(i), audio.buffered.end(i)]);
+      }
+      return {
+        src: audio.currentSrc, duration: audio.duration, currentTime: audio.currentTime,
+        paused: audio.paused, readyState: audio.readyState, buffered: b,
+        error: audio.error ? { code: audio.error.code, message: audio.error.message } : null,
+      };
+    },
+    async playUrl(url) {
+      audio.src = url;
+      audio.load();
+      try {
+        await audio.play();
+        return { played: true };
+      } catch (e) {
+        return { played: false, playError: `${e.name}: ${e.message}` };
+      }
+    },
+    async seekTo(seconds) {
+      audio.currentTime = seconds;
+      return audio.currentTime;
+    },
+    pause() { audio.pause(); },
+  };
+  log('halaman spike siap');
+</script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+{
+  "proxy": "https://laras-proxy-spike.hiroohengkerr.workers.dev",
+  "at_start": "2026-11-17T15:37:01.556774+00:00",
+  "at_end": "2026-11-17T15:39:06.746314+00:00",
+  "parser": "v2 (-w http_code + blok header terakhir)",
+  "gv_url_host": "rr2---sn-a5mlrnek.googlevideo.com",
+  "gv_url_expire_utc": "2026-11-17T20:41:37Z",
+  "results": [
+    {
+      "label": "OPTIONS preflight player",
+      "status": 204,
+      "expect": 204,
+      "pass": true,
+      "cpu_ms": "0.000",
+      "acao": "http://127.0.0.1:4173",
+      "body_preview": "",
+      "allow_methods": "GET, POST, OPTIONS",
+      "allow_headers": "Content-Type, X-YouTube-Client-Name, X-YouTube-Client-Version, Range",
+      "expose_headers": "x-proxy-cpu-ms"
+    },
+    {
+      "label": "GET rute tidak dikenal",
+      "status": 404,
+      "expect": 404,
+      "pass": true,
+      "cpu_ms": "0.000",
+      "acao": "http://127.0.0.1:4173",
+      "body_preview": "{\"success\":false,\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"Endpoint tidak ditemukan\"}}"
+    },
+    {
+      "label": "GET /api/innertube/player",
+      "status": 405,
+      "expect": 405,
+      "pass": true,
+      "cpu_ms": "0.000",
+      "acao": "http://127.0.0.1:4173",
+      "body_preview": "{\"success\":false,\"error\":{\"code\":\"METHOD_NOT_ALLOWED\",\"message\":\"Metode tidak diizinkan\"}}"
+    },
+    {
+      "label": "POST body 1 MB + 7 byte",
+      "status": 413,
+      "expect": 413,
+      "pass": true,
+      "cpu_ms": "0.000",
+      "acao": "http://127.0.0.1:4173",
+      "body_preview": "{\"success\":false,\"error\":{\"code\":\"BODY_TOO_BIG\",\"message\":\"Body request melewati 1 MB\"}}",
+      "body_bytes_sent": 1048584
+    },
+    {
+      "label": "GET /api/media tanpa u",
+      "status": 400,
+      "expect": 400,
+      "pass": true,
+      "cpu_ms": "0.000",
+      "acao": "http://127.0.0.1:4173",
+      "body_preview": "{\"success\":false,\"error\":{\"code\":\"MISSING_PARAM\",\"message\":\"Parameter u wajib diisi\"}}"
+    },
+    {
+      "label": "GET /api/media host example.com",
+      "status": 403,
+      "expect": 403,
+      "pass": true,
+      "cpu_ms": "0.000",
+      "acao": "http://127.0.0.1:4173",
+      "body_preview": "{\"success\":false,\"error\":{\"code\":\"HOST_NOT_ALLOWED\",\"message\":\"Host tujuan tidak diizinkan\"}}"
+    },
+    {
+      "label": "GET player-script hash 00000000",
+      "status": 403,
+      "expect": 403,
+      "pass": true,
+      "cpu_ms": "0.000",
+      "acao": "http://127.0.0.1:4173",
+      "body_preview": "{\"success\":false,\"error\":{\"code\":\"HASH_NOT_ALLOWED\",\"message\":\"Hash player tidak ada di allowlist\"}}"
+    },
+    {
+      "label": "GET /api/media Range 0-1023 googlevideo",
+      "status": 206,
+      "expect": 206,
+      "pass": true,
+      "cpu_ms": "0.000",
+      "acao": "http://127.0.0.1:4173",
+      "body_preview": "\u001aE\u00df\u00a3\u009fB\u0086\u0081\u0001B\u00f7\u0081\u0001B\u00f2\u0081\u0004B\u00f3\u0081\bB\u0082\u0084webmB\u0087\u0081\u0004B\u0085\u0081\u0002\u0018S\u0080g\u0001\u0000\u0000\u0000\u0000I]r\u0011M\u009bt\u00bfM\u00bb\u0092S\u00ab\u0084\u0015I\u00a9fS\u00ac\u0088\u0000\u0000\u0000\u0000\u0000\u0000\u0000DM\u00bb\u0092S\u00ab\u0084\u0016T\u00aekS\u00ac\u0088\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u007fM\u00bb\u0092S\u00ab\u0084\u001cS\u00bbkS\u00ac\u0088\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u00da\u0015I\u00a9f\u00b6*\u00d7\u00b1\u0083\u000fB@D\u0089\u0084H\u0083\u0015\u00a0M\u0080\u0091google/video-fileWA\u0091google/video-file\u0016T\u00aek\u00d6\u00ae\u00d4\u00d7\u0081\u0001s\u00c5\u00870!%e\u001cS\u00d2\u0083\u0081\u0002\u009c\u0081",
+      "content_range": "bytes 0-1023/4808098",
+      "content_type": "audio/webm",
+      "bytes_received": 1024
+    },
+    {
+      "label": "Sampel CPU 5x OPTIONS",
+      "cpu_samples_ms": [
+        "0.000",
+        "0.000",
+        "0.000",
+        "0.000",
+        "0.000"
+      ]
+    }
+  ],
+  "passed": 8,
+  "total_checks": 8
+}

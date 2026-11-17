@@ -1,0 +1,37 @@
+{
+  "origin": "http://127.0.0.1:4173/",
+  "proxy": "https://laras-proxy-spike.hiroohengkerr.workers.dev",
+  "at": "2026-11-17T15:30:55.426Z",
+  "results": [
+    {
+      "label": "POST player WEB_REMIX lewat proxy (timeout 90 dtk)",
+      "ok": true,
+      "ms": 31419,
+      "status": 200,
+      "playability": "OK",
+      "cpuMs": null,
+      "acao": null
+    },
+    {
+      "label": "POST player ANDROID_VR lewat proxy (timeout 90 dtk)",
+      "ok": true,
+      "ms": 19105,
+      "status": 200,
+      "playability": "LOGIN_REQUIRED",
+      "adaptiveCount": 0,
+      "cpuMs": null,
+      "acao": null
+    },
+    {
+      "label": "GET player-script lewat proxy (header CPU)",
+      "ok": true,
+      "ms": 6795,
+      "status": 200,
+      "bytes": 3037039,
+      "startsWithPlayer": true,
+      "cpuMs": null,
+      "acao": null
+    }
+  ],
+  "consoleErrors": []
+}

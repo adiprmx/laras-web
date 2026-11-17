@@ -1,0 +1,20 @@
+LOLOS S1 jendela tetap 786432 sesudah 403 sekali (window=786432)
+LOLOS S1 tanpa adaptasi (tanpa pemotongan) (adaptasi=[])
+LOLOS S1 tepat 1 kegagalan tercatat (gagal=1)
+LOLOS S1 re-resolve terjadi (re-resolve=3)
+LOLOS S1 total byte diketahui (total=5000000)
+LOLOS S2 jendela dipotong ke 393216 (jendela dipotong ke 393216 byte sesudah Error: upstream HTTP 403 untuk range 0-786431 (0 ms) | jendela dikembalikan ke 786432 byte sesudah 2 sukses beruntun)
+LOLOS S2 jendela dikembalikan ke 786432 (jendela dipotong ke 393216 byte sesudah Error: upstream HTTP 403 untuk range 0-786431 (0 ms) | jendela dikembalikan ke 786432 byte sesudah 2 sukses beruntun)
+LOLOS S2 jendela akhir 786432 (window=786432)
+LOLOS S2 tepat 2 kegagalan tercatat (gagal=2)
+LOLOS S2 byte terlayani > 0 (served=393216)
+LOLOS S3 gagal 3x melempar error
+LOLOS S3 tepat 3 kegagalan tercatat (gagal=3)
+LOLOS S4 jendela ke-2 terambil upstream walau re-resolve sempat gagal (upstream=2359296)
+LOLOS S4 jendela ke-2 terlayani dari cache (fromCache=true len=786432)
+LOLOS S4 kegagalan re-resolve tercatat (gagal=1)
+LOLOS S4 re-resolve akhirnya sukses (re-resolve=2)
+LOLOS S5 gagal 3x melempar walau re-resolve selalu gagal
+LOLOS S5 kegagalan fetch tercatat 3x (gagal=[jendela start=0 percobaan=1 Error: upstream HTTP 403 untuk range 0-786431 (0 ms) | re-resolve gagal sesudah Error: upstream HTTP 403 untuk range 0-786431 (0 ms): Error: TimeoutError: The operation was aborted due to timeout | jendela start=0 percobaan=2 Error: upstream HTTP 403 untuk range 0-786431 (0 ms) | re-resolve gagal sesudah Error: upstream HTTP 403 untuk range 0-786431 (0 ms): Error: TimeoutError: The operation was aborted due to timeout | jendela start=0 percobaan=3 Error: upstream HTTP 403 untuk range 0-393215 (0 ms)])
+LOLOS S5 kegagalan re-resolve tercatat (gagal=[jendela start=0 percobaan=1 Error: upstream HTTP 403 untuk range 0-786431 (0 ms) | re-resolve gagal sesudah Error: upstream HTTP 403 untuk range 0-786431 (0 ms): Error: TimeoutError: The operation was aborted due to timeout | jendela start=0 percobaan=2 Error: upstream HTTP 403 untuk range 0-786431 (0 ms) | re-resolve gagal sesudah Error: upstream HTTP 403 untuk range 0-786431 (0 ms): Error: TimeoutError: The operation was aborted due to timeout | jendela start=0 percobaan=3 Error: upstream HTTP 403 untuk range 0-393215 (0 ms)])
+SEMUA ASEPSI LOLOS

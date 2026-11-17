@@ -1,0 +1,33 @@
+{
+  "origin": "http://127.0.0.1:4173/",
+  "proxy": "https://laras-proxy-spike.hiroohengkerr.workers.dev",
+  "at": "2026-11-17T15:29:34.329Z",
+  "results": [
+    {
+      "label": "POST player WEB_REMIX lewat proxy",
+      "ok": false,
+      "ms": 30002,
+      "errorName": "TimeoutError",
+      "errorMessage": "signal timed out"
+    },
+    {
+      "label": "GET player-script lewat proxy",
+      "ok": true,
+      "ms": 9155,
+      "status": 200,
+      "bytes": 3037039,
+      "startsWithPlayer": true
+    },
+    {
+      "label": "KONTROL: POST player LANGSUNG ke youtubei (harus gagal CORS)",
+      "ok": false,
+      "ms": 24090,
+      "errorName": "TypeError",
+      "errorMessage": "Failed to fetch"
+    }
+  ],
+  "consoleErrors": [
+    "Access to fetch at 'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false' from origin 'http://127.0.0.1:4173' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.",
+    "Failed to load resource: net::ERR_FAILED"
+  ]
+}

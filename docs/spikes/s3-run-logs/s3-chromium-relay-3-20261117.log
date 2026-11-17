@@ -1,0 +1,146 @@
+MULAI: 2026-11-17 16:05:23 UTC
+
+Running 3 tests using 1 worker
+
+resolver siap: sts=20770 visitorData=ada
+resolve hhn-nGSuenM (Semua Tentang Kita): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1133 251 9427 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve qkC4waEZVt4 (Rahasia Hati): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1138 251 7208 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve k2XdBPv0D3Y (Surat Cinta Untuk Starla): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1157 251 8873 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve NL8WUtq_NDY (Ya Sudahlah): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1154 251 13730 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve YsGwU8vTRsE (Tak Ingin Usai): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1141 251 8489 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+[relay] relay layani range=bytes=0- 786432 byte (cache=false)
+relay 90 detik: bunyi pertama (decoded>0) sesudah 164471 ms (didominasi egress VM: chunk pertama ~25-38 detik)
+relay 90 detik: ct=0.014 dur=250.781 paused=false decoded=5933 bufferedEnd=46.97 err=0
+relay 90 detik: ct=10.001 dur=250.781 paused=false decoded=195280 bufferedEnd=46.97 err=0
+relay 90 detik: ct=18.807 dur=250.781 paused=false decoded=338945 bufferedEnd=46.97 err=0
+relay 90 detik: ct=27.611 dur=250.781 paused=false decoded=485847 bufferedEnd=46.97 err=0
+[relay] relay GAGAL range=bytes=786432-: Error: fetch jendela start=786432 gagal 3x: Error: upstream HTTP 403 untuk range 786432-1179647 (6771 ms)
+relay 90 detik: ct=34.731 dur=250.781 paused=true decoded=606303 bufferedEnd=46.97 err=2
+relay 90 detik: FAIL-FAST di ct=34.731, error media kode 2
+relay 90 detik: upstream fetch=4 (28087 ms, 786432 byte), dilayani=1 req (786432 byte, cache hit=0), re-resolve=4 [HTTP-jaringan (39561 ms); anggaran-1MiB (3473 ms); HTTP-403 (1763 ms); HTTP-403 (8616 ms)], adaptasi=[jendela dipotong ke 393216 byte sesudah Error: upstream HTTP 403 untuk range 786432-1572863 (15011 ms)], gagal=4
+  ✘  1 [chromium] › tests/e2e/spikes/s3-playback.spec.ts:182:3 › S3 pemutaran <audio> + MediaSession › byte Opus asli diputar 90 detik via relay + MediaSession (3.4m)
+resolver siap: sts=20770 visitorData=ada
+resolve hhn-nGSuenM (Semua Tentang Kita): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1145 251 14797 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve qkC4waEZVt4 (Rahasia Hati): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1165 251 9714 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve k2XdBPv0D3Y (Surat Cinta Untuk Starla): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1161 251 9165 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve NL8WUtq_NDY (Ya Sudahlah): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1156 251 8165 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve YsGwU8vTRsE (Tak Ingin Usai): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1160 251 8690 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+[relay] relay layani range=bytes=0- 786432 byte (cache=false)
+lagu penuh 1x: ct=0.013 dur=250.781 paused=false decoded=5190 bufferedEnd=46.97 err=0
+lagu penuh 1x: ct=14.601 dur=250.781 paused=false decoded=272695 bufferedEnd=46.97 err=0
+lagu penuh 1x: ct=29.05 dur=250.781 paused=false decoded=508500 bufferedEnd=46.97 err=0
+lagu penuh 1x: ct=43.882 dur=250.781 paused=false decoded=760035 bufferedEnd=46.97 err=0
+lagu penuh 1x: ct=44.696 dur=250.781 paused=false decoded=769947 bufferedEnd=46.97 err=0
+[relay] relay GAGAL range=bytes=786432-: Error: fetch jendela start=786432 gagal 3x: Error: upstream HTTP 403 untuk range 786432-1179647 (12336 ms)
+lagu penuh 1x: ct=44.795 dur=250.781 paused=true decoded=769947 bufferedEnd=46.97 err=2
+lagu penuh 1x: FAIL-FAST di ct=44.795, error media kode 2
+lagu penuh 1x: upstream fetch=4 (66210 ms, 786432 byte), dilayani=1 req (786432 byte, cache hit=0), re-resolve=3 [anggaran-1MiB (1924 ms); HTTP-403 (8090 ms); HTTP-403 (5075 ms)], adaptasi=[jendela dipotong ke 393216 byte sesudah Error: upstream HTTP 403 untuk range 786432-1572863 (15239 ms)], gagal=3
+  ✘  2 [chromium] › tests/e2e/spikes/s3-playback.spec.ts:255:3 › S3 pemutaran <audio> + MediaSession › lagu penuh sampai habis via relay (Rahasia Hati) (1.5m)
+resolver siap: sts=20770 visitorData=ada
+resolve hhn-nGSuenM (Semua Tentang Kita): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1130 251 3509 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve qkC4waEZVt4 (Rahasia Hati): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1148 251 4489 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve k2XdBPv0D3Y (Surat Cinta Untuk Starla): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1138 251 5985 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve NL8WUtq_NDY (Ya Sudahlah): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1149 251 5028 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve YsGwU8vTRsE (Tak Ingin Usai): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1152 251 5566 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+[relay] relay layani range=bytes=0- 786432 byte (cache=false)
+seek: dari ct=5.425 ke 200 detik
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+[relay] relay GAGAL range=bytes=786432-: Error: fetch jendela start=786432 gagal 3x: Error: upstream HTTP 403 untuk range 786432-1179647 (21269 ms)
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+seek: ct=200 paused=false decoded=107179 bufferedEnd=43.91 err=0
+[relay] relay GAGAL range=bytes=3407872-: Error: fetch jendela start=3407872 gagal 3x: Error: upstream HTTP 403 untuk range 3407872-3538943 (4219 ms)
+seek: ct=200 paused=true decoded=107179 bufferedEnd=43.91 err=2
+seek: FAIL-FAST di ct=200, error media kode 2
+seek: upstream fetch=10 (140914 ms, 786432 byte), dilayani=1 req (786432 byte, cache hit=0), re-resolve=7 [anggaran-1MiB (2922 ms); HTTP-403 (5683 ms); HTTP-403 (5824 ms); HTTP-403 (5424 ms); HTTP-403 (12567 ms); HTTP-403 (4974 ms); HTTP-403 (4636 ms)], adaptasi=[jendela dipotong ke 393216 byte sesudah Error: upstream HTTP 403 untuk range 786432-1572863 (10429 ms); jendela dipotong ke 196608 byte sesudah Error: upstream HTTP 403 untuk range 1572864-1966079 (19704 ms); jendela dipotong ke 131072 byte sesudah Error: upstream HTTP 403 untuk range 3407872-3604479 (14919 ms)], gagal=9
+  ✘  3 [chromium] › tests/e2e/spikes/s3-playback.spec.ts:313:3 › S3 pemutaran <audio> + MediaSession › seek tengah lagu via relay (Semua Tentang Kita) (3.2m)
+
+
+  1) [chromium] › tests/e2e/spikes/s3-playback.spec.ts:182:3 › S3 pemutaran <audio> + MediaSession › byte Opus asli diputar 90 detik via relay + MediaSession 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: false
+    Received: true
+
+      236 |       console.log(`relay 90 detik: ${formatRelayStats(relay)}`);
+      237 |     }
+    > 238 |     expect(failedFast90).toBe(false);
+          |                          ^
+      239 |     expect(timedOut90).toBe(false);
+      240 |     expect(last.err).toBe(0);
+      241 |     expect(last.decoded).toBeGreaterThan(0);
+        at /home/hatch/workspace/music-app-web/app/tests/e2e/spikes/s3-playback.spec.ts:238:26
+
+    Error Context: test-results/s3-playback-S3-pemutaran-a-25d92-etik-via-relay-MediaSession-chromium/error-context.md
+
+  2) [chromium] › tests/e2e/spikes/s3-playback.spec.ts:255:3 › S3 pemutaran <audio> + MediaSession › lagu penuh sampai habis via relay (Rahasia Hati) 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: false
+    Received: true
+
+      294 |       console.log(`lagu penuh ${rate}x: ${formatRelayStats(relay)}`);
+      295 |     }
+    > 296 |     expect(failedFast).toBe(false);
+          |                        ^
+      297 |     expect(timedOut).toBe(false);
+      298 |     expect(last.ended).toBe(true);
+      299 |     expect(last.err).toBe(0);
+        at /home/hatch/workspace/music-app-web/app/tests/e2e/spikes/s3-playback.spec.ts:296:24
+
+    Error Context: test-results/s3-playback-S3-pemutaran-a-71a73-bis-via-relay-Rahasia-Hati--chromium/error-context.md
+
+  3) [chromium] › tests/e2e/spikes/s3-playback.spec.ts:313:3 › S3 pemutaran <audio> + MediaSession › seek tengah lagu via relay (Semua Tentang Kita) 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: false
+    Received: true
+
+      360 |       console.log(`seek: ${formatRelayStats(relay)}`);
+      361 |     }
+    > 362 |     expect(failedFast).toBe(false);
+          |                        ^
+      363 |     expect(timedOut).toBe(false);
+      364 |     expect(last.err).toBe(0);
+      365 |     expect(last.decoded).toBeGreaterThan(beforeSeek.decoded);
+        at /home/hatch/workspace/music-app-web/app/tests/e2e/spikes/s3-playback.spec.ts:362:24
+
+    Error Context: test-results/s3-playback-S3-pemutaran-a-cfa55-a-relay-Semua-Tentang-Kita--chromium/error-context.md
+
+  3 failed
+    [chromium] › tests/e2e/spikes/s3-playback.spec.ts:182:3 › S3 pemutaran <audio> + MediaSession › byte Opus asli diputar 90 detik via relay + MediaSession 
+    [chromium] › tests/e2e/spikes/s3-playback.spec.ts:255:3 › S3 pemutaran <audio> + MediaSession › lagu penuh sampai habis via relay (Rahasia Hati) 
+    [chromium] › tests/e2e/spikes/s3-playback.spec.ts:313:3 › S3 pemutaran <audio> + MediaSession › seek tengah lagu via relay (Semua Tentang Kita) 
+EXIT=1 SELESAI: 2026-11-17 16:16:38 UTC

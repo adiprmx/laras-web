@@ -1,0 +1,15 @@
+MULAI: 2026-11-17 16:40:10 UTC
+
+Running 1 test using 1 worker
+
+resolver siap: sts=20770 visitorData=ada
+resolve hhn-nGSuenM (Semua Tentang Kita): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1128 251 25387 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve qkC4waEZVt4 (Rahasia Hati): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1148 251 35829 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve k2XdBPv0D3Y (Surat Cinta Untuk Starla): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1153 251 33627 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve NL8WUtq_NDY (Ya Sudahlah): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1141 251 31156 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+resolve YsGwU8vTRsE (Tak Ingin Usai): ANDROID_VR host=*.googlevideo.com itag=251 urlLen=1155 251 27585 ms percobaan=[WEB_REMIX:OK/itag251/directT/cipherY, MWEB:OK/itag251/directT/cipherY, ANDROID_VR:OK/itag251/directY/cipherT]
+ganti sumber: posisi swap=8.21 detik, lanjut di ct=11.34 sesudah 3291 ms (termasuk muat ulang + seek)
+  ✓  1 [chromium] › tests/e2e/spikes/s3-playback.spec.ts:370:3 › S3 pemutaran <audio> + MediaSession › ganti sumber di posisi yang sama (mekanisme re-resolve sisi browser) (12.6s)
+
+  1 passed (3.5m)
+EXIT=0 SELESAI: 2026-11-17 16:43:41 UTC
