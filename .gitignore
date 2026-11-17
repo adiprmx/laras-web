@@ -1,0 +1,10 @@
+hidden_files/
+node_modules/
+app/dist/
+app/coverage/
+app/test-results/
+app/playwright-report/
+app/playwright/.cache/
+*.local
+.env
+.env.*
