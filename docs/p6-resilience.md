@@ -468,3 +468,35 @@ tanpa cacat di kedua lebar.
   (unit hijau, E2E menunggu jendela); R-36 tanpa
   klaim palsu; R-38 tanpa placeholder tersamar
   (empty state jujur: "Belum ada kegagalan tercatat").
+
+## Addendum koordinator — perbaikan pasca-CI (19 Nov 2026)
+
+CI run 44403155867 untuk commit P6 (`1433effb`) GAGAL di job e2e
+(dua attempt: 146 lalu 144 lolos; job check hijau keduanya).
+Kegagalan HANYA di `downloads.spec.ts` + `p5-screenshots.spec.ts`,
+selalu lagu pertama, selalu `download-row-p5test0001/0002` tidak
+muncul dalam 60 dtk; tes P6 sendiri (resilience + p6-screenshots)
+lolos semua di kedua attempt. Diagnosis koordinator menemukan DUA
+penyebab, keduanya BUKAN kode P6:
+
+1. **Bug produk di P5 (`chunkedDownloader.ts`) — resume di ujung
+   file.** Reload halaman sesudah semua chunk terambil tapi sebelum
+   rakit membuat resume mengambil chunk di offset == total; server
+   membalas kosong, dan `downloadChunked` melempar
+   `RetryableError('Server membalas tanpa byte')` karena cek ujung
+   file hanya melihat kemajuan sesi ini (`chunksDownloaded > 0`).
+   Perbaikan: chunk kosong adalah ujung file bila ada kemajuan
+   apa pun, termasuk byte tersimpan dari sesi sebelumnya
+   (`startByte > 0`); unduhan baru dari 0 yang dibalas kosong
+   tetap galat. Dibuktikan lokal: `:185` gagal 2/5 sebelum
+   perbaikan, lolos 5/5 sesudahnya. 2 tes unit baru.
+2. **Race tes di `p5-screenshots.spec.ts:104`.** Tes menavigasi ke
+   `/downloads` segera sesudah klik download-all, sebelum rantai
+   async enqueue selesai; reload cepat bisa mendarat dengan nol
+   job tercatat. Perbaikan: tunggu "10 lagu diantrekan." dulu
+   (pola yang sama dipakai `seedAndQueue`).
+
+Sesudah kedua perbaikan: Vitest 454/454 (34 file),
+`downloads.spec.ts` + `p5-screenshots.spec.ts` 11/11 chromium
+lokal. Detail lengkap di CHANGELOG ("Resume-at-EOF download
+failure") dan log koordinator.

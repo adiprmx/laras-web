@@ -119,6 +119,18 @@ test.describe('screenshot P5', () => {
       timeout: 30000,
     });
     await page.getByTestId('p5-test-download-all').click();
+    // Tunggu antrean lengkap SEBELUM navigasi: klik download-all
+    // menjalankan rantai async (import manajer + 10 enqueue);
+    // goto adalah muat ulang halaman penuh yang mematikan rantai
+    // itu — tanpa tunggu ini, navigasi bisa mendarat sebelum
+    // satu pun job tercatat dan kartu aktif tidak pernah muncul
+    // (flake CI 18 Nov, 2 attempt). Jeda chunk 4 dtk membuat
+    // lagu 1 tetap berjalan 16 dtk+, jadi tunggu ini tidak
+    // melewatkan jendela foto.
+    await expect(page.getByTestId('p5-test-status')).toHaveText(
+      '10 lagu diantrekan.',
+      { timeout: 30000 },
+    );
     await gotoCommit(page, '/downloads');
     await expect(
       page.getByTestId('download-active-p5test0001'),

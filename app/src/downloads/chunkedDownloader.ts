@@ -209,9 +209,15 @@ export async function downloadChunked(
     if (result.bytes.length === 0) {
       // Chunk kosong sesudah ada kemajuan = ujung file: server
       // kehabisan byte (terjadi bila total tidak diketahui dan
-      // ukuran file pas kelipatan ukuran chunk). Tanpa kemajuan
-      // sama sekali, ini galat nyata.
-      if (chunksDownloaded > 0) {
+      // ukuran file pas kelipatan ukuran chunk). "Kemajuan"
+      // mencakup byte yang SUDAH tersimpan dari sesi sebelumnya
+      // (startByte > 0): resume yang semua part-nya sudah lengkap
+      // mengambil chunk di ujung file dan mendapat balasan kosong
+      // — itu ujung file, bukan galat (P6, 18 Nov: tanpa ini,
+      // resume-di-ujung melempar 'Server membalas tanpa byte' dan
+      // job gagal padahal semua byte sudah ada). Tanpa kemajuan
+      // sama sekali (unduhan baru dari 0), ini galat nyata.
+      if (chunksDownloaded > 0 || opts.startByte > 0) {
         total = offset;
         break;
       }

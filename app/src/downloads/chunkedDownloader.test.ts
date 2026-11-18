@@ -131,6 +131,53 @@ describe('downloadChunked', () => {
     expect(offsets).toEqual([2000]);
   });
 
+  it('resume di ujung file (semua part sudah ada) selesai tanpa fetch byte', async () => {
+    // Regresi P6 (CI 18 Nov): reload halaman sesudah semua chunk
+    // terambil tapi sebelum rakit membuat resume mengambil chunk
+    // di ujung file (balasan kosong) — dulu dilempar sebagai
+    // 'Server membalas tanpa byte' dan job gagal padahal semua
+    // byte sudah ada. startByte > 0 adalah kemajuan.
+    const buffer = bytesOf(3000);
+    const { fetchRange, calls } = fakeRangeFetch(buffer);
+    const offsets: number[] = [];
+    const result = await downloadChunked({
+      streamUrl: 'https://rr1.googlevideo.com/videoplayback?x=1',
+      startByte: 3000,
+      chunkSizeBytes: 1000,
+      fetchRange,
+      reResolve: () => Promise.resolve('https://rr1.googlevideo.com/baru'),
+      onChunk: async (_bytes, offset) => {
+        offsets.push(offset);
+      },
+      onProgress: () => undefined,
+      signal: abortSignal,
+      sleep: sleepInstant,
+    });
+    expect(result.totalBytes).toBe(3000);
+    expect(result.chunksDownloaded).toBe(0);
+    expect(calls).toEqual([{ start: 3000, end: 3999 }]);
+    expect(offsets).toEqual([]);
+  });
+
+  it('unduhan baru dari 0 yang dibalas kosong tetap galat', async () => {
+    const buffer = bytesOf(0);
+    const { fetchRange } = fakeRangeFetch(buffer);
+    await expect(
+      downloadChunked({
+        streamUrl: 'https://rr1.googlevideo.com/videoplayback?x=1',
+        startByte: 0,
+        chunkSizeBytes: 1000,
+        fetchRange,
+        reResolve: () =>
+          Promise.resolve('https://rr1.googlevideo.com/baru'),
+        onChunk: () => Promise.resolve(),
+        onProgress: () => undefined,
+        signal: abortSignal,
+        sleep: sleepInstant,
+      }),
+    ).rejects.toThrow('Server membalas tanpa byte');
+  });
+
   it('mencoba ulang chunk gagal sampai 3 kali lalu berhasil', async () => {
     const buffer = bytesOf(500);
     const { fetchRange, calls } = fakeRangeFetch(buffer, { failTimes: 3 });
