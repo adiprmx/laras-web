@@ -5,5 +5,24 @@ compatibility_date = "2026-11-17"
 # Deployment spike memakai API langsung (cfw_t.py), bukan wrangler,
 # supaya tidak menambah dependensi npm. File ini adalah dokumentasi
 # konfigurasi untuk deployment produksi nanti.
+#
+# CORS per lingkungan (Red 1 R6): produksi HANYA domain app +
+# preview Pages. Origin dev (localhost:4173) hanya di [env.dev] —
+# worker spike yang sedang live memakai daftar dev karena dipakai
+# pengujian dari server dev; saat promosi ke proxy produksi, pakai
+# daftar [vars] ini (tanpa localhost).
 [vars]
-ALLOWED_ORIGINS = "https://laras.adipmusic.my.id,http://127.0.0.1:4173,https://preview.laras-web.pages.dev"
+ALLOWED_ORIGINS = "https://laras.adipmusic.my.id,https://preview.laras-web.pages.dev"
+
+[env.dev.vars]
+ALLOWED_ORIGINS = "https://laras.adipmusic.my.id,https://preview.laras-web.pages.dev,http://127.0.0.1:4173"
+
+# Rate limit D1 (Red 1 S3): binding `DB` dipakai checkRateLimit di
+# src/index.js. Database laras-web-sync sudah ada (migrasi 0001);
+# tabel rate_limits dari workers/sync/0002_ratelimit.sql. Redeploy
+# via API WAJIB membawa binding ini di metadata (lihat README) —
+# tanpa binding, rate limit nonaktif (fail-open + warning di log).
+[[d1_databases]]
+binding = "DB"
+database_name = "laras-web-sync"
+database_id = "3a2cb6d6-5481-42a1-b213-070215cd2ce5"

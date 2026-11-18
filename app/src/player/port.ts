@@ -69,6 +69,29 @@ const PORT_EVENTS: AudioPortEvent[] = [
   'seeked',
 ];
 
+/**
+ * URL audio lokal yang sah (Red 1 I3): blob same-origin atau
+ * http(s) same-origin (termasuk path relatif). URL host asing
+ * ditolak — lagu lokal tidak pernah datang dari host lain, dan
+ * URL-nya bisa berasal dari data tersimpan (antrean/library).
+ */
+export function isSafeLocalUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url, window.location.href);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'blob:') {
+    // blob:<origin>/<uuid>: origin pembuatnya wajib origin app.
+    return parsed.origin === window.location.origin;
+  }
+  return (
+    (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+    parsed.origin === window.location.origin
+  );
+}
+
 export class HtmlAudioPort implements AudioPlayerPort {
   private streamEl: HTMLAudioElement;
   private localEl: HTMLAudioElement;
@@ -104,6 +127,10 @@ export class HtmlAudioPort implements AudioPlayerPort {
   }
 
   load(url: string, kind: AudioElementKind): void {
+    if (kind === 'local' && !isSafeLocalUrl(url)) {
+      // URL tidak dicantumkan di pesan: isinya tidak tepercaya.
+      throw new Error('URL audio lokal tidak diizinkan');
+    }
     const idle = kind === 'stream' ? this.localEl : this.streamEl;
     idle.pause();
     idle.removeAttribute('src');

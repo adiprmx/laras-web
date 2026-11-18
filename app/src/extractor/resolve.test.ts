@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   chooseHash,
   describeStreamUrl,
+  loadPlayerConfig,
   maxSts,
   parseAudioFormats,
   parsePlayerConfig,
@@ -9,6 +10,7 @@ import {
   pickAudioFormat,
   type AudioFormat,
 } from './resolve';
+import { BUILTIN_CLIENTS, BUILTIN_HASHES } from '../spike/config';
 import { kCipherUrlFad, kCipheredS } from '../solver/spikeOracles';
 
 describe('parsePlayerConfig', () => {
@@ -68,10 +70,116 @@ describe('parsePlayerConfig', () => {
     const parsed = parsePlayerConfig({
       clients: [{ name: 'RUSAK' }],
       playerHashes: { b559f50c: { signatureTimestamp: 20770 } },
+      version: 1,
     });
     expect(parsed).not.toBeNull();
     expect(parsed!.clients).toHaveLength(0);
     expect(parsed!.stsByHash).toEqual({ b559f50c: 20770 });
+  });
+
+  it('menolak config dengan versi skema yang tidak dikenal (Red 1 S4)', () => {
+    const base = {
+      clients: [
+        {
+          clientId: '67',
+          name: 'WEB_REMIX',
+          version: '1.20261110.04.00',
+        },
+      ],
+      playerHashes: { b559f50c: { signatureTimestamp: 20770 } },
+    };
+    // Versi mayor masa depan: ditolak walau isinya valid.
+    expect(parsePlayerConfig({ ...base, version: 2 })).toBeNull();
+    expect(parsePlayerConfig({ ...base, version: 0 })).toBeNull();
+    // Tanpa field versi: versinya tidak diketahui, ditolak.
+    expect(parsePlayerConfig(base)).toBeNull();
+    // Versi bukan angka: ditolak.
+    expect(parsePlayerConfig({ ...base, version: '1' })).toBeNull();
+  });
+});
+
+describe('loadPlayerConfig', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const validConfig = {
+    clients: [
+      {
+        clientId: '67',
+        name: 'WEB_REMIX',
+        version: '1.20261110.04.00',
+      },
+    ],
+    playerHashes: { b559f50c: { signatureTimestamp: 20770 } },
+    version: 1,
+  };
+
+  it('memakai config remote yang valid (versi 1)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(validConfig))),
+    );
+    const config = await loadPlayerConfig();
+    expect(config.fromRemote).toBe(true);
+    expect(config.stsByHash).toEqual({ b559f50c: 20770 });
+    expect(config.clients).toHaveLength(1);
+    expect(config.clients[0].name).toBe('WEB_REMIX');
+  });
+
+  it('jatuh ke builtin bila versi skema config tidak dikenal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ...validConfig, version: 99 })),
+      ),
+    );
+    const config = await loadPlayerConfig();
+    expect(config.fromRemote).toBe(false);
+    expect(config.stsByHash).toEqual(BUILTIN_HASHES);
+    expect(config.clients).toEqual(BUILTIN_CLIENTS);
+  });
+
+  it('jatuh ke builtin bila Content-Length melewati cap 4 MB', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('x', {
+            headers: { 'Content-Length': String(4 * 1024 * 1024 + 1) },
+          }),
+      ),
+    );
+    const config = await loadPlayerConfig();
+    expect(config.fromRemote).toBe(false);
+    expect(config.stsByHash).toEqual(BUILTIN_HASHES);
+  });
+
+  it('jatuh ke builtin bila body stream melewati cap 4 MB', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response('x'.repeat(4 * 1024 * 1024 + 1)),
+      ),
+    );
+    const config = await loadPlayerConfig();
+    expect(config.fromRemote).toBe(false);
+    expect(config.clients).toEqual(BUILTIN_CLIENTS);
+  });
+
+  it('jatuh ke builtin bila fetch gagal atau HTTP tidak ok', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('jaringan putus');
+    }));
+    const offline = await loadPlayerConfig();
+    expect(offline.fromRemote).toBe(false);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('rusak', { status: 500 })),
+    );
+    const http500 = await loadPlayerConfig();
+    expect(http500.fromRemote).toBe(false);
   });
 });
 

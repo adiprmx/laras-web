@@ -29,9 +29,12 @@ import {
   postInnertube,
 } from './innertube';
 import {
+  BASE_JS_MAX_BYTES,
   BASE_JS_TIMEOUT_MS,
   BUILTIN_CLIENTS,
   BUILTIN_HASHES,
+  CONFIG_MAX_BYTES,
+  CONFIG_SCHEMA_VERSION,
   CONFIG_TIMEOUT_MS,
   CONFIG_URL,
   ITAG_ORDER,
@@ -40,6 +43,7 @@ import {
   SEARCH_TIMEOUT_MS,
   type ClientDefinition,
 } from '../spike/config';
+import { readCappedText, ResponseTooBigError } from './readCapped';
 
 /** Lagu yang bisa di-resolve: cukup videoId dan judul tampil. */
 export interface SongRef {
@@ -91,7 +95,11 @@ export interface AudioFormat {
 
 /**
  * Parse config player dari JSON config-v1. Mengembalikan null bila
- * JSON tidak membawa hash maupun client yang bisa dipakai.
+ * JSON tidak membawa hash maupun client yang bisa dipakai, atau
+ * bila nomor versi skemanya tidak dikenal app ini (PRD B9.1:
+ * "app lama menolak config yang tidak dikenalnya"). Field `version`
+ * di file live adalah 1; config tanpa field versi juga ditolak
+ * karena versinya tidak diketahui.
  */
 export function parsePlayerConfig(json: unknown): {
   stsByHash: Record<string, number>;
@@ -99,6 +107,7 @@ export function parsePlayerConfig(json: unknown): {
 } | null {
   if (typeof json !== 'object' || json === null) return null;
   const root = json as Record<string, unknown>;
+  if (root.version !== CONFIG_SCHEMA_VERSION) return null;
   const stsByHash: Record<string, number> = {};
   const hashes = root.playerHashes as
     | Record<string, { signatureTimestamp?: unknown }>
@@ -293,6 +302,12 @@ async function postViaProxy(
           `Server perantara membalas tidak wajar (HTTP ${error.status}).`,
         );
       }
+      if (error.kind === 'too-big') {
+        throw new ResolveError(
+          error.message,
+          'Balasan server perantara terlalu besar.',
+        );
+      }
       throw new ResolveError(
         error.message,
         error.kind === 'rate-limited'
@@ -313,7 +328,12 @@ export async function loadPlayerConfig(): Promise<PlayerConfig> {
       CONFIG_TIMEOUT_MS,
     );
     if (!res.ok) throw new Error(`config HTTP ${res.status}`);
-    const parsed = parsePlayerConfig(await res.json());
+    // Cap 4 MB ditegakkan SELAMA membaca stream (Red 1 S4): respons
+    // raksasa dibatalkan sebelum memenuhi memori, bukan sesudahnya.
+    // Config dengan versi skema tak dikenal ditolak di
+    // parsePlayerConfig dan jatuh ke nilai bawaan di bawah.
+    const text = await readCappedText(res, CONFIG_MAX_BYTES);
+    const parsed = parsePlayerConfig(JSON.parse(text) as unknown);
     if (!parsed) throw new Error('config tanpa isi yang bisa dipakai');
     return {
       stsByHash:
@@ -429,12 +449,19 @@ export class StreamResolver {
         'File pemutar lagu tidak bisa diambil dari server perantara.',
       );
     }
-    const baseJs = await res.text();
-    if (baseJs.length > 8 * 1024 * 1024) {
-      throw new ResolveError(
-        'base.js melewati cap 8 MB',
-        'File pemutar lagu terlalu besar.',
-      );
+    // Cap 8 MB ditegakkan SELAMA membaca stream (Red 1 R5): pola
+    // lama `res.text()` dulu lalu cek panjang sudah terlambat.
+    let baseJs: string;
+    try {
+      baseJs = await readCappedText(res, BASE_JS_MAX_BYTES);
+    } catch (error) {
+      if (error instanceof ResponseTooBigError) {
+        throw new ResolveError(
+          'base.js melewati cap 8 MB',
+          'File pemutar lagu terlalu besar.',
+        );
+      }
+      throw error;
     }
     const script = buildPlayerScript(
       `/s/player/${hash}/player_es6.vflset/en_US/base.js`,

@@ -14,7 +14,7 @@
  * bundle awal tidak membengkak: hanya diunduh saat Jelajah
  * dimuat.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowClockwise } from '@phosphor-icons/react';
 import {
   BROWSE_CACHE_TTL_MS,
@@ -225,7 +225,17 @@ export default function HomePage({
     [],
   );
 
+  // Penjaga StrictMode: di mode dev React menjalankan efek muat
+  // Jelajah dua kali (mount → cleanup → mount); tanpa penjaga,
+  // browseHome dipanggil dua kali dan E2E melihat 2 request
+  // (gagal deterministik sejak E2E pindah ke server dev, Blue 1).
+  // Di produksi efek hanya jalan sekali. Ref di-reset tiap remount
+  // (instance komponen baru), jadi navigasi pergi-pulang tetap
+  // memuat ulang — dan loadBrowse memeriksa cache dulu.
+  const browseStarted = useRef(false);
   useEffect(() => {
+    if (browseStarted.current) return;
+    browseStarted.current = true;
     void loadBrowse(false);
   }, [loadBrowse]);
 

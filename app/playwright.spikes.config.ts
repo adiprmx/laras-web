@@ -1,9 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
 // Konfigurasi khusus spike S3/S5/S9 Laras Web. Terpisah dari
-// playwright.config.ts (yang memakai vite preview + build produksi)
-// karena spike tidak boleh menjalankan build dan tidak boleh mengganggu
-// tim lain: server di sini adalah server statis kecil (serve.mjs) yang
+// playwright.config.ts (yang memakai server dev) karena spike tidak
+// boleh menjalankan build dan tidak boleh mengganggu tim lain: server di sini adalah server statis kecil (serve.mjs) yang
 // melayani aset public/ + fixture spike di port 5229.
 //
 // Jalankan:  npx playwright test --config=playwright.spikes.config.ts

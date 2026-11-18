@@ -32,7 +32,7 @@ import {
   loadPersistedPlayerState,
   writeQueueSnapshot,
 } from './persistence';
-import { HtmlAudioPort, type AudioPlayerPort } from './port';
+import { HtmlAudioPort, isSafeLocalUrl, type AudioPlayerPort } from './port';
 import {
   decideOnError,
   decideRestorePosition,
@@ -509,6 +509,15 @@ export class PlayerService {
     this.mediaSession.setPlaybackState('none');
 
     if (track.source.kind === 'local') {
+      // Titik choke (Red 1 I3): tolak URL lokal host asing SEBELUM
+      // probe CORS di decidePath menyentuh host itu. port.load
+      // memeriksa lagi sebagai pertahanan lapis kedua.
+      if (!isSafeLocalUrl(track.source.url)) {
+        this.onResolveFailed(
+          new Error('URL audio lokal tidak diizinkan'),
+        );
+        return;
+      }
       this.currentKind = 'local';
       const path = await this.graph.decidePath(track.source.url);
       if (token !== this.playToken) return;

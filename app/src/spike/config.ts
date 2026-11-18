@@ -30,6 +30,25 @@ export const PLAYER_TIMEOUT_MS = 60000;
 export const BASE_JS_TIMEOUT_MS = 90000;
 
 /**
+ * Cap ukuran respons config remote, 4 MB (PRD B9.2, arsitektur §6.1).
+ * Respons yang melewati cap ditolak sebelum di-parse (Red 1 S4).
+ */
+export const CONFIG_MAX_BYTES = 4 * 1024 * 1024;
+
+/** Cap ukuran respons JSON youtubei, 10 MB (arsitektur §6.1). */
+export const INNERTUBE_MAX_BYTES = 10 * 1024 * 1024;
+
+/** Cap ukuran base.js, 8 MB (arsitektur §6.1). */
+export const BASE_JS_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Versi skema config remote yang dipahami app ini (field `version`
+ * di player-config.json; file live berisi 1). Config dengan versi
+ * lain ditolak dan app memakai nilai bawaan (PRD B9.1, Red 1 S4).
+ */
+export const CONFIG_SCHEMA_VERSION = 1;
+
+/**
  * Macet dianggap gagal bila posisi putar tidak maju selama ini
  * (milidetik) padahal lagu sedang diminta memutar.
  */

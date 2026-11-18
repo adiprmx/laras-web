@@ -9,11 +9,16 @@
 // Batas yang ditegakkan (arsitektur.md §4.1):
 //   JSON youtubei maks 10 MB, script player maks 8 MB,
 //   body POST maks 1 MB, media streaming cap 100 MB per request.
-// Rate limit di skeleton ini in-memory per isolate (best-effort);
-// produksi WAJIB pindah ke D1 (KV tulis hanya 1.000/hari).
+// Rate limit di D1 (Red 1 S3, migrasi workers/sync/0002_ratelimit.sql):
+// satu baris per (IP, jendela menit). Fail-open: bila D1 tidak
+// terikat atau gagal, request diizinkan + dicatat — rate limit yang
+// mati tidak boleh mematikan layanan. Binding D1: `DB`
+// (database laras-web-sync); redeploy WAJIB membawa binding ini.
 // Header x-proxy-cpu-ms adalah instrumen ukur spike: jumlah waktu
 // segmen sinkron handler (validasi + bangun respons), di luar waktu
 // tunggu jaringan upstream. Header ini dicabut di deployment produksi.
+
+import { isRateLimited } from './rateLimit.js';
 
 const INNERTUBE_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'; // kunci publik InnerTube
 const YT_HOST = 'https://www.youtube.com';
@@ -34,23 +39,40 @@ const MEDIA_CAP = 100 * 1024 * 1024;
 const MEDIA_TIMEOUT_MS = 120000;
 const RATE_INNERTUBE_PER_MIN = 60;
 const RATE_MEDIA_PER_MIN = 10;
+// Redirect /api/media diikuti manual maks 3 hop (Red 1 R1).
+const MEDIA_MAX_REDIRECTS = 3;
+// Content-Type upstream yang boleh diteruskan /api/media (Red 1 R1).
+// Selain ini (mis. text/html halaman galat) ditolak 502 supaya proxy
+// tidak pernah meneruskan HTML dari host lain ke browser.
+const MEDIA_CONTENT_TYPES = ['audio/', 'video/', 'application/octet-stream'];
 
 // Allowlist hash player (config-v1, 17 Nov 2026). Gerbang dicek SEBELUM
 // fetch ke YouTube. Produksi membaca daftar ini dari config remote.
 const PLAYER_HASHES = new Set(['fad7e4e9', 'ad8d59ae', 'b559f50c']);
 
-// Rate limit in-memory per isolate: Map<ip, {count, windowStart}>.
-// Best-effort; satu IP bisa tersebar ke beberapa isolate. Produksi: D1.
-const buckets = new Map();
-function rateLimited(ip, limit) {
-  const now = Date.now();
-  const b = buckets.get(ip);
-  if (!b || now - b.windowStart >= 60000) {
-    buckets.set(ip, { count: 1, windowStart: now });
+// Rate limit D1 (Red 1 S3) dengan fail-open: bila binding DB tidak
+// ada atau D1 gagal, request DIIZINKAN dan kegagalan dicatat lewat
+// console.warn (tampil di log Cloudflare). Kunci (yang memuat IP)
+// TIDAK PERNAH dicatat. Peringatan "binding tidak ada" ditulis
+// sekali per isolate supaya log tidak dibanjiri tiap request.
+let warnedMissingDb = false;
+async function checkRateLimit(env, key, limit) {
+  if (!env.DB) {
+    if (!warnedMissingDb) {
+      warnedMissingDb = true;
+      console.warn('rate limit: binding D1 (DB) tidak ada, rate limit nonaktif');
+    }
     return false;
   }
-  b.count += 1;
-  return b.count > limit;
+  try {
+    return await isRateLimited(env.DB, key, limit);
+  } catch (e) {
+    console.warn(
+      'rate limit: D1 gagal, request diizinkan:',
+      e instanceof Error ? e.message : 'unknown',
+    );
+    return false;
+  }
 }
 
 function corsHeaders(env, request) {
@@ -69,7 +91,10 @@ function jsonError(status, code, message, extraHeaders = {}) {
   });
 }
 
-// Baca body dengan cap: gagal 502 bila melewati cap.
+// Baca body dengan cap: kembalikan { tooBig: true } bila melewati
+// cap, TANPA mem-buffer seluruh body (stream dibatalkan begitu cap
+// terlampaui). Dipakai untuk respons upstream DAN body request
+// (Red 1 S1); pemanggil yang memutuskan kode galatnya (502/413).
 async function readCapped(body, capBytes) {
   const reader = body.getReader();
   const chunks = [];
@@ -145,7 +170,7 @@ export default {
           mark(t0);
           return withCpu(jsonError(403, 'HOST_NOT_ALLOWED', 'Host tujuan tidak diizinkan', cors));
         }
-        if (rateLimited(`media:${ip}`, RATE_MEDIA_PER_MIN)) {
+        if (await checkRateLimit(env, `media:${ip}`, RATE_MEDIA_PER_MIN)) {
           mark(t0);
           const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak unduhan, coba lagi sebentar', cors);
           r.headers.set('Retry-After', '60');
@@ -155,16 +180,65 @@ export default {
         const range = request.headers.get('Range');
         if (range) headers.set('Range', range);
         mark(t0);
-        const upstream = await fetch(dest.href, {
-          headers,
-          signal: AbortSignal.timeout(MEDIA_TIMEOUT_MS),
-          redirect: 'follow',
-        });
+        // Redirect diikuti MANUAL maks 3 hop (Red 1 R1): pola lama
+        // `redirect: 'follow'` meneruskan konten host mana pun yang
+        // dituju Location upstream tanpa validasi ulang. Tiap hop
+        // divalidasi dengan aturan host yang sama, dan total waktu
+        // semua hop dibatasi satu deadline MEDIA_TIMEOUT_MS.
+        let upstream = null;
+        {
+          let current = dest.href;
+          const deadline = Date.now() + MEDIA_TIMEOUT_MS;
+          for (let hop = 0; hop <= MEDIA_MAX_REDIRECTS; hop++) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) {
+              mark(t0);
+              return withCpu(jsonError(502, 'UPSTREAM_ERROR', 'Timeout ke upstream', cors));
+            }
+            const res = await fetch(current, {
+              headers,
+              signal: AbortSignal.timeout(remaining),
+              redirect: 'manual',
+            });
+            t0 = performance.now();
+            const loc = res.headers.get('Location');
+            if (res.status < 300 || res.status >= 400 || !loc) {
+              upstream = res;
+              break;
+            }
+            if (hop === MEDIA_MAX_REDIRECTS) {
+              mark(t0);
+              return withCpu(jsonError(502, 'TOO_MANY_REDIRECTS', 'Upstream redirect terlalu banyak', cors));
+            }
+            let next;
+            try {
+              next = new URL(loc, current);
+            } catch {
+              mark(t0);
+              return withCpu(jsonError(502, 'BAD_REDIRECT', 'Location redirect upstream tidak valid', cors));
+            }
+            if (next.protocol !== 'https:' || !next.hostname.endsWith('.googlevideo.com')) {
+              mark(t0);
+              return withCpu(jsonError(502, 'REDIRECT_NOT_ALLOWED', 'Redirect upstream ke host di luar allowlist', cors));
+            }
+            current = next.href;
+          }
+        }
         t0 = performance.now();
         const declared = Number(upstream.headers.get('Content-Length') || 0);
         if (declared > MEDIA_CAP) {
           mark(t0);
           return withCpu(jsonError(502, 'UPSTREAM_TOO_BIG', 'Respons upstream melewati cap', cors));
+        }
+        // Hanya teruskan Content-Type media (Red 1 R1): halaman
+        // galat HTML upstream tidak boleh sampai ke browser.
+        const contentType = upstream.headers.get('Content-Type') || '';
+        if (
+          contentType &&
+          !MEDIA_CONTENT_TYPES.some((p) => contentType.toLowerCase().startsWith(p))
+        ) {
+          mark(t0);
+          return withCpu(jsonError(502, 'UPSTREAM_BAD_TYPE', 'Content-Type upstream bukan media', cors));
         }
         // Streaming dengan penghitung byte: batalkan bila melewati cap.
         let sent = 0;
@@ -183,6 +257,7 @@ export default {
           const v = upstream.headers.get(name);
           if (v) resHeaders.set(name, v);
         }
+        resHeaders.set('X-Content-Type-Options', 'nosniff');
         mark(t0);
         return withCpu(new Response(
           upstream.body ? upstream.body.pipeThrough(counting) : null,
@@ -201,7 +276,7 @@ export default {
           mark(t0);
           return withCpu(jsonError(403, 'HASH_NOT_ALLOWED', 'Hash player tidak ada di allowlist', cors));
         }
-        if (rateLimited(`innertube:${ip}`, RATE_INNERTUBE_PER_MIN)) {
+        if (await checkRateLimit(env, `innertube:${ip}`, RATE_INNERTUBE_PER_MIN)) {
           mark(t0);
           const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak request, coba lagi sebentar', cors);
           r.headers.set('Retry-After', '60');
@@ -232,17 +307,32 @@ export default {
           mark(t0);
           return withCpu(jsonError(405, 'METHOD_NOT_ALLOWED', 'Metode tidak diizinkan', cors));
         }
-        if (rateLimited(`innertube:${ip}`, RATE_INNERTUBE_PER_MIN)) {
+        if (await checkRateLimit(env, `innertube:${ip}`, RATE_INNERTUBE_PER_MIN)) {
           mark(t0);
           const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak request, coba lagi sebentar', cors);
           r.headers.set('Retry-After', '60');
           return withCpu(r);
         }
-        const bodyBytes = await request.arrayBuffer();
-        t0 = performance.now();
-        if (bodyBytes.byteLength > MAX_BODY_BYTES) {
+        // Cap body 1 MB ditegakkan SELAMA membaca stream (Red 1 S1):
+        // pola lama `arrayBuffer()` dulu lalu cek sudah terlambat —
+        // body ratusan MB memenuhi memori isolate sebelum 413.
+        // Content-Length dicek dulu sebagai penolakan cepat.
+        const declaredLen = Number(request.headers.get('Content-Length') || 0);
+        if (declaredLen > MAX_BODY_BYTES) {
           mark(t0);
           return withCpu(jsonError(413, 'BODY_TOO_BIG', 'Body request melewati 1 MB', cors));
+        }
+        let bodyBytes;
+        if (request.body) {
+          const read = await readCapped(request.body, MAX_BODY_BYTES);
+          t0 = performance.now();
+          if (read.tooBig) {
+            mark(t0);
+            return withCpu(jsonError(413, 'BODY_TOO_BIG', 'Body request melewati 1 MB', cors));
+          }
+          bodyBytes = read.bytes;
+        } else {
+          bodyBytes = new Uint8Array(0);
         }
         const headers = new Headers();
         headers.set('Content-Type', 'application/json');

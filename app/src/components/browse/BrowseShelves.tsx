@@ -74,7 +74,12 @@ export default function BrowseShelves({
                       const params = item.browseParams
                         ? `?params=${encodeURIComponent(item.browseParams)}`
                         : '';
-                      onNavigate(`/browse/${item.browseId}${params}`);
+                      // browseId datang dari respons YTM dan bisa
+                      // mengandung `/` atau `%` (Red 1 R2): tanpa
+                      // encode, rute rusak atau parseRoute crash.
+                      onNavigate(
+                        `/browse/${encodeURIComponent(item.browseId)}${params}`,
+                      );
                     }
                   }}
                 />

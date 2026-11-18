@@ -1,8 +1,9 @@
 /**
  * Tes Playwright halaman spike integrasi P1 (rute /spike).
  *
- * Berjalan terhadap `vite preview` (build produksi) lewat konfigurasi
- * utama. Uji UI selalu jalan. Uji live (resolve via proxy + putar
+ * Berjalan terhadap server dev lewat konfigurasi utama (sejak
+ * Blue 1, E2E tidak lagi memakai `vite preview` — lihat
+ * playwright.config.ts). Uji UI selalu jalan. Uji live (resolve via proxy + putar
  * lagu) HANYA jalan bila LARAS_SPIKE_LIVE=1: dari VM uji itu gagal
  * jaringan (googlevideo memblokir IP VM, terbukti S3), jadi tidak
  * pernah dipalsukan hijau. Jalankan uji live dari browser di luar VM.

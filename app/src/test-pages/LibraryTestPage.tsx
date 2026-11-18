@@ -19,6 +19,10 @@ export default function LibraryTestPage() {
   const [counts, setCounts] = useState<LibraryCounts | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('Siap.');
+  // Konfirmasi dua langkah (Red 1 H1): satu ketukan tidak boleh
+  // menghapus seluruh library — ketukan pertama mengaktifkan mode
+  // konfirmasi, ketukan kedua baru menghapus.
+  const [confirmClear, setConfirmClear] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -55,6 +59,12 @@ export default function LibraryTestPage() {
   };
 
   const clearAll = (): void => {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      setStatus('Ketuk lagi untuk menghapus seluruh database.');
+      return;
+    }
+    setConfirmClear(false);
     setBusy(true);
     setStatus('Menghapus seluruh database.');
     deleteDatabase()
@@ -107,7 +117,9 @@ export default function LibraryTestPage() {
           data-testid="library-test-clear"
           className="h-11 rounded-xl border border-red-500/30 px-4 text-sm font-medium text-red-400 disabled:opacity-50"
         >
-          Hapus seluruh database
+          {confirmClear
+            ? 'Yakin? Ketuk lagi untuk menghapus'
+            : 'Hapus seluruh database'}
         </button>
       </div>
       <dl className="mt-6 space-y-1 text-sm" data-testid="library-test-counts">

@@ -54,6 +54,8 @@ function song(id: string, title: string, dateAdded: number): SongImport {
 export default function P4TestPage() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('Siap.');
+  // Konfirmasi dua langkah (Red 1 H1): lihat LibraryTestPage.
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const seed = (): void => {
     setBusy(true);
@@ -108,6 +110,12 @@ export default function P4TestPage() {
   };
 
   const clearAll = (): void => {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      setStatus('Ketuk lagi untuk menghapus database.');
+      return;
+    }
+    setConfirmClear(false);
     setBusy(true);
     setStatus('Menghapus seluruh database.');
     deleteDatabase()
@@ -143,7 +151,7 @@ export default function P4TestPage() {
           data-testid="p4-test-clear"
           className="h-11 rounded-xl border border-white/15 px-4 text-sm font-medium disabled:opacity-50"
         >
-          Hapus database
+          {confirmClear ? 'Yakin? Ketuk lagi untuk menghapus' : 'Hapus database'}
         </button>
       </div>
       <p data-testid="p4-test-status" className="mt-4 text-sm text-zinc-400">

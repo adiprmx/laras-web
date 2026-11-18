@@ -9,15 +9,32 @@ import HomePage from './components/home/HomePage';
 import type { LibraryTab } from './components/library/LibraryPage';
 
 // Rute tersembunyi (tidak ditautkan dari mana pun di beranda):
-// /spike = halaman uji integrasi P1, /player-test = halaman uji
-// pemutar P2 (nada lokal), /library-test = halaman uji library
-// P3 (isi 1.000 lagu contoh), /p4-test = halaman uji beranda P4
-// (skenario "Lagu untukmu" deterministik). Lazy-load menjaga
-// bundle awal tetap di bawah anggaran.
+// /player-test = halaman uji pemutar P2 (nada lokal),
+// /library-test = halaman uji library P3 (isi 1.000 lagu contoh),
+// /p4-test = halaman uji beranda P4 (skenario "Lagu untukmu"
+// deterministik). Ketiganya DEV-ONLY (Red 1 H1): gerbang
+// `import.meta.env.DEV` di bawah membuat rute + lazy import-nya
+// dihapus total dari build produksi oleh tree-shaking, sehingga
+// chunk *TestPage* tidak ada di dist/ dan pengunjung produksi
+// tidak bisa membuka halaman destruktif ini. E2E berjalan
+// terhadap server dev supaya seeder ini tetap tersedia; gerbang
+// CI di .github/workflows/ci.yml menggagalkan build bila chunk
+// *TestPage* lolos ke dist/ produksi.
+//
+// PENGECUALIAN (keputusan koordinator, mengikat): /spike BOLEH
+// tetap di produksi. Itu alat verifikasi §5 yang dijalankan
+// koordinator dari preview, non-destruktif (hanya memutar lagu
+// kanari dan menyalin laporan), bukan halaman uji destruktif.
 const SpikePage = lazy(() => import('./spike/SpikePage'));
-const PlayerTestPage = lazy(() => import('./test-pages/PlayerTestPage'));
-const LibraryTestPage = lazy(() => import('./test-pages/LibraryTestPage'));
-const P4TestPage = lazy(() => import('./test-pages/P4TestPage'));
+const PlayerTestPage = import.meta.env.DEV
+  ? lazy(() => import('./test-pages/PlayerTestPage'))
+  : null;
+const LibraryTestPage = import.meta.env.DEV
+  ? lazy(() => import('./test-pages/LibraryTestPage'))
+  : null;
+const P4TestPage = import.meta.env.DEV
+  ? lazy(() => import('./test-pages/P4TestPage'))
+  : null;
 const LibraryPage = lazy(() => import('./components/library/LibraryPage'));
 const PlaylistDetailPage = lazy(
   () => import('./components/library/PlaylistDetailPage'),
@@ -49,18 +66,32 @@ function parseRoute(pathname: string, search: string): Route {
   const path = pathname.replace(/\/$/, '') || '/';
   const params = new URLSearchParams(search);
   if (path === '/spike') return { name: 'spike' };
-  if (path === '/player-test') return { name: 'player-test' };
-  if (path === '/library-test') return { name: 'library-test' };
-  if (path === '/p4-test') return { name: 'p4-test' };
+  // Rute uji hanya ada di build dev (Red 1 H1): di produksi
+  // ketiganya jatuh ke beranda di bawah.
+  if (import.meta.env.DEV) {
+    if (path === '/player-test') return { name: 'player-test' };
+    if (path === '/library-test') return { name: 'library-test' };
+    if (path === '/p4-test') return { name: 'p4-test' };
+  }
   if (path === '/search') {
     return { name: 'search', query: params.get('q') ?? '' };
   }
   if (path === '/browse') return { name: 'browse' };
   const browse = /^\/browse\/([^/]+)$/.exec(path);
   if (browse) {
+    // decodeURIComponent melempar URIError untuk segmen persen
+    // yang rusak (tautan crafted); tanpa tangkapan, lemparan di
+    // initializer useState meruntuhkan seluruh app (Red 1 R2).
+    // Segmen rusak berarti tautan tidak valid: ke beranda.
+    let browseId: string;
+    try {
+      browseId = decodeURIComponent(browse[1]);
+    } catch {
+      return { name: 'home' };
+    }
     return {
       name: 'browse',
-      browseId: decodeURIComponent(browse[1]),
+      browseId,
       browseParams: params.get('params') ?? undefined,
     };
   }
@@ -123,7 +154,7 @@ export default function App() {
       </Suspense>
     );
   }
-  if (route.name === 'player-test') {
+  if (route.name === 'player-test' && PlayerTestPage) {
     return (
       <Suspense fallback={<LoadingPage />}>
         <PlayerTestPage />
@@ -132,7 +163,7 @@ export default function App() {
       </Suspense>
     );
   }
-  if (route.name === 'library-test') {
+  if (route.name === 'library-test' && LibraryTestPage) {
     return (
       <Suspense fallback={<LoadingPage />}>
         <LibraryTestPage />
@@ -141,7 +172,7 @@ export default function App() {
       </Suspense>
     );
   }
-  if (route.name === 'p4-test') {
+  if (route.name === 'p4-test' && P4TestPage) {
     return (
       <Suspense fallback={<LoadingPage />}>
         <P4TestPage />
@@ -195,11 +226,16 @@ export default function App() {
                 onNavigate={navigate}
                 initialTab={route.tab}
               />
-            ) : (
+            ) : route.name === 'playlist' ? (
               <PlaylistDetailPage
                 playlistId={route.id}
                 onNavigate={navigate}
               />
+            ) : (
+              // Tidak terjangkau: rute uji sudah ditangani di atas
+              // (atau tidak ada di build produksi) — beranda
+              // sebagai cadangan bila pengetikan rute meleset.
+              <HomePage onNavigate={navigate} />
             )}
           </Suspense>
         )}

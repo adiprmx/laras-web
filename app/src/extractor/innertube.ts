@@ -12,13 +12,19 @@
  * `InnertubeError` dengan `kind` yang bisa dipetakan ke pesan
  * pengguna (PRD B6.5: bedakan galat jaringan, HTTP, dan parse).
  */
-import { PROXY_BASE_URL, type ClientDefinition } from '../spike/config';
+import {
+  INNERTUBE_MAX_BYTES,
+  PROXY_BASE_URL,
+  type ClientDefinition,
+} from '../spike/config';
+import { readCappedText, ResponseTooBigError } from './readCapped';
 
 /** Jenis galat balasan proxy/InnerTube. */
 export type InnertubeErrorKind =
   | 'bad-json'
   | 'http'
-  | 'rate-limited';
+  | 'rate-limited'
+  | 'too-big';
 
 /** Galat balasan dari proxy (bukan galat jaringan). */
 export class InnertubeError extends Error {
@@ -64,7 +70,21 @@ export async function postInnertube(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  const text = await res.text();
+  // Cap 10 MB ditegakkan SELAMA membaca stream (Red 1 R5):
+  // pertahanan lapis kedua di atas cap proxy yang sama.
+  let text: string;
+  try {
+    text = await readCappedText(res, INNERTUBE_MAX_BYTES);
+  } catch (error) {
+    if (error instanceof ResponseTooBigError) {
+      throw new InnertubeError(
+        'too-big',
+        res.status,
+        `proxy ${path} membalas melewati cap 10 MB (HTTP ${res.status})`,
+      );
+    }
+    throw error;
+  }
   let json: Record<string, unknown>;
   try {
     json = JSON.parse(text) as Record<string, unknown>;
