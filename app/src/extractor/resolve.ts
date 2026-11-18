@@ -25,18 +25,23 @@
 import { buildPlayerScript, type PlayerScript } from '../solver/playerScript';
 import { isAllowedStreamUrl } from '../solver/urlAllowlist';
 import {
+  defaultDelay,
+  isRefusalPlayability,
+  RESOLVE_RETRY_BACKOFF_MS,
+  RESOLVE_RETRY_ROUNDS,
+} from '../resilience/retry';
+import type { ConfigLoader } from '../resilience/configStore';
+import {
   InnertubeError,
   postInnertube,
 } from './innertube';
+import { fetchRemoteConfigText } from './fetchConfig';
 import {
   BASE_JS_MAX_BYTES,
   BASE_JS_TIMEOUT_MS,
   BUILTIN_CLIENTS,
   BUILTIN_HASHES,
-  CONFIG_MAX_BYTES,
   CONFIG_SCHEMA_VERSION,
-  CONFIG_TIMEOUT_MS,
-  CONFIG_URL,
   ITAG_ORDER,
   PLAYER_TIMEOUT_MS,
   PROXY_BASE_URL,
@@ -78,11 +83,17 @@ export interface ResolvedTrack {
 export class ResolveError extends Error {
   /** Penyebab singkat untuk laporan (bahasa sehari-hari). */
   readonly causeText: string;
+  /**
+   * Upaya per client bentuk `CLIENT=STATUS` (tanpa videoId, aman
+   * untuk log dan diagnostik). Diisi resolve() saat gagal.
+   */
+  readonly attempts: string[];
 
-  constructor(message: string, causeText: string) {
+  constructor(message: string, causeText: string, attempts: string[] = []) {
     super(message);
     this.name = 'ResolveError';
     this.causeText = causeText;
+    this.attempts = attempts;
   }
 }
 
@@ -151,9 +162,28 @@ export function parsePlayerConfig(json: unknown): {
 }
 
 /**
- * Pilih hash player terbaru: sts terbesar. Bila seri, hash pertama
- * dalam urutan kunci yang menang (deterministik).
+ * Bentuk PlayerConfig dari hasil parse: config remote MENGGANTIKAN
+ * builtin (semantik allowlist PRD B9.3); fallback ke builtin HANYA
+ * bila set yang diteruskan kosong. Dipakai loadPlayerConfig dan
+ * loader TTL P6 (satu semantik di kedua jalur).
  */
+export function playerConfigFromParsed(
+  parsed: {
+    stsByHash: Record<string, number>;
+    clients: ClientDefinition[];
+  },
+  fromRemote: boolean,
+): PlayerConfig {
+  return {
+    stsByHash:
+      Object.keys(parsed.stsByHash).length > 0
+        ? parsed.stsByHash
+        : BUILTIN_HASHES,
+    clients:
+      parsed.clients.length > 0 ? parsed.clients : BUILTIN_CLIENTS,
+    fromRemote,
+  };
+}
 export function chooseHash(stsByHash: Record<string, number>): string | null {
   let best: string | null = null;
   let bestSts = -1;
@@ -337,28 +367,14 @@ async function postViaProxy(
 /** Muat config remote; bila gagal, pakai nilai bawaan. */
 export async function loadPlayerConfig(): Promise<PlayerConfig> {
   try {
-    const res = await fetchWithTimeout(
-      CONFIG_URL,
-      { headers: { Accept: 'application/json' } },
-      CONFIG_TIMEOUT_MS,
-    );
-    if (!res.ok) throw new Error(`config HTTP ${res.status}`);
-    // Cap 4 MB ditegakkan SELAMA membaca stream (Red 1 S4): respons
-    // raksasa dibatalkan sebelum memenuhi memori, bukan sesudahnya.
-    // Config dengan versi skema tak dikenal ditolak di
-    // parsePlayerConfig dan jatuh ke nilai bawaan di bawah.
-    const text = await readCappedText(res, CONFIG_MAX_BYTES);
+    // Cap 4 MB ditegakkan SELAMA membaca stream (Red 1 S4):
+    // respons raksasa dibatalkan sebelum memenuhi memori, bukan
+    // sesudahnya. Config dengan versi skema tak dikenal ditolak
+    // di parsePlayerConfig dan jatuh ke nilai bawaan di bawah.
+    const text = await fetchRemoteConfigText();
     const parsed = parsePlayerConfig(JSON.parse(text) as unknown);
     if (!parsed) throw new Error('config tanpa isi yang bisa dipakai');
-    return {
-      stsByHash:
-        Object.keys(parsed.stsByHash).length > 0
-          ? parsed.stsByHash
-          : BUILTIN_HASHES,
-      clients:
-        parsed.clients.length > 0 ? parsed.clients : BUILTIN_CLIENTS,
-      fromRemote: true,
-    };
+    return playerConfigFromParsed(parsed, true);
   } catch {
     return {
       stsByHash: BUILTIN_HASHES,
@@ -366,6 +382,18 @@ export async function loadPlayerConfig(): Promise<PlayerConfig> {
       fromRemote: false,
     };
   }
+}
+
+/**
+ * Snapshot resolve terakhir (untuk diagnostik LRS1): client yang
+ * dicoba, playability tiap client, dan jumlah putaran. Tanpa
+ * videoId, tanpa URL.
+ */
+export interface LastResolveSnapshot {
+  clientsTried: string[];
+  playabilityByClient: Record<string, string>;
+  rounds: number;
+  failedAt: number;
 }
 
 type SolverClientType = import('../solver/solverClient').SolverClient;
@@ -382,10 +410,29 @@ export class StreamResolver {
   private solver: SolverClientType | null = null;
   private solverLoading: Promise<SolverClientType> | null = null;
   private scriptByHash = new Map<string, PlayerScript>();
+  private configLoader: ConfigLoader | null;
+  private lastSnapshot: LastResolveSnapshot | null = null;
+
+  /**
+   * `configLoader` bisa diinjeksi (tes memakai loader dengan jam
+   * dan storage palsu); tanpa injeksi, loader bersama TTL 6 jam
+   * dipakai (impor dinamis supaya tidak ada siklus statis dengan
+   * resilience/configStore).
+   */
+  constructor(opts: { configLoader?: ConfigLoader } = {}) {
+    this.configLoader = opts.configLoader ?? null;
+  }
 
   /** Muat config + visitorData. Dipanggil sekali sebelum lagu pertama. */
   async init(): Promise<PlayerConfig> {
-    this.config = await loadPlayerConfig();
+    // Config lewat loader TTL 6 jam (P6, K7): remote segar, lalu
+    // cache terakhir yang valid, lalu builtin.
+    const loader =
+      this.configLoader ??
+      (await import('../resilience/configStore')).getConfigLoader();
+    this.configLoader = loader;
+    const loaded = await loader.load();
+    this.config = loaded.config;
     this.sts = maxSts(this.config.stsByHash) ?? 0;
     this.hash = chooseHash(this.config.stsByHash);
     // Jaring pengaman VR: urutan client wajib membawa minimal satu
@@ -431,6 +478,16 @@ export class StreamResolver {
 
   get usedRemoteConfig(): boolean {
     return this.config?.fromRemote ?? false;
+  }
+
+  /** Versi client utama di config aktif (untuk diagnostik LRS1). */
+  get primaryClientVersion(): string | null {
+    return this.config?.clients[0]?.version ?? null;
+  }
+
+  /** Snapshot resolve terakhir (null bila belum pernah resolve). */
+  get lastResolve(): LastResolveSnapshot | null {
+    return this.lastSnapshot;
   }
 
   /**
@@ -562,99 +619,176 @@ export class StreamResolver {
    * `opts.itagPreference` (P5, unduhan): urutan itag pilihan
    * kualitas unduhan; tanpa opsi ini, urutan kanonis dipakai
    * (perilaku pemutaran tidak berubah).
+   *
+   * Retry lintas waktu (P6, rekomendasi §5): bila SEMUA client
+   * menolak dalam satu putaran (LOGIN_REQUIRED/UNPLAYABLE tanpa
+   * format), putaran diulang sampai `maxRounds` (default 3)
+   * dengan backoff 5 dtk lalu 15 dtk. `delay` bisa diinjeksi
+   * supaya tes tidak tidur sungguhan; `onRetryRound` dipanggil
+   * sebelum tiap jeda supaya UI bisa menenangkan pengguna
+   * ("mencari jalur lain") alih-alih menampilkan error.
+   * Kanari memakai maxRounds 1: probe mengukur, bukan menutupi.
    */
   async resolve(
     song: SongRef,
-    opts: { itagPreference?: readonly number[] } = {},
+    opts: {
+      itagPreference?: readonly number[];
+      maxRounds?: number;
+      delay?: (ms: number) => Promise<void>;
+      onRetryRound?: (round: number, waitMs: number) => void;
+    } = {},
   ): Promise<ResolvedTrack> {
     if (!this.config) {
       throw new ResolveError('resolver belum init', 'Resolver belum siap.');
     }
     const itagPreference = opts.itagPreference ?? ITAG_ORDER;
+    const maxRounds = Math.max(1, opts.maxRounds ?? RESOLVE_RETRY_ROUNDS);
+    const delay = opts.delay ?? defaultDelay;
     const t0 = performance.now();
-    const attempts: string[] = [];
+    const allAttempts: string[] = [];
+    const playabilityByClient: Record<string, string> = {};
     let lastProxyError: ResolveError | null = null;
-    for (const client of this.config.clients) {
-      let attempt: {
-        playability: string;
-        picked: AudioFormat | null;
-      } | null = null;
-      try {
-        attempt = await this.fetchPlayer(song, client, itagPreference);
-      } catch (error) {
-        if (error instanceof ResolveError) {
-          // Galat proxy (mis. rate limit): catat lalu coba client
-          // berikut; penyebab spesifik dipakai bila semua gagal.
-          lastProxyError = error;
-          attempts.push(`${client.name}=proxy-gagal`);
-          continue;
-        }
-        // Satu kali coba ulang untuk galat jaringan/timeout.
+    let roundsRun = 0;
+    for (let round = 0; round < maxRounds; round++) {
+      roundsRun = round + 1;
+      const roundAttempts: string[] = [];
+      let sawFormat = false;
+      let sawProxyOrNetwork = false;
+      let refusals = 0;
+      for (const client of this.config.clients) {
+        let attempt: {
+          playability: string;
+          picked: AudioFormat | null;
+        } | null = null;
         try {
-          await new Promise((r) => setTimeout(r, 2000));
           attempt = await this.fetchPlayer(song, client, itagPreference);
-        } catch (retryError) {
-          if (retryError instanceof ResolveError) {
-            lastProxyError = retryError;
-            attempts.push(`${client.name}=proxy-gagal`);
-          } else {
-            attempts.push(`${client.name}=jaringan-gagal`);
+        } catch (error) {
+          if (error instanceof ResolveError) {
+            // Galat proxy (mis. rate limit): catat lalu coba client
+            // berikut; penyebab spesifik dipakai bila semua gagal.
+            lastProxyError = error;
+            roundAttempts.push(`${client.name}=proxy-gagal`);
+            sawProxyOrNetwork = true;
+            continue;
           }
-          continue;
+          // Satu kali coba ulang untuk galat jaringan/timeout.
+          try {
+            await new Promise((r) => setTimeout(r, 2000));
+            attempt = await this.fetchPlayer(song, client, itagPreference);
+          } catch (retryError) {
+            if (retryError instanceof ResolveError) {
+              lastProxyError = retryError;
+              roundAttempts.push(`${client.name}=proxy-gagal`);
+            } else {
+              roundAttempts.push(`${client.name}=jaringan-gagal`);
+            }
+            sawProxyOrNetwork = true;
+            continue;
+          }
         }
-      }
-      attempts.push(`${client.name}=${attempt.playability}`);
-      const picked = attempt.picked;
-      if (!picked) continue;
-      if (picked.url) {
-        if (!isAllowedStreamUrl(picked.url)) continue;
-        return {
-          videoId: song.videoId,
-          title: song.title,
-          url: picked.url,
-          itag: picked.itag,
-          bitrate: picked.bitrate > 0 ? picked.bitrate : null,
-          client: client.name,
-          usedSolver: false,
-          hash: null,
-          resolveMs: Math.round(performance.now() - t0),
-        };
-      }
-      if (picked.signatureCipher) {
-        try {
-          const { url, hash } = await this.solveCipher(picked);
+        roundAttempts.push(`${client.name}=${attempt.playability}`);
+        playabilityByClient[client.name] = attempt.playability;
+        if (isRefusalPlayability(attempt.playability)) refusals += 1;
+        const picked = attempt.picked;
+        if (!picked) continue;
+        sawFormat = true;
+        if (picked.url) {
+          if (!isAllowedStreamUrl(picked.url)) continue;
+          this.recordSnapshot(
+            roundAttempts,
+            playabilityByClient,
+            roundsRun,
+          );
           return {
             videoId: song.videoId,
             title: song.title,
-            url,
+            url: picked.url,
             itag: picked.itag,
             bitrate: picked.bitrate > 0 ? picked.bitrate : null,
             client: client.name,
-            usedSolver: true,
-            hash,
+            usedSolver: false,
+            hash: null,
             resolveMs: Math.round(performance.now() - t0),
           };
-        } catch (error) {
-          attempts.push(`${client.name}=solver-gagal`);
-          if (error instanceof ResolveError) {
-            // Cipher gagal dipecahkan: coba client berikut.
-            continue;
+        }
+        if (picked.signatureCipher) {
+          try {
+            const { url, hash } = await this.solveCipher(picked);
+            this.recordSnapshot(
+              roundAttempts,
+              playabilityByClient,
+              roundsRun,
+            );
+            return {
+              videoId: song.videoId,
+              title: song.title,
+              url,
+              itag: picked.itag,
+              bitrate: picked.bitrate > 0 ? picked.bitrate : null,
+              client: client.name,
+              usedSolver: true,
+              hash,
+              resolveMs: Math.round(performance.now() - t0),
+            };
+          } catch (error) {
+            roundAttempts.push(`${client.name}=solver-gagal`);
+            if (error instanceof ResolveError) {
+              // Cipher gagal dipecahkan: coba client berikut.
+              continue;
+            }
+            throw error;
           }
-          throw error;
         }
       }
+      allAttempts.push(...roundAttempts);
+      const allRefused =
+        this.config.clients.length > 0 &&
+        refusals === this.config.clients.length &&
+        !sawFormat &&
+        !sawProxyOrNetwork;
+      if (allRefused && round + 1 < maxRounds) {
+        const waitMs =
+          RESOLVE_RETRY_BACKOFF_MS[round] ??
+          RESOLVE_RETRY_BACKOFF_MS[RESOLVE_RETRY_BACKOFF_MS.length - 1];
+        opts.onRetryRound?.(round + 2, waitMs);
+        await delay(waitMs);
+        continue;
+      }
+      break;
     }
+    this.recordSnapshot(allAttempts, playabilityByClient, roundsRun);
     if (lastProxyError) {
       throw new ResolveError(
-        `resolve gagal untuk ${song.videoId}: ${attempts.join(', ')}; ` +
+        `resolve gagal untuk ${song.videoId}: ${allAttempts.join(', ')}; ` +
           `penyebab proxy: ${lastProxyError.message}`,
         lastProxyError.causeText,
+        allAttempts,
       );
     }
     throw new ResolveError(
-      `resolve gagal untuk ${song.videoId}: ${attempts.join(', ')}`,
+      `resolve gagal untuk ${song.videoId}: ${allAttempts.join(', ')}`,
       'Lagu tidak bisa ditemukan di semua jalur. Coba lagi nanti.',
+      allAttempts,
     );
+  }
+
+  /** Simpan snapshot resolve terakhir untuk diagnostik LRS1. */
+  private recordSnapshot(
+    attempts: string[],
+    playabilityByClient: Record<string, string>,
+    rounds: number,
+  ): void {
+    const clientsTried: string[] = [];
+    for (const attempt of attempts) {
+      const name = attempt.split('=')[0];
+      if (name && !clientsTried.includes(name)) clientsTried.push(name);
+    }
+    this.lastSnapshot = {
+      clientsTried,
+      playabilityByClient: { ...playabilityByClient },
+      rounds,
+      failedAt: Date.now(),
+    };
   }
 
   /** Tutup worker solver (dipanggil saat uji selesai atau dibatalkan). */

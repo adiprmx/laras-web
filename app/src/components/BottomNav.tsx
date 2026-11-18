@@ -9,7 +9,12 @@
 import { Books, Download, House, MagnifyingGlass } from '@phosphor-icons/react';
 import { strings } from '../strings/id';
 
-export type NavCurrent = 'home' | 'search' | 'library' | 'downloads';
+export type NavCurrent =
+  | 'home'
+  | 'search'
+  | 'library'
+  | 'downloads'
+  | 'settings';
 
 interface BottomNavProps {
   current: NavCurrent;

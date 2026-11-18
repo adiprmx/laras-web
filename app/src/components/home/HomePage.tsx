@@ -31,6 +31,7 @@ import type { BrowsePage } from '../../extractor/searchParser';
 import { getPlayerService } from '../../player/service';
 import { useLibraryStore } from '../../store/library';
 import { strings } from '../../strings/id';
+import StatusBanner from '../../resilience/StatusBanner';
 import SkeletonList from '../SkeletonList';
 import TrackRow from '../TrackRow';
 import BrowseShelves from '../browse/BrowseShelves';
@@ -267,6 +268,7 @@ export default function HomePage({
 
   return (
     <div data-testid="home-page" className="pt-2">
+      <StatusBanner />
       {showNewUserEmpty ? (
         <div data-testid="home-empty" className="py-16 text-center">
           <h2 className="text-lg font-semibold tracking-tight">

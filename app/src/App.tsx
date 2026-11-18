@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import { Gear } from '@phosphor-icons/react';
 import { strings } from './strings/id';
 import { getPlayerService } from './player/service';
 import { initLibraryStore } from './store/library';
@@ -14,7 +15,8 @@ import type { LibraryTab } from './components/library/LibraryPage';
 // /p4-test = halaman uji beranda P4 (skenario "Lagu untukmu"
 // deterministik),
 // /p5-test = halaman uji unduhan P5 (isi 10 lagu + antre unduh).
-// Keempatnya DEV-ONLY (Red 1 H1): gerbang
+// /p6-test = halaman uji ketahanan P6 (seed banner + snapshot).
+// Kelimanya DEV-ONLY (Red 1 H1): gerbang
 // `import.meta.env.DEV` di bawah membuat rute + lazy import-nya
 // dihapus total dari build produksi oleh tree-shaking, sehingga
 // chunk *TestPage* tidak ada di dist/ dan pengunjung produksi
@@ -40,8 +42,14 @@ const P4TestPage = import.meta.env.DEV
 const P5TestPage = import.meta.env.DEV
   ? lazy(() => import('./test-pages/P5TestPage'))
   : null;
+const P6TestPage = import.meta.env.DEV
+  ? lazy(() => import('./test-pages/P6TestPage'))
+  : null;
 const DownloadsPage = lazy(
   () => import('./components/downloads/DownloadsPage'),
+);
+const SettingsPage = lazy(
+  () => import('./components/settings/SettingsPage'),
 );
 const LibraryPage = lazy(() => import('./components/library/LibraryPage'));
 const PlaylistDetailPage = lazy(
@@ -57,11 +65,13 @@ type Route =
   | { name: 'library'; tab?: LibraryTab }
   | { name: 'playlist'; id: number }
   | { name: 'downloads' }
+  | { name: 'settings' }
   | { name: 'spike' }
   | { name: 'player-test' }
   | { name: 'library-test' }
   | { name: 'p4-test' }
-  | { name: 'p5-test' };
+  | { name: 'p5-test' }
+  | { name: 'p6-test' };
 
 const LIBRARY_TABS: LibraryTab[] = [
   'songs',
@@ -77,14 +87,16 @@ function parseRoute(pathname: string, search: string): Route {
   const params = new URLSearchParams(search);
   if (path === '/spike') return { name: 'spike' };
   // Rute uji hanya ada di build dev (Red 1 H1): di produksi
-  // keempatnya jatuh ke beranda di bawah.
+  // kelimanya jatuh ke beranda di bawah.
   if (import.meta.env.DEV) {
     if (path === '/player-test') return { name: 'player-test' };
     if (path === '/library-test') return { name: 'library-test' };
     if (path === '/p4-test') return { name: 'p4-test' };
     if (path === '/p5-test') return { name: 'p5-test' };
+    if (path === '/p6-test') return { name: 'p6-test' };
   }
   if (path === '/downloads') return { name: 'downloads' };
+  if (path === '/settings') return { name: 'settings' };
   if (path === '/search') {
     return { name: 'search', query: params.get('q') ?? '' };
   }
@@ -162,6 +174,21 @@ export default function App() {
       .then(({ getDownloadManager }) => getDownloadManager())
       .then((manager) => manager.init())
       .catch(() => undefined);
+    // Ketahanan (P6): muat kondisi banner dari storage, lalu
+    // cek kanari harian di latar sesudah jeda 20 detik (tidak
+    // berebut jaringan dengan muat awal halaman). Impor dinamis
+    // supaya modul ketahanan tidak masuk bundle awal; gagal
+    // start tidak merusak app.
+    void import('./resilience/store')
+      .then(({ useResilienceStore }) => {
+        void useResilienceStore.getState().refresh();
+        window.setTimeout(() => {
+          void useResilienceStore
+            .getState()
+            .runDailyCanaryIfDue();
+        }, 20000);
+      })
+      .catch(() => undefined);
   }, []);
 
   const [route, navigate] = useRoute();
@@ -209,6 +236,15 @@ export default function App() {
       </Suspense>
     );
   }
+  if (route.name === 'p6-test' && P6TestPage) {
+    return (
+      <Suspense fallback={<LoadingPage />}>
+        <P6TestPage />
+        <MiniPlayer />
+        <FullPlayer />
+      </Suspense>
+    );
+  }
 
   const navCurrent: NavCurrent =
     route.name === 'search'
@@ -217,11 +253,13 @@ export default function App() {
         ? 'library'
         : route.name === 'downloads'
           ? 'downloads'
-          : 'home';
+          : route.name === 'settings'
+            ? 'settings'
+            : 'home';
 
   return (
     <div className="min-h-dvh bg-black text-zinc-100 min-[840px]:pl-[72px]">
-      <header className="flex items-center px-4 py-3">
+      <header className="flex items-center justify-between px-4 py-3">
         <button
           type="button"
           onClick={() => navigate('/')}
@@ -229,6 +267,15 @@ export default function App() {
           className="text-xl font-bold tracking-tight"
         >
           {strings.appName}
+        </button>
+        <button
+          type="button"
+          onClick={() => navigate('/settings')}
+          aria-label={strings.settings}
+          data-testid="nav-settings"
+          className="flex h-11 w-11 items-center justify-center rounded-full text-zinc-400 transition-colors hover:text-zinc-100 active:scale-95"
+        >
+          <Gear size={22} aria-hidden="true" />
         </button>
       </header>
       {/* Padding bawah memberi ruang untuk bar putar (64 px) + bar
@@ -243,6 +290,8 @@ export default function App() {
                 initialQuery={route.query}
                 onNavigate={navigate}
               />
+            ) : route.name === 'settings' ? (
+              <SettingsPage onNavigate={navigate} />
             ) : route.name === 'browse' ? (
               <BrowsePage
                 key={`${route.browseId ?? 'home'}-${route.browseParams ?? ''}`}

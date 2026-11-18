@@ -21,6 +21,18 @@ import { downloadUrl } from '../downloads/constants';
 import { getDownloadStore } from '../downloads/downloadStore';
 import { getLibraryService, MIN_PLAY_EVENT_MS } from '../data/library';
 import {
+  classifyPlaybackFailure,
+  failureMessage,
+} from '../resilience/errors';
+import {
+  causeFromFailureCause,
+  kindFromFailureCause,
+  recordFailureSnapshot,
+  type DiagnosticCause,
+  type FailureSnapshot,
+} from '../resilience/diagnostics';
+import { logPlayer, persistPlayerLog } from '../resilience/playerLog';
+import {
   migrateLocalStorageQueue,
   restoreQueueState,
   saveQueueState,
@@ -448,6 +460,14 @@ export class PlayerService {
     return this.resolver;
   }
 
+  /**
+   * Resolver bersama untuk kanari (P6): cek latar memakai
+   * resolver yang sama dengan pemutaran, bukan instance kedua.
+   */
+  async getResolver(): Promise<StreamResolver> {
+    return this.ensureResolver();
+  }
+
   /** Resolve dengan batas waktu keseluruhan + single-flight. */
   private resolveWithTimeout(track: Track): Promise<ResolvedTrack> {
     if (track.source.kind !== 'stream') {
@@ -475,7 +495,20 @@ export class PlayerService {
           );
         });
         return await Promise.race([
-          resolver.resolve({ videoId, title: track.title }),
+          resolver.resolve(
+            { videoId, title: track.title },
+            {
+              // Retry lintas waktu (P6): selama menunggu putaran
+              // berikut, UI tetap tenang ("mencari jalur lain"),
+              // bukan error.
+              onRetryRound: (round) => {
+                logPlayer(`mencari jalur lain (putaran ${round})`);
+                usePlayerStore.getState().setPlayerState({
+                  notice: strings.retryLookingForAnotherWay,
+                });
+              },
+            },
+          ),
           timeout,
         ]);
       } finally {
@@ -595,6 +628,8 @@ export class PlayerService {
       this.pendingSeek = opts.startPosition;
     }
     this.pendingPlay = opts.autoplay;
+    // Resolve lolos: pesan "mencari jalur lain" tidak berlaku lagi.
+    usePlayerStore.getState().setPlayerState({ notice: null });
     // Bila metadata sudah tersedia (jarang), loadedmetadata tidak
     // selalu menyala lagi; coba putar langsung sebagai cadangan.
     if (opts.autoplay) {
@@ -732,6 +767,23 @@ export class PlayerService {
     if (snap.errorCode === 0) return;
     const state = usePlayerStore.getState();
     if (state.status === 'idle' || state.status === 'error') return;
+    // Snapshot ENGINE (P6: menutup celah APK — kegagalan pemutar
+    // kini tertangkap, bukan hanya kegagalan resolve). Kode 1
+    // (dibatalkan) dilewati: itu efek samping ganti sumber, bukan
+    // kegagalan lagu. Tanpa URL, tanpa videoId.
+    if (snap.errorCode !== 1) {
+      const minutes = Math.floor(state.position / 60);
+      const seconds = String(Math.floor(state.position % 60)).padStart(
+        2,
+        '0',
+      );
+      logPlayer(
+        `pemutar gagal kode ${snap.errorCode} di ${minutes}:${seconds}`,
+      );
+      // Log bertahan melewati reload (best-effort).
+      void persistPlayerLog();
+      this.recordEngineSnapshot(snap.errorCode);
+    }
     // File unduhan rusak/hilang di tengah jalan: sekali saja,
     // jatuh ke stream (resolve) dari posisi terakhir, bukan
     // langsung pindah lagu. decideOnError tidak mencakup kasus
@@ -751,9 +803,72 @@ export class PlayerService {
   }
 
   private onResolveFailed(error: unknown): void {
-    const message =
-      error instanceof ResolveError ? error.causeText : strings.resolveFailed;
-    void this.failCurrentTrack(message);
+    // Klasifikasi 6 penyebab (P6): pesan yang tampil disesuaikan
+    // dengan penyebabnya, bukan satu pesan generik.
+    const classified = classifyPlaybackFailure({
+      online: navigator.onLine,
+      error,
+    });
+    const attempts =
+      error instanceof ResolveError ? error.attempts : [];
+    if (attempts.length > 0) {
+      logPlayer(`gagal cari lagu: ${attempts.join(', ')}`);
+    } else {
+      logPlayer('gagal cari lagu (tanpa rincian upaya)');
+    }
+    // Log bertahan melewati reload (best-effort).
+    void persistPlayerLog();
+    this.recordResolveSnapshot(classified.cause, classified.isTimeout);
+    void this.failCurrentTrack(failureMessage(classified));
+  }
+
+  /** Snapshot kegagalan resolve untuk kode diagnostik LRS1. */
+  private recordResolveSnapshot(
+    cause: Parameters<typeof causeFromFailureCause>[0],
+    isTimeout: boolean,
+  ): void {
+    const last = this.resolver?.lastResolve ?? null;
+    const clientsTried = last?.clientsTried ?? [];
+    const lastClient = clientsTried[clientsTried.length - 1] ?? null;
+    const snapshot: FailureSnapshot = {
+      layer: 'resolve',
+      kind: kindFromFailureCause(cause, isTimeout),
+      cause: causeFromFailureCause(cause),
+      failedAt: Date.now(),
+      clientsTried,
+      lastClient,
+      lastPlayability: lastClient
+        ? (last?.playabilityByClient[lastClient] ?? null)
+        : null,
+      playerHash: this.resolver?.playerHash ?? null,
+    };
+    recordFailureSnapshot(snapshot);
+  }
+
+  /**
+   * Snapshot kegagalan ENGINE untuk kode diagnostik LRS1.
+   * Kode error elemen media: 2 jaringan, 3 decode, 4 sumber tidak
+   * didukung (googlevideo 403 mendarat di sini).
+   */
+  private recordEngineSnapshot(errorCode: number): void {
+    const last = this.resolver?.lastResolve ?? null;
+    const clientsTried = last?.clientsTried ?? [];
+    const lastClient = clientsTried[clientsTried.length - 1] ?? null;
+    const cause: DiagnosticCause =
+      errorCode === 4 ? 'http-forbidden' : 'unknown';
+    const snapshot: FailureSnapshot = {
+      layer: 'engine',
+      kind: errorCode === 2 ? 'network' : 'engine',
+      cause,
+      failedAt: Date.now(),
+      clientsTried,
+      lastClient,
+      lastPlayability: lastClient
+        ? (last?.playabilityByClient[lastClient] ?? null)
+        : null,
+      playerHash: this.resolver?.playerHash ?? null,
+    };
+    recordFailureSnapshot(snapshot);
   }
 
   // ---------- Pemulihan ----------
@@ -770,6 +885,7 @@ export class PlayerService {
     const resumeAt = state.position;
     this.reResolveCount += 1;
     this.stallTracker.reset();
+    logPlayer(`cari ulang lagu (ke-${this.reResolveCount})`);
     usePlayerStore.getState().setPlayerState({ status: 'loading' });
 
     let url: string | null = null;
