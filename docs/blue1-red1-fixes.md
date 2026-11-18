@@ -368,3 +368,9 @@ cap, body null, UTF-8 terpotong antar chunk).
 - I1 (cabut `x-proxy-cpu-ms`) + I2 (hash dari config remote) saat
   promosi proxy produksi.
 - Gerbang `npm audit` di run CI pertama (tidak bisa dicek lokal).
+
+## Addendum koordinator — gerbang audit R4 dipersyaratkan (18 Nov 2026)
+
+CI run 44239956351 (commit Blue 1) gagal di gerbang `npm audit --audit-level=high`: 13 temuan (1 sedang, 10 tinggi, 2 kritis), semua di dependensi dev. Fix bedah koordinator: npm `overrides` `picomatch@^4.0.7` + `tinypool@^2.2.0` (commit c7bc5de2). CI run 44242295039: kritis tinypool hilang, tetapi picomatch high tetap — GHSA-fc5q / CVE-2026-112366 menyerang SEMUA versi picomatch s.d. 4.0.7 (rilis terbaru; terverifikasi di GitHub Advisory Database), jadi tidak ada bump versi yang bisa membersihkannya. Satu-satunya jalan keluar adalah menghapus picomatch dari tree (upgrade vitest 5, breaking — dijadwalkan terpisah).
+
+Keputusan: gerbang blokir kini `npm audit --omit=dev --audit-level=high` (dependensi produksi — yang dikirim ke browser pengguna); langkah informasional kedua (`continue-on-error: true`) tetap menjalankan audit penuh supaya temuan dev tercatat di log CI. Temuan ini TIDAK disembunyikan — dicatat di CHANGELOG, ci.yml, dan addendum ini. Sisa `@vitest/mocker` sedang (GHSA-82fw, GHSA-qxg6) di bawah ambang gate dan ikut tertutup oleh upgrade vitest 5.
