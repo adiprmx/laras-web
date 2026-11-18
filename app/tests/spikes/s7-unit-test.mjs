@@ -233,6 +233,22 @@ function rec(label, got, expect, extra = {}) {
   rec('Tanpa binding DB: request diizinkan (fail-open)', r.status, 200);
 }
 
+// 8. P5 bug #1: /api/media mengekspos Content-Range ke browser (CORS).
+// fetch() tidak bisa membaca Content-Range bila tidak ada di
+// Access-Control-Expose-Headers — pengunduh chunked butuh total
+// byte dari header itu. withCpu() dulu menimpanya jadi hanya
+// x-proxy-cpu-ms; kini digabung.
+{
+  const r = await worker.fetch(req('/api/media?u=' + encodeURIComponent('https://rr1---sn-xxxx.googlevideo.com/videoplayback?x=8'), {
+    headers: { 'CF-Connecting-IP': '203.0.113.28', Range: 'bytes=0-1023' },
+  }), ENV);
+  await r.text();
+  rec('Media 206 meneruskan Content-Range', r.headers.get('Content-Range'), 'bytes 0-1023/4808098');
+  const exposed = r.headers.get('Access-Control-Expose-Headers') || '';
+  rec('Media mengekspos Content-Range (CORS)', exposed.includes('Content-Range'), true, { note: `expose=${exposed}` });
+  rec('Header CPU tetap terekspos di media', exposed.includes('x-proxy-cpu-ms'), true, { note: `expose=${exposed}` });
+}
+
 const passed = results.filter((r) => r.pass).length;
 const report = {
   at: new Date().toISOString(),

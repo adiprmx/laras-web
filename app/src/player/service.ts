@@ -17,6 +17,8 @@ import {
   StreamResolver,
   type ResolvedTrack,
 } from '../extractor/resolve';
+import { downloadUrl } from '../downloads/constants';
+import { getDownloadStore } from '../downloads/downloadStore';
 import { getLibraryService, MIN_PLAY_EVENT_MS } from '../data/library';
 import {
   migrateLocalStorageQueue,
@@ -104,6 +106,10 @@ export class PlayerService {
   private preResolvedUrl: string | null = null;
   private preResolvedFor: string | null = null;
   private currentKind: 'stream' | 'local' | null = null;
+  /** videoId lagu yang sedang diputar dari file unduhan (P5). */
+  private playingDownloadedVideoId: string | null = null;
+  /** Apakah fallback unduhan-ke-stream sudah dipakai lagu ini. */
+  private downloadFallbackUsed = false;
   private initialized = false;
   private detachPort: Array<() => void> = [];
   private persistChain: Promise<void> = Promise.resolve();
@@ -481,6 +487,23 @@ export class PlayerService {
     return promise;
   }
 
+  /**
+   * URL file unduhan lagu ini, bila terunduh DAN Service Worker
+   * mengendalikan halaman (tanpa SW, `/dl/` tidak bisa dilayani).
+   * Null berarti pakai jalur stream biasa. Gagal cek apa pun
+   * berarti stream (unduhan tidak pernah merusak pemutaran).
+   */
+  private async downloadedFileUrl(videoId: string): Promise<string | null> {
+    try {
+      if (!('serviceWorker' in navigator)) return null;
+      if (!navigator.serviceWorker.controller) return null;
+      const has = await getDownloadStore().hasDownload(videoId);
+      return has ? downloadUrl(videoId) : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async loadTrack(
     track: Track,
     opts: { autoplay: boolean; startPosition: number },
@@ -492,6 +515,8 @@ export class PlayerService {
     this.preResolvedFor = null;
     this.pendingSeek = null;
     this.pendingPlay = false;
+    this.playingDownloadedVideoId = null;
+    this.downloadFallbackUsed = false;
     // Ganti lagu: tutup sesi riwayat lagu sebelumnya, lalu mulai
     // sesi baru + simpan metadata lagu ini (bukan ke Library).
     void this.finishHistorySession(false);
@@ -508,25 +533,38 @@ export class PlayerService {
     this.mediaSession.setTrack(track);
     this.mediaSession.setPlaybackState('none');
 
+    // Sumber lokal: track lokal memakai URL-nya sendiri; track
+    // streaming memakai file unduhan bila ada (P5: unduhan dulu,
+    // lalu stream — urutan sumber arsitektur §3.3).
+    let localUrl: string | null = null;
     if (track.source.kind === 'local') {
+      localUrl = track.source.url;
+    } else {
+      localUrl = await this.downloadedFileUrl(track.source.videoId);
+      if (token !== this.playToken) return;
+      if (localUrl) {
+        this.playingDownloadedVideoId = track.source.videoId;
+      }
+    }
+    if (localUrl) {
       // Titik choke (Red 1 I3): tolak URL lokal host asing SEBELUM
       // probe CORS di decidePath menyentuh host itu. port.load
       // memeriksa lagi sebagai pertahanan lapis kedua.
-      if (!isSafeLocalUrl(track.source.url)) {
+      if (!isSafeLocalUrl(localUrl)) {
         this.onResolveFailed(
           new Error('URL audio lokal tidak diizinkan'),
         );
         return;
       }
       this.currentKind = 'local';
-      const path = await this.graph.decidePath(track.source.url);
+      const path = await this.graph.decidePath(localUrl);
       if (token !== this.playToken) return;
       if (path === 'graph') {
         this.graph.attach(this.port.getLocalElement());
         this.graph.setVolume(usePlayerStore.getState().volume);
-        this.port.load(track.source.url, 'local');
+        this.port.load(localUrl, 'local');
       } else {
-        this.port.load(track.source.url, 'stream');
+        this.port.load(localUrl, 'stream');
       }
       usePlayerStore.getState().setPlayerState({ audioPath: path });
       this.beginPlayback(token, opts);
@@ -694,6 +732,16 @@ export class PlayerService {
     if (snap.errorCode === 0) return;
     const state = usePlayerStore.getState();
     if (state.status === 'idle' || state.status === 'error') return;
+    // File unduhan rusak/hilang di tengah jalan: sekali saja,
+    // jatuh ke stream (resolve) dari posisi terakhir, bukan
+    // langsung pindah lagu. decideOnError tidak mencakup kasus
+    // ini (error di posisi 0 langsung 'next').
+    if (this.playingDownloadedVideoId && !this.downloadFallbackUsed) {
+      this.downloadFallbackUsed = true;
+      this.playingDownloadedVideoId = null;
+      await this.doReResolve();
+      return;
+    }
     const decision = decideOnError(state.position, this.reResolveCount);
     if (decision === 'reresolve') {
       await this.doReResolve();
@@ -776,6 +824,7 @@ export class PlayerService {
   private stopPlayback(): void {
     this.port.pause();
     this.currentKind = null;
+    this.playingDownloadedVideoId = null;
     this.mediaSession.clear();
     void this.finishHistorySession(false);
     usePlayerStore.getState().setPlayerState({

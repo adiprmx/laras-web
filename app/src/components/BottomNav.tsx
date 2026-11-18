@@ -4,13 +4,12 @@
  * CSS — bukan dua komponen — supaya testid tiap tombol unik di
  * semua ukuran layar.
  *
- * Tiga tab di P4: Beranda, Cari, Library. Tab Unduhan menyusul
- * di P5 bersama layar Unduhan (tidak ada tab mati tanpa tujuan).
+ * Empat tab (P5): Beranda, Cari, Library, Unduhan.
  */
-import { Books, House, MagnifyingGlass } from '@phosphor-icons/react';
+import { Books, Download, House, MagnifyingGlass } from '@phosphor-icons/react';
 import { strings } from '../strings/id';
 
-export type NavCurrent = 'home' | 'search' | 'library';
+export type NavCurrent = 'home' | 'search' | 'library' | 'downloads';
 
 interface BottomNavProps {
   current: NavCurrent;
@@ -49,6 +48,15 @@ const ITEMS: Array<{
     testId: 'nav-library',
     icon: (active) => (
       <Books size={22} weight={active ? 'fill' : 'regular'} aria-hidden="true" />
+    ),
+  },
+  {
+    id: 'downloads',
+    label: strings.downloads,
+    path: '/downloads',
+    testId: 'nav-downloads',
+    icon: (active) => (
+      <Download size={22} weight={active ? 'fill' : 'regular'} aria-hidden="true" />
     ),
   },
 ];

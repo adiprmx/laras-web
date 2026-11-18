@@ -25,6 +25,7 @@ import {
   MEANINGFUL_PLAY_MS,
   resetLibraryService,
 } from '../data/library';
+import { getDownloadStore } from '../downloads/downloadStore';
 import type { SongImport } from '../data/types';
 
 function song(id: string, title: string, dateAdded: number): SongImport {
@@ -97,9 +98,18 @@ export default function P4TestPage() {
         await service.toggleLiked('p4-song-a');
         await service.markDownloaded({
           songId: 'p4-song-c',
-          filePath: 'p4-song-c.opus',
+          filePath: '/dl/p4-song-c',
           fileSizeBytes: 1234,
         });
+        // P5: rekonsiliasi saat start membersihkan lagu yang
+        // diklaim terunduh tetapi filenya tidak ada di cache —
+        // seed wajib menulis file sungguhan (1.234 byte) supaya
+        // skenario ini tetap jujur dan seksi Unduhan tampil.
+        await getDownloadStore().putDownload(
+          'p4-song-c',
+          new Blob([new Uint8Array(1234)], { type: 'audio/webm' }),
+          'audio/webm',
+        );
         const playlistId = await service.createPlaylist('Playlist Uji P4');
         await service.addSongToPlaylist(playlistId, 'p4-song-a');
         await service.addSongToPlaylist(playlistId, 'p4-song-b');

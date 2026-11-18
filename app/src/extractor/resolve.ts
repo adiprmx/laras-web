@@ -64,6 +64,8 @@ export interface ResolvedTrack {
   /** URL stream langsung. Hanya ada di memori, jangan dicetak. */
   url: string;
   itag: number;
+  /** Bitrate format terpilih (bit/detik), bila diketahui. */
+  bitrate: number | null;
   client: string;
   /** True bila URL didapat lewat solver (format cipher). */
   usedSolver: boolean;
@@ -237,20 +239,33 @@ export function parseAudioFormats(json: unknown): {
 }
 
 /**
- * Pilih format audio: itag sesuai urutan kanonis, bukan SABR, dan
- * membawa URL langsung atau cipher. Bila tidak ada yang cocok di
- * urutan, ambil bitrate tertinggi.
+ * Pilih format audio menurut urutan itag pilihan: itag pertama
+ * dalam urutan yang tersedia (bukan SABR, membawa URL langsung
+ * atau cipher) yang menang. Bila tidak ada yang cocok di urutan,
+ * ambil bitrate tertinggi.
  */
-export function pickAudioFormat(formats: AudioFormat[]): AudioFormat | null {
+export function pickAudioFormatForPreference(
+  formats: AudioFormat[],
+  preference: readonly number[],
+): AudioFormat | null {
   const usable = formats.filter(
     (f) => !f.isSabr && (Boolean(f.url) || Boolean(f.signatureCipher)),
   );
-  for (const itag of ITAG_ORDER) {
+  for (const itag of preference) {
     const found = usable.find((f) => f.itag === itag);
     if (found) return found;
   }
   usable.sort((a, b) => b.bitrate - a.bitrate);
   return usable[0] ?? null;
+}
+
+/**
+ * Pilih format audio: itag sesuai urutan kanonis, bukan SABR, dan
+ * membawa URL langsung atau cipher. Bila tidak ada yang cocok di
+ * urutan, ambil bitrate tertinggi.
+ */
+export function pickAudioFormat(formats: AudioFormat[]): AudioFormat | null {
+  return pickAudioFormatForPreference(formats, ITAG_ORDER);
 }
 
 /**
@@ -503,6 +518,7 @@ export class StreamResolver {
   private async fetchPlayer(
     song: SongRef,
     client: ClientDefinition,
+    itagPreference: readonly number[] = ITAG_ORDER,
   ): Promise<{ playability: string; picked: AudioFormat | null }> {
     const context = { ...client.context };
     if (this.visitorData) context.visitorData = this.visitorData;
@@ -532,18 +548,29 @@ export class StreamResolver {
       PLAYER_TIMEOUT_MS,
     );
     const { playability, formats } = parseAudioFormats(json);
-    return { playability, picked: pickAudioFormat(formats) };
+    return {
+      playability,
+      picked: pickAudioFormatForPreference(formats, itagPreference),
+    };
   }
 
   /**
    * Resolve satu lagu lewat urutan fallback client. Format cipher
    * dipecahkan solver di browser; URL langsung dipakai apa adanya
    * sesudah lolos allowlist.
+   *
+   * `opts.itagPreference` (P5, unduhan): urutan itag pilihan
+   * kualitas unduhan; tanpa opsi ini, urutan kanonis dipakai
+   * (perilaku pemutaran tidak berubah).
    */
-  async resolve(song: SongRef): Promise<ResolvedTrack> {
+  async resolve(
+    song: SongRef,
+    opts: { itagPreference?: readonly number[] } = {},
+  ): Promise<ResolvedTrack> {
     if (!this.config) {
       throw new ResolveError('resolver belum init', 'Resolver belum siap.');
     }
+    const itagPreference = opts.itagPreference ?? ITAG_ORDER;
     const t0 = performance.now();
     const attempts: string[] = [];
     let lastProxyError: ResolveError | null = null;
@@ -553,7 +580,7 @@ export class StreamResolver {
         picked: AudioFormat | null;
       } | null = null;
       try {
-        attempt = await this.fetchPlayer(song, client);
+        attempt = await this.fetchPlayer(song, client, itagPreference);
       } catch (error) {
         if (error instanceof ResolveError) {
           // Galat proxy (mis. rate limit): catat lalu coba client
@@ -565,7 +592,7 @@ export class StreamResolver {
         // Satu kali coba ulang untuk galat jaringan/timeout.
         try {
           await new Promise((r) => setTimeout(r, 2000));
-          attempt = await this.fetchPlayer(song, client);
+          attempt = await this.fetchPlayer(song, client, itagPreference);
         } catch (retryError) {
           if (retryError instanceof ResolveError) {
             lastProxyError = retryError;
@@ -586,6 +613,7 @@ export class StreamResolver {
           title: song.title,
           url: picked.url,
           itag: picked.itag,
+          bitrate: picked.bitrate > 0 ? picked.bitrate : null,
           client: client.name,
           usedSolver: false,
           hash: null,
@@ -600,6 +628,7 @@ export class StreamResolver {
             title: song.title,
             url,
             itag: picked.itag,
+            bitrate: picked.bitrate > 0 ? picked.bitrate : null,
             client: client.name,
             usedSolver: true,
             hash,

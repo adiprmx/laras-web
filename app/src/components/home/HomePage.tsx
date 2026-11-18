@@ -400,6 +400,12 @@ export default function HomePage({
             <Section
               title={strings.sectionDownloads}
               testId="home-section-downloads"
+              action={
+                <ViewAllButton
+                  testId="home-downloads-view-all"
+                  onClick={() => onNavigate('/downloads')}
+                />
+              }
             >
               <SongList songs={local.downloaded} testIdPrefix="home-downloaded" />
             </Section>

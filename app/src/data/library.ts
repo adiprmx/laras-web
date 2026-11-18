@@ -1779,6 +1779,25 @@ export class LibraryService {
     return this.attachArtists(rows.slice(0, opts.limit ?? 10));
   }
 
+  /**
+   * Semua lagu terunduh, urut unduhan terbaru dulu (layar
+   * Penyimpanan P5). Berbeda dengan `downloadedSongs` (urut
+   * ukuran, batas 10 untuk seksi beranda).
+   */
+  async downloadedSongsList(): Promise<SongView[]> {
+    const rows = await this.db.songs
+      .where('downloadState')
+      .equals(DownloadState.downloaded)
+      .toArray();
+    rows.sort((a, b) => {
+      const dateA = a.downloadedAt ?? 0;
+      const dateB = b.downloadedAt ?? 0;
+      if (dateA !== dateB) return dateB - dateA;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+    return this.attachArtists(rows);
+  }
+
   /** Daftar ringan semua file unduhan (rekonsiliasi saat start). */
   async downloadedFiles(): Promise<
     Array<{ songId: string; filePath: string | null; fileSizeBytes: number | null }>
@@ -1873,10 +1892,51 @@ export class LibraryService {
   async downloadJobBySongId(songId: string): Promise<{
     songId: string;
     status: number;
+    quality: number | null;
+    bytesDownloaded: number;
+    totalBytes: number | null;
+    attempts: number;
+    errorMessage: string | null;
+    createdAt: number | null;
+    updatedAt: number;
   } | null> {
     const row = await this.db.download_jobs.get(songId);
     if (!row) return null;
-    return { songId: row.songId, status: row.status };
+    return {
+      songId: row.songId,
+      status: row.status,
+      quality: row.quality,
+      bytesDownloaded: row.bytesDownloaded,
+      totalBytes: row.totalBytes,
+      attempts: row.attempts,
+      errorMessage: row.errorMessage,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  /**
+   * Perbarui sebagian kolom pekerjaan unduhan (progres per chunk,
+   * status, pesan galat). Berbeda dengan upsert: kolom yang tidak
+   * disebut TIDAK berubah (upsert menimpa quality dan kawan-kawan
+   * dengan null bila tidak disebut).
+   */
+  async updateDownloadJob(
+    songId: string,
+    patch: Partial<{
+      status: number;
+      quality: number | null;
+      bytesDownloaded: number;
+      totalBytes: number | null;
+      attempts: number;
+      errorMessage: string | null;
+    }>,
+  ): Promise<void> {
+    await this.db.download_jobs.update(songId, {
+      ...patch,
+      updatedAt: now(),
+    });
+    this.notify();
   }
 
   /** Sisip atau ganti satu pekerjaan unduhan. */

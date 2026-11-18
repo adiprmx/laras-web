@@ -745,6 +745,58 @@ describe('pekerjaan unduhan dan cache', () => {
     const lru = await service.cacheEntriesByLru({ limit: 10 });
     expect(lru.map((e) => e.key)).toEqual(['v1_140', 'v1_251']);
   });
+
+  it('updateDownloadJob memperbarui sebagian tanpa menimpa kolom lain (P5)', async () => {
+    const service = await makeService();
+    await service.upsertDownloadJob({
+      songId: 'v1',
+      status: 1,
+      quality: 251,
+      bytesDownloaded: 100,
+      totalBytes: 2500,
+      attempts: 1,
+      errorMessage: null,
+      createdAt: 1,
+    });
+    await service.updateDownloadJob('v1', { bytesDownloaded: 500 });
+    const job = await service.downloadJobBySongId('v1');
+    expect(job).toMatchObject({
+      status: 1,
+      quality: 251,
+      bytesDownloaded: 500,
+      totalBytes: 2500,
+      attempts: 1,
+    });
+  });
+
+  it('downloadedSongsList mengembalikan unduhan, terbaru dulu (P5)', async () => {
+    const service = await makeService();
+    await service.importSongs(
+      [
+        song('d1', 'Unduhan 1', [], 1000),
+        song('d2', 'Unduhan 2', [], 2000),
+        song('n1', 'Bukan unduhan', [], 3000),
+      ],
+      { addToLibrary: true },
+    );
+    await service.markDownloaded({
+      songId: 'd1',
+      filePath: '/dl/d1',
+      fileSizeBytes: 100,
+    });
+    // Jeda 2 ms supaya stempel waktu unduhan d2 pasti lebih
+    // baru dari d1 (tanpa jeda keduanya bisa sama dan urutan
+    // jatuh ke tie-break id).
+    await new Promise((r) => setTimeout(r, 2));
+    await service.markDownloaded({
+      songId: 'd2',
+      filePath: '/dl/d2',
+      fileSizeBytes: 200,
+    });
+    const list = await service.downloadedSongsList();
+    expect(list.map((s) => s.song.id)).toEqual(['d2', 'd1']);
+    expect(list[0].song.fileSizeBytes).toBe(200);
+  });
 });
 
 describe('subscribe', () => {

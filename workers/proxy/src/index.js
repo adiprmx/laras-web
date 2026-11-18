@@ -125,7 +125,15 @@ export default {
       h.set('x-proxy-cpu-ms', cpuMs.toFixed(3));
       // Spike saja: buka header ukur ke JS browser (tanpa ini nilainya
       // tidak terbaca dari fetch; dicabut bersama headernya di produksi).
-      h.set('Access-Control-Expose-Headers', 'x-proxy-cpu-ms');
+      // GABUNG, jangan timpa: /api/media mengekspos Content-Range
+      // (bug P5 #1 — timpa membuat fetch() tidak bisa membaca total
+      // byte unduhan chunked).
+      const prev = h.get('Access-Control-Expose-Headers');
+      const exposed = new Set(
+        (prev || '').split(',').map((s) => s.trim()).filter(Boolean),
+      );
+      exposed.add('x-proxy-cpu-ms');
+      h.set('Access-Control-Expose-Headers', [...exposed].join(', '));
       return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
     };
 
@@ -257,6 +265,10 @@ export default {
           const v = upstream.headers.get(name);
           if (v) resHeaders.set(name, v);
         }
+        // P5: Content-Range + Accept-Ranges bukan header safelist CORS —
+        // tanpa expose, fetch() browser tidak bisa membacanya dan
+        // pengunduh chunked kehilangan total byte.
+        resHeaders.set('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges');
         resHeaders.set('X-Content-Type-Options', 'nosniff');
         mark(t0);
         return withCpu(new Response(

@@ -1,23 +1,29 @@
 /**
  * Menu lagu (lembar bawah): putar berikutnya, tambah antrean,
- * tambah ke playlist, suka, hapus dari Library / playlist.
+ * tambah ke playlist, suka, unduh, hapus dari Library / playlist.
  */
 import { useEffect, useState } from 'react';
 import {
+  ArrowClockwise,
   CaretDown,
   CaretUp,
+  Download,
   Heart,
   ListPlus,
   Play,
   Playlist,
   Trash,
+  X,
 } from '@phosphor-icons/react';
 import { getLibraryService } from '../../data/library';
-import type { SongView } from '../../data/types';
+import { DownloadJobStatus, type SongView } from '../../data/types';
+import type { DownloadQuality } from '../../downloads/quality';
 import { getPlayerService } from '../../player/service';
 import { useLibraryStore } from '../../store/library';
 import { strings } from '../../strings/id';
+import DownloadQualityDialog from '../downloads/DownloadQualityDialog';
 import AddToPlaylistDialog from './AddToPlaylistDialog';
+import ConfirmDialog from './ConfirmDialog';
 import { trackFromView } from './trackFromView';
 
 interface SongMenuProps {
@@ -42,15 +48,30 @@ export default function SongMenu({
 }: SongMenuProps) {
   const version = useLibraryStore((s) => s.version);
   const [liked, setLiked] = useState(false);
+  const [downloaded, setDownloaded] = useState(false);
+  const [jobStatus, setJobStatus] = useState<number | null>(null);
   const [showAddToPlaylist, setShowAddToPlaylist] = useState(false);
+  const [showQuality, setShowQuality] = useState(false);
+  const [showDeleteDownload, setShowDeleteDownload] = useState(false);
   const track = trackFromView(view);
+  // Lagu lokal (id = URL) tidak bisa diunduh: filenya sudah lokal.
+  const isLocalTrack =
+    view.song.id.startsWith('http://') ||
+    view.song.id.startsWith('https://');
 
   useEffect(() => {
     let alive = true;
     getLibraryService()
-      .then((service) => service.isLiked(view.song.id))
-      .then((value) => {
-        if (alive) setLiked(value);
+      .then(async (service) => {
+        const [likedValue, downloadedValue, job] = await Promise.all([
+          service.isLiked(view.song.id),
+          service.isDownloaded(view.song.id),
+          service.downloadJobBySongId(view.song.id),
+        ]);
+        if (!alive) return;
+        setLiked(likedValue);
+        setDownloaded(downloadedValue);
+        setJobStatus(job ? job.status : null);
       })
       .catch(() => undefined);
     return () => {
@@ -59,6 +80,69 @@ export default function SongMenu({
   }, [view.song.id, version]);
 
   const service = getPlayerService();
+
+  const downloadManager = async () => {
+    const { getDownloadManager } = await import(
+      '../../downloads/downloadManager'
+    );
+    return getDownloadManager();
+  };
+
+  const pickQuality = (quality: DownloadQuality): void => {
+    setShowQuality(false);
+    void downloadManager()
+      .then((manager) =>
+        manager.enqueue(view.song.id, quality, {
+          title: view.song.title,
+          durationSeconds: view.song.durationSeconds,
+          artistNames: view.artistNames,
+        }),
+      )
+      .then((result) => {
+        onMessage(
+          result === 'already-downloaded'
+            ? strings.downloadAlreadyDownloaded
+            : result === 'already-queued'
+              ? strings.downloadAlreadyQueued
+              : strings.downloadQueued,
+        );
+        onClose();
+      })
+      .catch(() => onClose());
+  };
+
+  if (showQuality) {
+    return (
+      <DownloadQualityDialog
+        title={view.song.title}
+        durationSeconds={view.song.durationSeconds}
+        onPick={pickQuality}
+        onCancel={() => setShowQuality(false)}
+      />
+    );
+  }
+
+  if (showDeleteDownload) {
+    return (
+      <ConfirmDialog
+        title={strings.deleteDownloadTitle}
+        body={strings.deleteDownloadBody}
+        confirmLabel={strings.delete}
+        onConfirm={() => {
+          setShowDeleteDownload(false);
+          void downloadManager()
+            .then((manager) => manager.deleteDownload(view.song.id))
+            .then(() => {
+              onMessage(strings.downloadDeleted);
+              onClose();
+            })
+            .catch(() => onClose());
+        }}
+        onCancel={() => setShowDeleteDownload(false)}
+        testId="menu-delete-download-dialog"
+      />
+    );
+  }
 
   if (showAddToPlaylist) {
     return (
@@ -140,6 +224,75 @@ export default function SongMenu({
           <Heart size={20} weight={liked ? 'fill' : 'regular'} />
           {liked ? strings.unlike : strings.like}
         </button>
+        {!isLocalTrack && downloaded ? (
+          <button
+            type="button"
+            data-testid="menu-delete-download"
+            className={`${itemClass} text-red-400`}
+            onClick={() => setShowDeleteDownload(true)}
+          >
+            <Trash size={20} />
+            {strings.deleteDownload}
+          </button>
+        ) : null}
+        {!isLocalTrack &&
+        !downloaded &&
+        (jobStatus === DownloadJobStatus.queued ||
+          jobStatus === DownloadJobStatus.running) ? (
+          <button
+            type="button"
+            data-testid="menu-cancel-download"
+            className={itemClass}
+            onClick={() => {
+              void downloadManager()
+                .then((manager) => manager.cancel(view.song.id))
+                .then(() => {
+                  onMessage(strings.downloadCancelled);
+                  onClose();
+                })
+                .catch(() => onClose());
+            }}
+          >
+            <X size={20} />
+            {strings.cancelDownload}
+          </button>
+        ) : null}
+        {!isLocalTrack &&
+        !downloaded &&
+        jobStatus === DownloadJobStatus.failed ? (
+          <button
+            type="button"
+            data-testid="menu-retry-download"
+            className={itemClass}
+            onClick={() => {
+              void downloadManager()
+                .then((manager) => manager.retry(view.song.id))
+                .then(() => {
+                  onMessage(strings.downloadQueued);
+                  onClose();
+                })
+                .catch(() => onClose());
+            }}
+          >
+            <ArrowClockwise size={20} />
+            {strings.retryDownload}
+          </button>
+        ) : null}
+        {!isLocalTrack &&
+        !downloaded &&
+        jobStatus !== DownloadJobStatus.queued &&
+        jobStatus !== DownloadJobStatus.running &&
+        jobStatus !== DownloadJobStatus.failed ? (
+          <button
+            type="button"
+            data-testid="menu-download"
+            className={itemClass}
+            onClick={() => setShowQuality(true)}
+          >
+            <Download size={20} />
+            {strings.download}
+          </button>
+        ) : null}
         {playlistId != null && onMoveUp && (
           <button
             type="button"

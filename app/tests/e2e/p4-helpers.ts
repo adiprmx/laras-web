@@ -98,6 +98,12 @@ export async function fulfillRange(
         'Content-Length': String(slice.length),
         'Content-Range': `bytes ${start}-${start + slice.length - 1}/${buffer.length}`,
         'Accept-Ranges': 'bytes',
+        // WAJIB: tanpa ini browser menyembunyikan Content-Range
+        // dari fetch lintas origin (bukan header safelist CORS)
+        // dan pengunduh tidak pernah tahu total file — semua
+        // job gagal 'Server membalas tanpa byte' (P5, 18 Nov).
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Expose-Headers': 'Content-Range',
       },
       body: slice,
     });

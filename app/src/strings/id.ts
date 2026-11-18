@@ -159,6 +159,49 @@ export const strings = {
   eqStreamingNote:
     'Pengatur suara hanya bisa dipakai untuk lagu yang tersimpan di perangkat.',
   eqLocalNote: 'Pengatur suara belum tersedia di versi ini.',
+  // Unduhan (P5)
+  download: 'Unduh',
+  downloadQualityTitle: 'Pilih kualitas unduhan',
+  downloadQualityBest: 'Terbaik',
+  downloadQualityBestNote: 'Suara paling jernih, ukuran paling besar',
+  downloadQualityBalanced: 'Seimbang',
+  downloadQualityBalancedNote: 'Suara bagus, ukuran sedang',
+  downloadQualityDataSaver: 'Hemat data',
+  downloadQualityDataSaverNote: 'Ukuran paling kecil, suara cukup',
+  downloadEstimatedSize: (size: string) => `Sekitar ${size}`,
+  downloadQueued: 'Ditambahkan ke antrean unduhan',
+  downloadAlreadyDownloaded: 'Lagu ini sudah tersimpan di perangkat',
+  downloadAlreadyQueued: 'Lagu ini sudah ada di antrean unduhan',
+  deleteDownload: 'Hapus unduhan',
+  deleteDownloadTitle: 'Hapus unduhan lagu ini?',
+  deleteDownloadBody:
+    'File lagu akan dihapus dari perangkat ini. Lagunya tetap ada di Library kamu.',
+  cancelDownload: 'Batalkan unduhan',
+  retryDownload: 'Coba unduh lagi',
+  downloadCancelled: 'Unduhan dibatalkan',
+  downloadDeleted: 'Unduhan dihapus',
+  // Layar Penyimpanan (P5)
+  storageTitle: 'Penyimpanan',
+  storageDownloadedLabel: 'Lagu tersimpan',
+  storageUsageLabel: 'Ruang yang dipakai app ini',
+  storageUnknownQuota: 'Perangkat tidak memberi tahu total ruang',
+  storageEmptyTitle: 'Belum ada lagu yang diunduh',
+  storageEmptyBody:
+    'Lagu yang kamu unduh bisa diputar tanpa internet. Cari lagu, lalu ketuk Unduh di menunya.',
+  storageDownloading: 'Sedang mengunduh',
+  storageQueued: 'Menunggu giliran',
+  storageFailed: 'Unduhan gagal',
+  storagePlayAll: 'Putar semua',
+  storageDeleteAll: 'Hapus semua unduhan',
+  storageDeleteAllTitle: 'Hapus semua unduhan?',
+  storageDeleteAllBody: (count: number) =>
+    `${count} lagu akan dihapus dari perangkat ini. Lagu-lagunya tetap ada di Library kamu.`,
+  storageDeleteAllConfirm: 'Ya, hapus semua',
+  storageDeleteAllSecondTitle: 'Yakin hapus semuanya?',
+  storageDeleteAllSecondBody:
+    'Tindakan ini tidak bisa dibatalkan. Kamu perlu mengunduh ulang lagu-lagu itu bila masih mau mendengarkan offline.',
+  storageDeletedAll: 'Semua unduhan dihapus',
+  storageOf: (done: string, total: string) => `${done} dari ${total}`,
 } as const;
 
 export type Strings = typeof strings;

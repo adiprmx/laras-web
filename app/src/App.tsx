@@ -12,7 +12,9 @@ import type { LibraryTab } from './components/library/LibraryPage';
 // /player-test = halaman uji pemutar P2 (nada lokal),
 // /library-test = halaman uji library P3 (isi 1.000 lagu contoh),
 // /p4-test = halaman uji beranda P4 (skenario "Lagu untukmu"
-// deterministik). Ketiganya DEV-ONLY (Red 1 H1): gerbang
+// deterministik),
+// /p5-test = halaman uji unduhan P5 (isi 10 lagu + antre unduh).
+// Keempatnya DEV-ONLY (Red 1 H1): gerbang
 // `import.meta.env.DEV` di bawah membuat rute + lazy import-nya
 // dihapus total dari build produksi oleh tree-shaking, sehingga
 // chunk *TestPage* tidak ada di dist/ dan pengunjung produksi
@@ -35,6 +37,12 @@ const LibraryTestPage = import.meta.env.DEV
 const P4TestPage = import.meta.env.DEV
   ? lazy(() => import('./test-pages/P4TestPage'))
   : null;
+const P5TestPage = import.meta.env.DEV
+  ? lazy(() => import('./test-pages/P5TestPage'))
+  : null;
+const DownloadsPage = lazy(
+  () => import('./components/downloads/DownloadsPage'),
+);
 const LibraryPage = lazy(() => import('./components/library/LibraryPage'));
 const PlaylistDetailPage = lazy(
   () => import('./components/library/PlaylistDetailPage'),
@@ -48,10 +56,12 @@ type Route =
   | { name: 'browse'; browseId?: string; browseParams?: string }
   | { name: 'library'; tab?: LibraryTab }
   | { name: 'playlist'; id: number }
+  | { name: 'downloads' }
   | { name: 'spike' }
   | { name: 'player-test' }
   | { name: 'library-test' }
-  | { name: 'p4-test' };
+  | { name: 'p4-test' }
+  | { name: 'p5-test' };
 
 const LIBRARY_TABS: LibraryTab[] = [
   'songs',
@@ -67,12 +77,14 @@ function parseRoute(pathname: string, search: string): Route {
   const params = new URLSearchParams(search);
   if (path === '/spike') return { name: 'spike' };
   // Rute uji hanya ada di build dev (Red 1 H1): di produksi
-  // ketiganya jatuh ke beranda di bawah.
+  // keempatnya jatuh ke beranda di bawah.
   if (import.meta.env.DEV) {
     if (path === '/player-test') return { name: 'player-test' };
     if (path === '/library-test') return { name: 'library-test' };
     if (path === '/p4-test') return { name: 'p4-test' };
+    if (path === '/p5-test') return { name: 'p5-test' };
   }
+  if (path === '/downloads') return { name: 'downloads' };
   if (path === '/search') {
     return { name: 'search', query: params.get('q') ?? '' };
   }
@@ -143,6 +155,13 @@ export default function App() {
   useEffect(() => {
     getPlayerService().init();
     initLibraryStore();
+    // Manajer unduhan (P5): rekonsiliasi Dexie vs Cache Storage
+    // lalu lanjutkan antrean. Impor dinamis supaya modul unduhan
+    // tidak masuk bundle awal. Gagal start tidak merusak app.
+    void import('./downloads/downloadManager')
+      .then(({ getDownloadManager }) => getDownloadManager())
+      .then((manager) => manager.init())
+      .catch(() => undefined);
   }, []);
 
   const [route, navigate] = useRoute();
@@ -181,13 +200,24 @@ export default function App() {
       </Suspense>
     );
   }
+  if (route.name === 'p5-test' && P5TestPage) {
+    return (
+      <Suspense fallback={<LoadingPage />}>
+        <P5TestPage />
+        <MiniPlayer />
+        <FullPlayer />
+      </Suspense>
+    );
+  }
 
   const navCurrent: NavCurrent =
     route.name === 'search'
       ? 'search'
       : route.name === 'library' || route.name === 'playlist'
         ? 'library'
-        : 'home';
+        : route.name === 'downloads'
+          ? 'downloads'
+          : 'home';
 
   return (
     <div className="min-h-dvh bg-black text-zinc-100 min-[840px]:pl-[72px]">
@@ -220,6 +250,8 @@ export default function App() {
                 browseParams={route.browseParams}
                 onNavigate={navigate}
               />
+            ) : route.name === 'downloads' ? (
+              <DownloadsPage onNavigate={navigate} />
             ) : route.name === 'library' ? (
               <LibraryPage
                 key={route.tab ?? 'songs'}

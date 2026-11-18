@@ -8,6 +8,7 @@ import {
   parsePlayerConfig,
   parseSignatureCipher,
   pickAudioFormat,
+  pickAudioFormatForPreference,
   type AudioFormat,
 } from './resolve';
 import { BUILTIN_CLIENTS, BUILTIN_HASHES } from '../spike/config';
@@ -297,6 +298,62 @@ describe('pickAudioFormat', () => {
     expect(
       pickAudioFormat([format({ itag: 251, isSabr: true })]),
     ).toBeNull();
+  });
+});
+
+describe('pickAudioFormatForPreference (P5: kualitas unduhan)', () => {
+  const format = (patch: Partial<AudioFormat>): AudioFormat => ({
+    itag: 251,
+    mimeType: 'audio/webm',
+    bitrate: 160000,
+    isSabr: false,
+    ...patch,
+  });
+  const formats = [
+    format({ itag: 140, bitrate: 128000, url: 'https://a' }),
+    format({ itag: 251, bitrate: 160000, url: 'https://b' }),
+    format({ itag: 249, bitrate: 50000, url: 'https://c' }),
+    format({ itag: 139, bitrate: 48000, url: 'https://d' }),
+  ];
+
+  it('Terbaik memilih 251 bila tersedia', () => {
+    const picked = pickAudioFormatForPreference(formats, [
+      251, 140, 250, 249, 139,
+    ]);
+    expect(picked?.itag).toBe(251);
+  });
+
+  it('Seimbang memilih 140 walau 251 tersedia', () => {
+    const picked = pickAudioFormatForPreference(formats, [
+      140, 250, 249, 139, 251,
+    ]);
+    expect(picked?.itag).toBe(140);
+  });
+
+  it('Hemat data memilih 249 walau 251 dan 140 tersedia', () => {
+    const picked = pickAudioFormatForPreference(formats, [
+      249, 139, 140, 250, 251,
+    ]);
+    expect(picked?.itag).toBe(249);
+  });
+
+  it('jatuh ke itag berikutnya bila yang diutamakan tidak tersedia', () => {
+    const picked = pickAudioFormatForPreference(
+      [format({ itag: 139, bitrate: 48000, url: 'https://d' })],
+      [249, 139, 140, 250, 251],
+    );
+    expect(picked?.itag).toBe(139);
+  });
+
+  it('tetap menolak SABR walau itagnya diutamakan', () => {
+    const picked = pickAudioFormatForPreference(
+      [
+        format({ itag: 249, isSabr: true, url: 'https://c' }),
+        format({ itag: 139, bitrate: 48000, url: 'https://d' }),
+      ],
+      [249, 139, 140, 250, 251],
+    );
+    expect(picked?.itag).toBe(139);
   });
 });
 
