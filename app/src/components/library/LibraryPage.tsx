@@ -37,6 +37,9 @@ import { trackFromView, tracksFromViews } from './trackFromView';
 
 type Tab = 'songs' | 'albums' | 'artists' | 'playlists' | 'favorites' | 'history';
 
+/** Tab Library yang bisa dibuka lewat `?tab=` (tautan "Lihat semua" beranda). */
+export type LibraryTab = Tab;
+
 interface Filter {
   kind: 'artist' | 'album';
   id: string;
@@ -84,15 +87,20 @@ function formatPlayedAt(timestamp: number): string {
 
 interface LibraryPageProps {
   onNavigate: (path: string) => void;
+  /** Tab awal (dari `?tab=`); default 'songs'. */
+  initialTab?: Tab;
 }
 
-export default function LibraryPage({ onNavigate }: LibraryPageProps) {
+export default function LibraryPage({
+  onNavigate,
+  initialTab,
+}: LibraryPageProps) {
   const { service, dbError } = useLibraryService();
   const version = useLibraryStore((s) => s.version);
   const sort = useLibraryStore((s) => s.sort);
   const setSort = useLibraryStore((s) => s.setSort);
 
-  const [tab, setTab] = useState<Tab>('songs');
+  const [tab, setTab] = useState<Tab>(initialTab ?? 'songs');
   const [filter, setFilter] = useState<Filter | null>(null);
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');

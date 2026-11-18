@@ -1,17 +1,20 @@
 /**
- * Tes E2E Player Core P2 (rute beranda + /player-test).
+ * Tes E2E Player Core P2 (rute pencarian + /player-test).
  *
  * Semua jaringan di-mock: config (gagal -> nilai bawaan), proxy
  * search/player (respons kalengan itag 251 URL langsung), dan
- * googlevideo (nada WAV 10 detik, sadar Range). Uji live HANYA
- * jalan dengan LARAS_SPIKE_LIVE=1 (pola yang sama seperti
- * spike.spec.ts); tanpa guard itu, tes tidak pernah menyentuh
- * jaringan nyata.
+ * googlevideo (nada WAV 10 detik, sadar Range). Sejak P4, lagu
+ * diputar dari hasil pencarian (fixture search Peterpan) karena
+ * seksi "Coba pemutar" di beranda sudah diganti beranda 6 seksi.
+ * Uji live HANYA jalan dengan LARAS_SPIKE_LIVE=1 (pola yang sama
+ * seperti spike.spec.ts); tanpa guard itu, tes tidak pernah
+ * menyentuh jaringan nyata.
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, expect, type Page, type Route } from '@playwright/test';
+import { SEARCH_PETERPAN } from './p4-helpers';
 
 const PROXY_BASE_URL =
   'https://laras-proxy-spike.hiroohengkerr.workers.dev';
@@ -120,13 +123,13 @@ async function mockNetwork(page: Page, opts: MockOptions = {}): Promise<void> {
   await page.context().route(CONFIG_URL, (route) =>
     route.fulfill({ status: 500, body: 'mock config gagal' }),
   );
+  // Fixture search Peterpan (rekaman nyata): membawa visitorData
+  // untuk init resolver sekaligus hasil untuk halaman pencarian.
   await page.context().route(`${PROXY_BASE_URL}/api/innertube/search`, (route) =>
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        responseContext: { visitorData: 'mock-visitor-data' },
-      }),
+      body: SEARCH_PETERPAN,
     }),
   );
   await page.context().route(`${PROXY_BASE_URL}/api/innertube/player`, (route) => {
@@ -165,6 +168,21 @@ async function mockNetwork(page: Page, opts: MockOptions = {}): Promise<void> {
       body: PIXEL_PNG,
     }),
   );
+  // Sampul YTM juga dari yt3/lh3 (lihat p4-helpers).
+  await page.context().route('**yt3.googleusercontent.com/**', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: PIXEL_PNG,
+    }),
+  );
+  await page.context().route('**lh3.googleusercontent.com/**', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: PIXEL_PNG,
+    }),
+  );
   // Regex, bukan glob `**/...`: pola glob yang diawali `**/` tidak
   // cocok dengan URL localhost di Playwright 1.65.1 (terbukti di
   // debug-route2.mjs: hit=0, fallback SPA mengembalikan HTML).
@@ -175,10 +193,10 @@ async function mockNetwork(page: Page, opts: MockOptions = {}): Promise<void> {
   });
 }
 
-/** Putar lagu kanari pertama dari beranda, tunggu status playing. */
+/** Putar lagu pertama dari hasil pencarian, tunggu status playing. */
 async function playFirstSong(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.getByTestId('try-song-hhn-nGSuenM').click();
+  await page.goto('/search?q=noah');
+  await page.getByTestId('search-song-hhn-nGSuenM').click();
   await expect(page.getByTestId('mini-player')).toBeVisible();
   await expect
     .poll(async () => (await debugState(page))?.status)
@@ -186,7 +204,7 @@ async function playFirstSong(page: Page): Promise<void> {
 }
 
 test.describe('pemutar (mock resolve + nada lokal)', () => {
-  test('memutar, jeda, dan lanjut dari beranda', async ({ page }) => {
+  test('memutar, jeda, dan lanjut dari hasil pencarian', async ({ page }) => {
     await mockNetwork(page);
     await playFirstSong(page);
     await expect(page.getByTestId('mini-player')).toContainText(
@@ -219,9 +237,9 @@ test.describe('pemutar (mock resolve + nada lokal)', () => {
     await page.getByTestId('full-next').click();
     await expect
       .poll(async () => (await debugState(page))?.currentVideoId)
-      .toBe('qkC4waEZVt4');
+      .toBe('IQilJm--6cw');
     await expect(page.getByTestId('full-player')).toContainText(
-      'Rahasia Hati',
+      'Kota Mati',
     );
     // Jeda supaya posisi beku, setel posisi 0, prev -> lagu pertama.
     await page.getByTestId('full-play').click();
@@ -259,7 +277,7 @@ test.describe('pemutar (mock resolve + nada lokal)', () => {
       'true',
     );
     await expect(page.getByTestId('queue-current-mark')).toBeVisible();
-    await expect(page.getByTestId('queue-list').locator('li')).toHaveCount(5);
+    await expect(page.getByTestId('queue-list').locator('li')).toHaveCount(7);
     await page.getByTestId('full-shuffle').click();
     await expect(page.getByTestId('full-shuffle')).toHaveAttribute(
       'aria-pressed',
@@ -316,7 +334,7 @@ test.describe('pemutar (mock resolve + nada lokal)', () => {
     );
     expect((await debugState(page))?.status).toBe('paused');
     await page.getByTestId('mini-open').click();
-    await expect(page.getByTestId('queue-list').locator('li')).toHaveCount(5);
+    await expect(page.getByTestId('queue-list').locator('li')).toHaveCount(7);
   });
 
   test('galat resolve menampilkan pesan dan tombol coba lagi', async ({
@@ -324,8 +342,8 @@ test.describe('pemutar (mock resolve + nada lokal)', () => {
   }) => {
     let failing = true;
     await mockNetwork(page, { playerFails: () => failing });
-    await page.goto('/');
-    await page.getByTestId('try-song-hhn-nGSuenM').click();
+    await page.goto('/search?q=noah');
+    await page.getByTestId('search-song-hhn-nGSuenM').click();
     await page.getByTestId('mini-open').click();
     // Tiga lagu gagal berturut-turut -> berhenti dengan pesan.
     await expect(page.getByTestId('player-error')).toBeVisible({
@@ -401,8 +419,8 @@ test.describe('uji live pemutar (butuh browser di luar VM)', () => {
 
   test('lagu kanari pertama memutar dari proxy nyata', async ({ page }) => {
     test.setTimeout(3 * 60 * 1000);
-    await page.goto('/');
-    await page.getByTestId('try-song-hhn-nGSuenM').click();
+    await page.goto('/search?q=noah');
+    await page.getByTestId('search-song-hhn-nGSuenM').click();
     await expect
       .poll(async () => (await debugState(page))?.status, {
         timeout: 120000,

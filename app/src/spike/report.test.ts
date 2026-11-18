@@ -23,6 +23,7 @@ function makeResult(patch: Partial<SongResult> = {}): SongResult {
     audioDuration: null,
     retries: 0,
     failCause: null,
+    failDetail: null,
     ...patch,
   };
 }
@@ -123,6 +124,26 @@ describe('formatReport', () => {
     expect(report).toContain('2. Rahasia Hati (qkC4waEZVt4): GAGAL');
     expect(report).toContain('Coba ulang di tengah lagu: 1x');
     expect(report).toContain('Penyebab: Jaringan terputus saat memutar.');
+  });
+
+  it('menampilkan Detail teknis bila ada, menyembunyikannya bila null', () => {
+    const withDetail = [
+      makeResult({
+        status: 'gagal',
+        failCause: 'Lagu tidak bisa ditemukan di semua jalur. Coba lagi nanti.',
+        failDetail:
+          'resolve gagal untuk hhn-nGSuenM: WEB_REMIX=LOGIN_REQUIRED, MWEB=LOGIN_REQUIRED, ANDROID_VR=LOGIN_REQUIRED',
+      }),
+    ];
+    const report = formatReport(withDetail, meta);
+    expect(report).toContain(
+      'Penyebab: Lagu tidak bisa ditemukan di semua jalur. Coba lagi nanti.',
+    );
+    expect(report).toContain(
+      'Detail: resolve gagal untuk hhn-nGSuenM: WEB_REMIX=LOGIN_REQUIRED, MWEB=LOGIN_REQUIRED, ANDROID_VR=LOGIN_REQUIRED',
+    );
+    const withoutDetail = [makeResult({ status: 'gagal', failCause: 'x' })];
+    expect(formatReport(withoutDetail, meta)).not.toContain('Detail:');
   });
 
   it('tidak pernah memuat URL stream', () => {

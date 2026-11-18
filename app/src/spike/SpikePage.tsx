@@ -50,6 +50,7 @@ function freshResults(): SongResult[] {
     audioDuration: null,
     retries: 0,
     failCause: null,
+    failDetail: null,
   }));
 }
 
@@ -432,7 +433,17 @@ export default function SpikePage() {
             error instanceof ResolveError
               ? error.causeText
               : 'Lagu tidak bisa dicari karena gangguan jaringan.';
-          updateResult(i, { status: 'gagal', failCause: cause });
+          // Detail teknis (attempts per client + playability) masuk
+          // laporan, BUKAN layar: tanpa ini §5 tidak bisa didiagnosis
+          // dari laporan saja (18 Nov 2026: semua lagu hanya tampil
+          // pesan generik padahal penyebabnya LOGIN_REQUIRED).
+          const detail =
+            error instanceof ResolveError
+              ? error.message
+              : error instanceof Error
+                ? `jaringan: ${error.message}`
+                : 'jaringan: galat tidak dikenal';
+          updateResult(i, { status: 'gagal', failCause: cause, failDetail: detail });
           continue;
         }
         cancelWaitRef.current = null;

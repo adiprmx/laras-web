@@ -28,6 +28,7 @@ import {
 } from '@playwright/test';
 import { generateSampleSongs } from '../../src/data/sampleData';
 import { tokenize } from '../../src/data/tokens';
+import { PROXY_BASE_URL, SEARCH_PETERPAN } from './p4-helpers';
 
 const CONFIG_URL =
   'https://raw.githubusercontent.com/adiprmx/laras/config-v1/player-config.json';
@@ -88,6 +89,23 @@ async function mockNetwork(context: BrowserContext): Promise<void> {
     const buffer = name === 'tone-60s.wav' ? TONE_60S : TONE_10S;
     return fulfillRange(route, buffer, 'audio/wav');
   });
+  // Beranda (dikunjungi uji migrasi antrean) memuat Jelajah dan
+  // init resolver memanggil search: keduanya dilayani fixture
+  // supaya tidak ada jaringan live di tes ini.
+  await context.route(`${PROXY_BASE_URL}/api/innertube/search`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: SEARCH_PETERPAN,
+    }),
+  );
+  await context.route(`${PROXY_BASE_URL}/api/innertube/browse`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ contents: {} }),
+    }),
+  );
 }
 
 /** Isi database lewat /library-test, tunggu hitungan sesuai. */

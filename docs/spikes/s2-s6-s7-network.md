@@ -490,6 +490,11 @@ jaringan cepat (CI atau perangkat) sesudah migrasi D1.
 
 1. Uji satu-per-satu endpoint search/browse/next/suggestions dari
    browser (jalur kode sama dengan player; utang ringan).
+   **SEBAGIAN TERTUTUP 18 Nov 2026**: search/browse/next via proxy
+   diuji langsung (curl) oleh koordinator — ketiganya HTTP 200
+   dengan contents nyata (search: 237.932 byte, 30 hasil lagu;
+   browse + next: contents ada). Sisa utang: uji yang sama DARI
+   BROWSER (bukan curl).
 2. Uji live cap respons 10 MB (JSON), 8 MB (script), 100 MB (media)
    dengan upstream buatan (utang ringan; pola cap terbukti via 413).
 3. Migrasi rate limit in-memory ke D1 sebelum produksi (§4.1), lalu
@@ -500,6 +505,32 @@ jaringan cepat (CI atau perangkat) sesudah migrasi D1.
    (bukan streaming) untuk jalur JSON dan script; untuk cap 10 MB ini
    dapat diterima, tetapi produksi perlu meninjau ulang bila cap
    dinaikkan.
+
+### 3.7 Adendum 18 Nov 2026: playability NON-DETERMINISTIK (koreksi S7)
+
+Variabilitas §3.2 poin 2 berlanjut dan makin tajam. Garis waktu
+WEB_REMIX via proxy yang sama:
+
+- 17 Nov 15:30 UTC (S7): HTTP 200, playability **OK**.
+- 18 Nov ~08:00 WIB (parent, §5): HTTP 200, playability
+  **LOGIN_REQUIRED**, 0 format audio.
+- 18 Nov ~08:05–08:25 WIB (koordinator): HTTP 200, playability
+  **OK 3/3** (4 format audio tiap kali), sementara MWEB dan
+  ANDROID_VR di menit yang sama LOGIN_REQUIRED.
+
+Penanda berubah per **client × waktu** (dan kemungkinan per IP
+egress per request). Satu probe TIDAK BISA jadi vonis permanen
+untuk satu egress/client. Setiap klaim "egress X diblokir/lolos"
+WAJIB membawa jam + client + jumlah ulangan.
+
+Temuan tambahan di jendela yang sama: replay player via proxy
+dengan visitorData yang dipanen dari VM (bukan dari egress CF)
+membalik ANDROID_VR 2/2 dan MWEB 1/2 menjadi OK, sementara
+kontrol tanpa visitorData di menit yang sama tetap LOGIN_REQUIRED
+(0/6). VisitorData yang dipanen LEWAT proxy (perilaku resolver
+saat ini) tidak membantu — yang penting sumber panen, bukan
+keberadaan visitorData. Detail lengkap + evaluasi opsi:
+`docs/spikes/egress-dan-opsi-resolve.md`.
 
 ## 4. Keputusan dan tindak lanjut
 

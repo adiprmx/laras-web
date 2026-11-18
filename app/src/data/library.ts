@@ -14,6 +14,13 @@
  */
 import { LarasDatabase, openDatabase } from './database';
 import {
+  fillForYou,
+  FOR_YOU_LIMIT,
+  FOR_YOU_WINDOW_MS,
+  rankForYou,
+  type ForYouCandidate,
+} from './recommendations';
+import {
   compareSearchCandidates,
   localArtistIdForName,
   prefixUpperBound,
@@ -1335,6 +1342,83 @@ export class LibraryService {
       .equals(songId)
       .filter((e) => e.playTimeMs >= MEANINGFUL_PLAY_MS && e.timestamp >= since)
       .count();
+  }
+
+  /**
+   * "Lagu untukmu" (PRD B6.2): skor putaran bermakna 30 hari
+   * terakhir + 5 bila favorit + 2 bila diunduh, 20 teratas,
+   * diisi lagu library terbaru bila kurang. Dihitung dari satu
+   * query rentang indeks (hanya event 30 hari terakhir) +
+   * kunci favorit/unduhan — riwayat putar penuh tidak pernah
+   * dimuat ke memori. Tanpa nama artis, genre, kesamaan audio,
+   * dan tanpa machine learning. Bila library kosong, hasilnya
+   * kosong (seksi tidak tampil).
+   */
+  async forYouSongs(opts: { limit?: number } = {}): Promise<SongView[]> {
+    const limit = opts.limit ?? FOR_YOU_LIMIT;
+    const since = now() - FOR_YOU_WINDOW_MS;
+    const events = await this.db.play_events
+      .where('[timestamp+id]')
+      .above([since, 0])
+      .toArray();
+    const bySong = new Map<
+      string,
+      { meaningful: number; lastPlayedAt: number }
+    >();
+    for (const event of events) {
+      const agg = bySong.get(event.songId) ?? {
+        meaningful: 0,
+        lastPlayedAt: 0,
+      };
+      if (event.playTimeMs >= MEANINGFUL_PLAY_MS) agg.meaningful += 1;
+      if (event.timestamp > agg.lastPlayedAt) {
+        agg.lastPlayedAt = event.timestamp;
+      }
+      bySong.set(event.songId, agg);
+    }
+    const likedIds = await this.db.songs
+      .where('liked')
+      .equals(1)
+      .primaryKeys();
+    const downloadedIds = await this.db.songs
+      .where('downloadState')
+      .equals(DownloadState.downloaded)
+      .primaryKeys();
+    const liked = new Set(likedIds);
+    const downloaded = new Set(downloadedIds);
+    const ids = new Set([...bySong.keys(), ...liked, ...downloaded]);
+    const candidates: ForYouCandidate[] = [...ids].map((songId) => {
+      const agg = bySong.get(songId);
+      return {
+        songId,
+        meaningfulPlays: agg?.meaningful ?? 0,
+        lastPlayedAt: agg?.lastPlayedAt ?? 0,
+        liked: liked.has(songId),
+        downloaded: downloaded.has(songId),
+      };
+    });
+    let rankedIds = rankForYou(candidates, limit).map((c) => c.songId);
+    // Isi sisa dengan lagu library terbaru (halaman keyset sampai
+    // penuh atau habis; lagu yang sudah terpilih dilewati).
+    if (rankedIds.length < limit) {
+      let after: SongView | undefined;
+      while (rankedIds.length < limit) {
+        const page = await this.songsPage({
+          sort: 'newest',
+          limit: PAGE_SIZE,
+          after,
+        });
+        if (page.length === 0) break;
+        rankedIds = fillForYou(
+          rankedIds,
+          page.map((v) => v.song.id),
+          limit,
+        );
+        after = page[page.length - 1];
+      }
+    }
+    if (rankedIds.length === 0) return [];
+    return this.songsByIds(rankedIds);
   }
 
   // ------------------------------------------------------------------

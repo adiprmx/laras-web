@@ -321,3 +321,36 @@ utama, sesuai desain). Tidak ada regresi.
 5. **Koordinator yang push ke GitHub** (aturan tim; tim ini tidak
    push). Sesudah push, preview Pages di-deploy ulang otomatis dan
    URL §5 menjadi bisa diverifikasi.
+
+---
+
+## 7. Hasil §5 putaran pertama (18 Nov 2026 ~08:00 WIB) — 0/5
+
+Parent menjalankan Langkah 1 di browser nyata (cloud browser,
+Chrome 157): **Periksa cepat 0/5, dua kali identik** (total 5 detik
++ 3 detik; tiap lagu gagal ~1 detik). Pesan tampil: "Lagu tidak bisa
+ditemukan di semua jalur. Coba lagi nanti." Langkah 2 tidak jalan
+(kriteria). Tampilan halaman lengkap, tombol jalan.
+
+Diagnosis parent (probe langsung): semua infra hidup (preview 200,
+preflight proxy 204 + ACAO benar, config-v1 200, 869 byte). Player
+via proxy: WEB_REMIX + ANDROID_VR HTTP 200 LOGIN_REQUIRED "Sign in
+to confirm you're not a bot", 0 format audio.
+
+**KOREKSI atas klaim §5 lama ("HP owner penentu definitif"): salah
+untuk tahap resolve** — IP yang dilihat YouTube adalah IP egress
+worker, bukan IP browser pemanggil. Tes HP owner akan gagal sama di
+tahap resolve; IP residensial HP hanya berpengaruh di fetch audio
+googlevideo sesudah resolve lolos. Jangan minta owner tes §5 dari HP
+sampai resolve lewat proxy bisa lolos.
+
+Tindak lanjut koordinator (18 Nov 2026): matriks egress empiris,
+eksperimen visitorData terkendali, evaluasi opsi + rekomendasi
+(retry LOGIN_REQUIRED lintas waktu direkomendasikan; poToken tetap
+di luar v1) — semua di
+`docs/spikes/egress-dan-opsi-resolve.md`. Perbaikan diagnosis:
+laporan kini menampilkan baris `Detail:` per lagu (attempts +
+playability dari `ResolveError.message`), jadi §5 berikut bisa
+didiagnosis dari laporan saja. Uji §5 ulang sesudah retry mendarat
+(P6); ekspektasi waktu berubah (jendela buruk gagal ~30–60 detik,
+bukan ~1 detik).

@@ -25,6 +25,10 @@
 import { buildPlayerScript, type PlayerScript } from '../solver/playerScript';
 import { isAllowedStreamUrl } from '../solver/urlAllowlist';
 import {
+  InnertubeError,
+  postInnertube,
+} from './innertube';
+import {
   BASE_JS_TIMEOUT_MS,
   BUILTIN_CLIENTS,
   BUILTIN_HASHES,
@@ -267,47 +271,37 @@ async function fetchWithTimeout(
   return res;
 }
 
+/**
+ * POST ke proxy, memetakan galat balasan ke ResolveError dengan
+ * pesan yang sama seperti sebelum refactor (P4 memindahkan fetch
+ * ke modul bersama `innertube.ts`; perilaku resolve tidak berubah).
+ * Galat jaringan lolos apa adanya (pemanggil mencoba ulang sekali).
+ */
 async function postViaProxy(
   path: string,
   body: Record<string, unknown>,
   client: ClientDefinition,
   timeoutMs: number,
 ): Promise<{ status: number; json: Record<string, unknown> }> {
-  const res = await fetchWithTimeout(
-    `${PROXY_BASE_URL}${path}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-YouTube-Client-Name': client.clientId,
-        'X-YouTube-Client-Version': client.version,
-      },
-      body: JSON.stringify(body),
-    },
-    timeoutMs,
-  );
-  const text = await res.text();
-  let json: Record<string, unknown>;
   try {
-    json = JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    throw new ResolveError(
-      `proxy ${path} membalas bukan JSON (HTTP ${res.status})`,
-      `Server perantara membalas tidak wajar (HTTP ${res.status}).`,
-    );
+    return await postInnertube(path, body, client, timeoutMs);
+  } catch (error) {
+    if (error instanceof InnertubeError) {
+      if (error.kind === 'bad-json') {
+        throw new ResolveError(
+          error.message,
+          `Server perantara membalas tidak wajar (HTTP ${error.status}).`,
+        );
+      }
+      throw new ResolveError(
+        error.message,
+        error.kind === 'rate-limited'
+          ? 'Terlalu banyak permintaan, coba lagi sebentar.'
+          : `Server perantara gagal (HTTP ${error.status}).`,
+      );
+    }
+    throw error;
   }
-  if (!res.ok) {
-    const code = (
-      json.error as { code?: string } | undefined
-    )?.code;
-    throw new ResolveError(
-      `proxy ${path} HTTP ${res.status} (${code ?? 'tanpa kode'})`,
-      code === 'RATE_LIMITED'
-        ? 'Terlalu banyak permintaan, coba lagi sebentar.'
-        : `Server perantara gagal (HTTP ${res.status}).`,
-    );
-  }
-  return { status: res.status, json };
 }
 
 /** Muat config remote; bila gagal, pakai nilai bawaan. */

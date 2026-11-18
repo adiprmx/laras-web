@@ -11,7 +11,10 @@ export default defineConfig({
   // per uji sesudah beforeAll) — terbukti mematahkan CI 18 Nov 2026
   // (resolve live LOGIN_REQUIRED dari IP runner). Spike dijalankan
   // dengan: npx playwright test -c playwright.spikes.config.ts
-  testIgnore: '**/spikes/**',
+  // Spesifikasi live (tests/e2e/live/) juga diabaikan di sini:
+  // hanya jalan dengan LARAS_SPIKE_LIVE=1 lewat
+  // playwright.live.config.ts.
+  testIgnore: ['**/spikes/**', '**/live/**'],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

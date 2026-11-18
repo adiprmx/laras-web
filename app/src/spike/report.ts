@@ -29,6 +29,13 @@ export interface SongResult {
   retries: number;
   /** Penyebab gagal (bahasa sehari-hari), bila gagal. */
   failCause: string | null;
+  /**
+   * Detail teknis untuk laporan (mis. attempts resolve per client),
+   * bila ada. TIDAK tampil di layar (tanpa jargon di UI) — hanya di
+   * teks laporan yang disalin, supaya §5 berikut bisa didiagnosis
+   * tanpa probe tambahan.
+   */
+  failDetail: string | null;
 }
 
 export type SpikeMode = 'cepat' | 'penuh';
@@ -129,6 +136,9 @@ export function formatReport(
     }
     if (result.failCause) {
       lines.push(`   Penyebab: ${result.failCause}`);
+    }
+    if (result.failDetail) {
+      lines.push(`   Detail: ${result.failDetail}`);
     }
   });
   return lines.join('\n');

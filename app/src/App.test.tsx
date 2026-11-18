@@ -3,14 +3,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import App from './App';
 import { strings } from './strings/id';
 
-describe('App (P2: beranda + seksi Coba pemutar)', () => {
-  it('menampilkan seksi Coba pemutar dengan lima lagu nyata', () => {
+describe('App (P4: beranda + navigasi utama)', () => {
+  it('menampilkan nama aplikasi dan navigasi utama', () => {
     const html = renderToStaticMarkup(<App />);
     expect(html).toContain(strings.appName);
-    expect(html).toContain(strings.tryPlayerTitle);
-    expect(html).toContain('Semua Tentang Kita');
-    expect(html).toContain('Tak Ingin Usai');
-    expect(html).toContain(strings.searchNotReady);
+    expect(html).toContain('data-testid="bottom-nav"');
+    expect(html).toContain('data-testid="nav-home"');
+    expect(html).toContain('data-testid="nav-search"');
+    expect(html).toContain('data-testid="nav-library"');
   });
 
   it('tidak menampilkan kata terlarang di copy pengguna', () => {

@@ -120,3 +120,17 @@ body {
     animation: none;
   }
 }
+
+/* Bar putar di atas navigasi bawah (P4): di HP, bar duduk di atas
+   bar tab (56 px + safe area); di lebar 840 px ke atas, bar
+   kembali ke bawah dan bergeser ke kanan rail (72 px). */
+.mini-player-nav-offset {
+  bottom: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 840px) {
+  .mini-player-nav-offset {
+    bottom: 0;
+    left: 4.5rem;
+  }
+}

@@ -7,7 +7,12 @@ import { selectCurrentTrack, usePlayerStore } from '../store/player';
 import { getPlayerService } from '../player/service';
 import { strings } from '../strings/id';
 
-export default function MiniPlayer() {
+export default function MiniPlayer({
+  withNav = false,
+}: {
+  /** Benar bila navigasi bawah/rail tampil (bar putar duduk di atasnya). */
+  withNav?: boolean;
+}) {
   const track = usePlayerStore(selectCurrentTrack);
   const status = usePlayerStore((s) => s.status);
   const position = usePlayerStore((s) => s.position);
@@ -22,7 +27,9 @@ export default function MiniPlayer() {
   return (
     <div
       data-testid="mini-player"
-      className="fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-black/95 backdrop-blur-md"
+      className={`fixed inset-x-0 z-40 border-t border-white/10 bg-black/95 backdrop-blur-md ${
+        withNav ? 'mini-player-nav-offset' : 'bottom-0'
+      }`}
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
     >
       {/* Garis progres: motif identitas pemutar. */}
