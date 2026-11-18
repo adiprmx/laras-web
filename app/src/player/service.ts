@@ -28,6 +28,10 @@ import { usePlayerStore, selectCurrentTrack, type PlayerState } from '../store/p
 import { strings } from '../strings/id';
 import { AudioGraphManager } from './audioGraph';
 import { MediaSessionManager } from './mediaSession';
+import {
+  loadPersistedPlayerState,
+  writeQueueSnapshot,
+} from './persistence';
 import { HtmlAudioPort, type AudioPlayerPort } from './port';
 import {
   decideOnError,
@@ -866,6 +870,28 @@ export class PlayerService {
     } catch {
       restored = null;
     }
+    let fromWal = false;
+    if (!restored) {
+      // Cadangan write-ahead: bila tulis IndexedDB belum selesai
+      // saat tab ditutup/dimuat ulang, snapshot localStorage
+      // sinkron menyelamatkan antrean (balapan P3: simpan async
+      // terpotong teardown halaman bila jeda langsung diikuti
+      // muat ulang — terbukti di CI, run 44201352963).
+      const snapshot = loadPersistedPlayerState();
+      if (snapshot) {
+        restored = {
+          tracks: snapshot.queue,
+          order: snapshot.order,
+          orderPos: snapshot.orderPos,
+          positionSeconds: snapshot.positionSeconds,
+          shuffle: snapshot.shuffle,
+          repeat: snapshot.repeat,
+          rate: snapshot.rate,
+          volume: snapshot.volume,
+        };
+        fromWal = true;
+      }
+    }
     if (!restored) {
       this.port.setRate(1);
       this.port.setVolume(1);
@@ -910,6 +936,10 @@ export class PlayerService {
       this.mediaSession.setTrack(restoredTrack);
       this.mediaSession.setPlaybackState('paused');
     }
+    // Konvergensi: antrean dari WAL ditulis balik ke IndexedDB
+    // supaya kedua store sinkron lagi (store sudah berisi antrean
+    // di titik ini, jadi persistNow menulis state yang benar).
+    if (fromWal) this.persistNow();
   }
 
   private buildQueueState(): QueueStateToSave | null {
@@ -943,6 +973,11 @@ export class PlayerService {
    * pernah merusak pemutaran; kesempatan berikutnya mencoba lagi.
    */
   private persistNow(): void {
+    // Write-ahead SINKRON ke localStorage sebelum rantai tulis
+    // IndexedDB yang async: bila tab ditutup/dimuat ulang sebelum
+    // tulis IndexedDB selesai, snapshot ini yang dipakai restore.
+    // (localStorage.setItem selesai sebelum fungsi kembali.)
+    writeQueueSnapshot(this.buildQueueState());
     this.persistChain = this.persistChain
       .then(async () => {
         const state = this.buildQueueState();

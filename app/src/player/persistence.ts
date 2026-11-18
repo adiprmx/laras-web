@@ -203,3 +203,54 @@ export function clearPersistedPlayerState(): void {
     // Menghapus state yang sudah tidak ada bukan galat.
   }
 }
+
+/** Input snapshot antrean (bentuk sama dengan QueueStateToSave di data/). */
+export interface QueueSnapshotInput {
+  tracks: Track[];
+  order: number[];
+  orderPos: number;
+  positionSeconds: number;
+  shuffle: boolean;
+  repeat: RepeatMode;
+  rate: number;
+  volume: number;
+}
+
+/**
+ * Tulis snapshot antrean ke localStorage SECARA SINKRON
+ * (write-ahead untuk IndexedDB). Dipanggil setiap kali pemutar
+ * menyimpan state, SEBELUM rantai tulis IndexedDB yang async.
+ * Bila tab ditutup/dimuat ulang sebelum tulis IndexedDB selesai,
+ * snapshot inilah yang dipakai restore sebagai cadangan
+ * (memperbaiki balapan P3: tes jeda-lalu-muat-ulang gagal di CI
+ * karena simpan async terpotong teardown halaman).
+ * Antrean kosong / lagu saat ini tak bisa dipulihkan -> hapus
+ * snapshot (konsisten dengan saveQueueState di IndexedDB).
+ */
+export function writeQueueSnapshot(state: QueueSnapshotInput | null): void {
+  if (!state || state.tracks.length === 0) {
+    clearPersistedPlayerState();
+    return;
+  }
+  const sanitized = sanitizeQueueForSave(
+    state.tracks,
+    state.order,
+    state.orderPos,
+  );
+  if (!sanitized) {
+    clearPersistedPlayerState();
+    return;
+  }
+  savePersistedPlayerState({
+    version: PLAYER_STORAGE_VERSION,
+    queue: sanitized.queue,
+    order: sanitized.order,
+    orderPos: sanitized.orderPos,
+    positionSeconds: state.positionSeconds,
+    shuffle: state.shuffle,
+    repeat: state.repeat,
+    rate: state.rate,
+    volume: state.volume,
+    updatedAt: Date.now(),
+  });
+}

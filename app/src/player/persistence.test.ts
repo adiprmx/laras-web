@@ -6,7 +6,9 @@ import {
   PLAYER_STORAGE_KEY,
   sanitizeQueueForSave,
   savePersistedPlayerState,
+  writeQueueSnapshot,
   type PersistedPlayerState,
+  type QueueSnapshotInput,
 } from './persistence';
 import { localTrack, streamTrack } from './types';
 
@@ -167,6 +169,80 @@ describe('save dan load localStorage', () => {
     state.order = [0];
     state.orderPos = 0;
     expect(savePersistedPlayerState(state)).toBe(false);
+    expect(window.localStorage.getItem(PLAYER_STORAGE_KEY)).toBeNull();
+  });
+});
+
+describe('writeQueueSnapshot (write-ahead sinkron)', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+  });
+
+  function snapshotInput(): QueueSnapshotInput {
+    const state = validState();
+    return {
+      tracks: state.queue,
+      order: state.order,
+      orderPos: state.orderPos,
+      positionSeconds: state.positionSeconds,
+      shuffle: state.shuffle,
+      repeat: state.repeat,
+      rate: state.rate,
+      volume: state.volume,
+    };
+  }
+
+  it('round-trip: snapshot bisa dibaca kembali sama persis', () => {
+    writeQueueSnapshot(snapshotInput());
+    const loaded = loadPersistedPlayerState();
+    expect(loaded).not.toBeNull();
+    expect(loaded?.queue).toEqual(snapshotInput().tracks);
+    expect(loaded?.order).toEqual([0, 1]);
+    expect(loaded?.orderPos).toBe(1);
+    expect(loaded?.positionSeconds).toBe(42);
+    expect(loaded?.repeat).toBe('all');
+    expect(loaded?.rate).toBe(1.25);
+    expect(loaded?.volume).toBe(0.8);
+  });
+
+  it('sinkron: langsung tersedia tanpa await sesudah kembali', () => {
+    writeQueueSnapshot(snapshotInput());
+    // Tanpa await apa pun di antara: setItem sudah selesai.
+    expect(window.localStorage.getItem(PLAYER_STORAGE_KEY)).not.toBeNull();
+  });
+
+  it('null menghapus snapshot lama', () => {
+    writeQueueSnapshot(snapshotInput());
+    expect(loadPersistedPlayerState()).not.toBeNull();
+    writeQueueSnapshot(null);
+    expect(window.localStorage.getItem(PLAYER_STORAGE_KEY)).toBeNull();
+    expect(loadPersistedPlayerState()).toBeNull();
+  });
+
+  it('antrean kosong menghapus snapshot lama', () => {
+    writeQueueSnapshot(snapshotInput());
+    writeQueueSnapshot({
+      ...snapshotInput(),
+      tracks: [],
+      order: [],
+      orderPos: 0,
+    });
+    expect(window.localStorage.getItem(PLAYER_STORAGE_KEY)).toBeNull();
+  });
+
+  it('lagu saat ini blob menghapus snapshot lama', () => {
+    writeQueueSnapshot(snapshotInput());
+    const blob = localTrack('blob:https://laras.test/123', 'Lokal Blob', 100);
+    writeQueueSnapshot({
+      ...snapshotInput(),
+      tracks: [blob, streamTrack('vid1', 'Lagu 1', 180)],
+      order: [0, 1],
+      orderPos: 0,
+    });
     expect(window.localStorage.getItem(PLAYER_STORAGE_KEY)).toBeNull();
   });
 });
