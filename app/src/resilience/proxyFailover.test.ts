@@ -68,7 +68,9 @@ describe('proxyFailover (kerangka, belum di-wire)', () => {
   });
 
   it('default (tanpa failover): CF OK -> satu panggilan, egress cloudflare', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse(playerJson('OK')));
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse(playerJson('OK')),
+    );
     vi.stubGlobal('fetch', fetchMock);
     const result = await postInnertubeWithFailover(
       PLAYER_PATH,
