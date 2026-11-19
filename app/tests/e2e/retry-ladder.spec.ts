@@ -269,8 +269,17 @@ test.describe('tangga retry latar', () => {
       (c) => c.videoId === SONG_1,
     );
     expect(songCalls).toHaveLength(3);
+    // Tangga latar dijadwalkan sesudah resolve gagal TOTAL (putaran
+    // + pemeriksaan cache D1, maks 10 dtk): tunggu penjadwalannya,
+    // jangan baca langsung — notice sudah muncul di muka pada
+    // jalur ini (sinyal kanari), jadi baca langsung bisa mendahului
+    // penjadwalan (balapan, gagal 6/6 di CI 18d6fbc7).
+    await expect
+      .poll(async () => (await debugState(page))?.retryLadder, {
+        timeout: 30000,
+      })
+      .not.toBeNull();
     const debug = await debugState(page);
-    expect(debug?.retryLadder).not.toBeNull();
     expect(debug?.currentVideoId).toBe(SONG_1);
   });
 
