@@ -4,7 +4,13 @@
  */
 import { Blob as NodeBlob } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
-import { DownloadStore, type CacheLike, type CacheStorageLike } from './downloadStore';
+import {
+  DownloadStore,
+  safeDownloadContentType,
+  type CacheLike,
+  type CacheStorageLike,
+} from './downloadStore';
+import { DOWNLOADS_CACHE_NAME } from './constants';
 
 // Blob global jsdom di lingkungan tes ini minimal (tanpa
 // arrayBuffer/text/stream) dan `new Response(blobJsdom)`
@@ -183,5 +189,59 @@ describe('evictRuntimeCache (K9)', () => {
     );
     expect(removed).toEqual(['rt1_251']);
     expect(await store.hasDownload('dl1')).toBe(true);
+  });
+});
+
+describe('safeDownloadContentType (R8)', () => {
+  it('audio/*, video/*, octet-stream dipertahankan (termasuk parameter)', () => {
+    expect(safeDownloadContentType('audio/webm')).toBe('audio/webm');
+    expect(safeDownloadContentType('audio/webm; codecs=opus')).toBe(
+      'audio/webm; codecs=opus',
+    );
+    expect(safeDownloadContentType('video/mp4')).toBe('video/mp4');
+    expect(safeDownloadContentType('application/octet-stream')).toBe(
+      'application/octet-stream',
+    );
+    // Perbandingan tidak peka huruf besar/kecil, nilai asli dipertahankan.
+    expect(safeDownloadContentType('AUDIO/OPUS')).toBe('AUDIO/OPUS');
+  });
+
+  it('tipe lain diganti application/octet-stream', () => {
+    expect(safeDownloadContentType('text/html')).toBe(
+      'application/octet-stream',
+    );
+    expect(safeDownloadContentType('text/html; charset=utf-8')).toBe(
+      'application/octet-stream',
+    );
+    expect(safeDownloadContentType('application/json')).toBe(
+      'application/octet-stream',
+    );
+    expect(safeDownloadContentType('')).toBe('application/octet-stream');
+  });
+});
+
+describe('putDownload menyaring Content-Type (R8)', () => {
+  it('text/html dari upstream tidak pernah masuk cache', async () => {
+    const { store, caches } = makeStore();
+    await store.putDownload('vid1', new Blob(['<html>']), 'text/html');
+    const cache = await caches.open(DOWNLOADS_CACHE_NAME);
+    const stored = await cache.match('https://app.test/dl/vid1');
+    expect(stored?.headers.get('Content-Type')).toBe(
+      'application/octet-stream',
+    );
+  });
+
+  it('audio/webm tetap tersimpan apa adanya', async () => {
+    const { store, caches } = makeStore();
+    await store.putDownload(
+      'vid1',
+      new Blob(['data']),
+      'audio/webm; codecs=opus',
+    );
+    const cache = await caches.open(DOWNLOADS_CACHE_NAME);
+    const stored = await cache.match('https://app.test/dl/vid1');
+    expect(stored?.headers.get('Content-Type')).toBe(
+      'audio/webm; codecs=opus',
+    );
   });
 });

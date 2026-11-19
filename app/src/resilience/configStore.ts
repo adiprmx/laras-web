@@ -56,6 +56,8 @@ export interface LoadedConfig {
 export interface KeyValueStorage {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
+  /** Hapus kunci (opsional: storage lama boleh tidak punya). */
+  delete?(key: string): Promise<void>;
 }
 
 /** Storage app_meta IndexedDB (melempar bila DB tidak bisa dibuka). */
@@ -70,6 +72,10 @@ export function createAppMetaStorage(): KeyValueStorage {
       const db = await openDatabase();
       await db.app_meta.put({ key, value });
     },
+    async delete(key: string): Promise<void> {
+      const db = await openDatabase();
+      await db.app_meta.delete(key);
+    },
   };
 }
 
@@ -82,6 +88,9 @@ export function createMemoryStorage(
     get: async (key: string) => map.get(key) ?? null,
     set: async (key: string, value: string) => {
       map.set(key, value);
+    },
+    delete: async (key: string) => {
+      map.delete(key);
     },
   };
 }
@@ -109,6 +118,25 @@ function parseCached(raw: string | null): CachedConfig | null {
       return null;
     }
     return { text: parsed.text, fetchedAt: parsed.fetchedAt };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse teks config tersimpan menjadi config terstruktur, atau
+ * null bila teks bukan JSON valid atau gagal validasi skema.
+ * TIDAK PERNAH melempar (S5, Red 2): cache rusak diperlakukan
+ * seperti tidak ada cache, bukan sebagai galat fatal — satu
+ * entri `p6.config` rusak tidak boleh mematikan app permanen.
+ * Dipakai jalur cache memori, cache tersimpan, DAN fetch segar
+ * supaya ketiganya punya perlakuan yang sama.
+ */
+export function parseConfigText(
+  text: string,
+): ReturnType<typeof parsePlayerConfig> {
+  try {
+    return parsePlayerConfig(JSON.parse(text) as unknown);
   } catch {
     return null;
   }
@@ -158,6 +186,17 @@ export function createConfigLoader(deps: ConfigLoaderDeps = {}): ConfigLoader {
     }
   }
 
+  /** Hapus entri cache tersimpan (best-effort, S5). */
+  async function deletePersisted(): Promise<void> {
+    try {
+      await storage.delete?.(CONFIG_CACHE_KEY);
+    } catch {
+      // Hapus gagal: entri rusak tetap ada, tetapi load kali ini
+      // tetap jalan (fetch/builtin); percobaan hapus diulang di
+      // load berikut.
+    }
+  }
+
   function toLoaded(
     parsed: ReturnType<typeof parsePlayerConfig>,
     source: ConfigSource,
@@ -189,14 +228,32 @@ export function createConfigLoader(deps: ConfigLoaderDeps = {}): ConfigLoader {
       memory &&
       at - memory.fetchedAt < CONFIG_TTL_MS
     ) {
-      const parsed = parsePlayerConfig(JSON.parse(memory.text) as unknown);
-      last = toLoaded(parsed, 'cached', false, false, memory.fetchedAt);
-      return last;
+      const parsed = parseConfigText(memory.text);
+      if (parsed) {
+        last = toLoaded(parsed, 'cached', false, false, memory.fetchedAt);
+        return last;
+      }
+      // Cache memori rusak (tidak mungkin secara konstruksi —
+      // memori hanya diisi dari teks yang sudah lolos parse —
+      // tetapi jangan pernah menolak dari cache): buang dan
+      // lanjut ke cache tersimpan / fetch seperti tidak ada
+      // cache memori (S5, pertahanan lapis kedua).
+      memory = null;
     }
-    const persisted = await readPersisted();
-    const persistedParsed = persisted
-      ? parsePlayerConfig(JSON.parse(persisted.text) as unknown)
+    let persisted = await readPersisted();
+    let persistedParsed = persisted
+      ? parseConfigText(persisted.text)
       : null;
+    if (persisted && !persistedParsed) {
+      // Entri tersimpan rusak (teks bukan JSON, atau JSON yang
+      // gagal validasi skema): hapus supaya restart berikut
+      // tidak membaca racun yang sama, lalu perlakukan seperti
+      // tidak ada cache (fetch remote / builtin). Tanpa ini,
+      // satu entri rusak mematikan app permanen (S5).
+      await deletePersisted();
+      persisted = null;
+      persistedParsed = null;
+    }
     // Cache tersimpan segar: pakai tanpa fetch (kecuali dipaksa).
     if (
       !opts.force &&
@@ -254,12 +311,7 @@ export function createConfigLoader(deps: ConfigLoaderDeps = {}): ConfigLoader {
       last = toLoaded(null, 'builtin', false, false, null);
       return last;
     }
-    let parsed: ReturnType<typeof parsePlayerConfig>;
-    try {
-      parsed = parsePlayerConfig(JSON.parse(text) as unknown);
-    } catch {
-      parsed = null;
-    }
+    const parsed = parseConfigText(text);
     if (!parsed) {
       // Config rusak/tidak dikenal: perlakukan seperti fetch
       // gagal (cache lalu builtin), jangan pernah pakai mentah.

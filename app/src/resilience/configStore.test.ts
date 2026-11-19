@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  CONFIG_CACHE_KEY,
   CONFIG_MIN_REFETCH_MS,
   CONFIG_TTL_MS,
   createConfigLoader,
   createMemoryStorage,
+  parseConfigText,
 } from './configStore';
 import { BUILTIN_CLIENTS, BUILTIN_HASHES } from '../spike/config';
 
@@ -248,4 +250,109 @@ describe('createConfigLoader (TTL 6 jam, K7)', () => {
     expect(result.source).toBe('remote');
     expect(result.config.fromRemote).toBe(true);
   });
+
+  it('cache tersimpan berisi teks bukan JSON: load resolve + entri rusak dihapus (S5)', async () => {
+    // Reproduksi Red 2: sebelum perbaikan, load() MENOLAK dengan
+    // SyntaxError dari JSON.parse tanpa try/catch — dan karena
+    // entri racun tidak pernah ditimpa, app mati permanen sampai
+    // pengguna menghapus data situs secara manual.
+    const nowMs = 1_000_000;
+    const storage = createMemoryStorage({
+      [CONFIG_CACHE_KEY]: JSON.stringify({
+        text: '{ini-bukan-json',
+        fetchedAt: nowMs,
+      }),
+    });
+    const loader = createConfigLoader({
+      fetchFn: fetchFail() as unknown as typeof fetch,
+      now: () => nowMs,
+      storage,
+    });
+    const result = await loader.load();
+    expect(result.source).toBe('builtin');
+    expect(result.config.clients).toEqual(BUILTIN_CLIENTS);
+    // Entri racun terhapus: restart berikut tidak membaca racun
+    // yang sama — pemulihan otomatis, bukan mati permanen.
+    expect(await storage.get(CONFIG_CACHE_KEY)).toBeNull();
+  });
+
+  it('cache tersimpan berisi JSON gagal validasi skema: sama (S5)', async () => {
+    const nowMs = 1_000_000;
+    const storage = createMemoryStorage({
+      [CONFIG_CACHE_KEY]: JSON.stringify({
+        text: JSON.stringify({ ...CONFIG_A, version: 99 }),
+        fetchedAt: nowMs,
+      }),
+    });
+    const loader = createConfigLoader({
+      fetchFn: fetchFail() as unknown as typeof fetch,
+      now: () => nowMs,
+      storage,
+    });
+    const result = await loader.load();
+    expect(result.source).toBe('builtin');
+    expect(await storage.get(CONFIG_CACHE_KEY)).toBeNull();
+  });
+
+  it('cache tersimpan rusak + remote sehat: remote dipakai, racun terganti (S5)', async () => {
+    const nowMs = 1_000_000;
+    const storage = createMemoryStorage({
+      [CONFIG_CACHE_KEY]: JSON.stringify({
+        text: '{ini-bukan-json',
+        fetchedAt: nowMs,
+      }),
+    });
+    const loader = createConfigLoader({
+      fetchFn: fetchOk(CONFIG_A) as unknown as typeof fetch,
+      now: () => nowMs,
+      storage,
+    });
+    const result = await loader.load();
+    expect(result.source).toBe('remote');
+    expect(result.changed).toBe(true);
+    // Racun terganti cache valid: loader baru (simulasi restart)
+    // dengan fetch gagal memakai cache, bukan builtin.
+    const loader2 = createConfigLoader({
+      fetchFn: fetchFail() as unknown as typeof fetch,
+      now: () => nowMs,
+      storage,
+    });
+    const second = await loader2.load();
+    expect(second.source).toBe('cached');
+    expect(second.config.stsByHash).toEqual({ b559f50c: 20770 });
+  });
 });
+
+describe('parseConfigText (S5)', () => {
+  it('teks bukan JSON menjadi null, tidak melempar', () => {
+    expect(parseConfigText('{ini-bukan-json')).toBeNull();
+    expect(parseConfigText('')).toBeNull();
+    expect(parseConfigText('null')).toBeNull();
+  });
+
+  it('JSON gagal validasi skema menjadi null', () => {
+    expect(
+      parseConfigText(JSON.stringify({ ...CONFIG_A, version: 99 })),
+    ).toBeNull();
+    // Akar bukan objek (angka, array) juga gagal validasi.
+    expect(parseConfigText('123')).toBeNull();
+    expect(parseConfigText('[1, 2]')).toBeNull();
+  });
+
+  it('teks valid menghasilkan config terstruktur', () => {
+    const parsed = parseConfigText(JSON.stringify(CONFIG_A));
+    expect(parsed?.clients[0]?.name).toBe('WEB_REMIX');
+    expect(parsed?.stsByHash).toEqual({ b559f50c: 20770 });
+  });
+});
+
+// Catatan S5, cabang cache memori: cache memori hanya pernah
+// diisi dari teks yang SUDAH lolos parse (cache tersimpan yang
+// valid, atau fetch segar yang valid), jadi tidak ada jalur API
+// publik yang bisa membuat memory.text rusak — cabang
+// "memory rusak" di loadFresh adalah pertahanan lapis kedua
+// yang tidak terjangkau secara konstruksi. Yang bisa diuji
+// adalah fungsi parse yang dipakai cabang itu (parseConfigText,
+// di atas): bila suatu hari teks memori rusak, parse yang sama
+// mengembalikan null dan loader membuang memori lalu lanjut ke
+// cache tersimpan / fetch, tanpa pernah menolak.

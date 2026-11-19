@@ -28,6 +28,7 @@ import {
   RetryableError,
   TooBigError,
   UrlExpiredError,
+  type ChunkedDownloadResult,
   type FetchRange,
   type RangeResult,
 } from './chunkedDownloader';
@@ -77,7 +78,44 @@ export interface ReconcileResult {
   stalePartsRemoved: number;
 }
 
-/** Parse total byte dari header Content-Range (`bytes a-b/total`). */
+/** Re-resolve di tengah unduhan mengembalikan format lain (itag berubah). */
+export class ItagChangedError extends Error {
+  /** URL segar dari resolve baru (format baru). */
+  readonly url: string;
+  /** Itag baru dari resolve baru. */
+  readonly itag: number;
+
+  constructor(url: string, itag: number) {
+    super('Format lagu berubah saat mengunduh');
+    this.name = 'ItagChangedError';
+    this.url = url;
+    this.itag = itag;
+  }
+}
+
+/**
+ * Tidur yang bisa dibatalkan (I6): `Promise.race` antara tidur
+ * dan event abort. Tanpa ini, pengguna yang menekan Batal di
+ * tengah tunggu 429 harus menunggu sampai tidur selesai (s.d.
+ * 65 detik) sebelum pembatalan diterapkan.
+ */
+async function sleepAbortable(
+  sleep: (ms: number) => Promise<void>,
+  ms: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) throw new DownloadAbortedError();
+  let onAbort: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new DownloadAbortedError());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([sleep(ms), aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort!);
+  }
+}
 export function parseContentRangeTotal(header: string | null): number | null {
   if (!header) return null;
   const match = /^bytes \d+-\d+\/(\d+)$/.exec(header.trim());
@@ -166,7 +204,21 @@ function combineSignal(
     }
   ).any;
   if (typeof anyFn === 'function') return anyFn([signal, timeout]);
-  return signal.aborted ? signal : timeout;
+  // Tanpa AbortSignal.any (Safari/Chrome lama): gabungkan manual
+  // lewat listener (I7). Fallback lama mengembalikan `timeout`
+  // saja dan MEMBUANG sinyal batal pengguna — pembatalan tidak
+  // sampai ke fetch selama fase tunggu koneksi/header.
+  if (signal.aborted) return signal;
+  if (timeout.aborted) return timeout;
+  const combined = new AbortController();
+  const onAbort = (): void => {
+    signal.removeEventListener('abort', onAbort);
+    timeout.removeEventListener('abort', onAbort);
+    combined.abort();
+  };
+  signal.addEventListener('abort', onAbort);
+  timeout.addEventListener('abort', onAbort);
+  return combined.signal;
 }
 
 /**
@@ -226,7 +278,9 @@ export async function fetchRangeViaProxy(
         res.headers.get('Retry-After'),
         DOWNLOAD_MAX_RETRY_AFTER_SECONDS,
       );
-      await sleep(waitSeconds * 1000);
+      // Tunggu 429 yang bisa dibatalkan (I6): batal mendarat
+      // langsung, bukan sesudah tidur penuh (s.d. 65 dtk).
+      await sleepAbortable(sleep, waitSeconds * 1000, signal);
       continue;
     }
     if (res.status === 403 || res.status === 404 || res.status === 410) {
@@ -355,6 +409,9 @@ export function downloadErrorMessage(error: unknown): string {
   }
   if (error instanceof DownloadAbortedError) {
     return 'Unduhan dibatalkan.';
+  }
+  if (error instanceof ItagChangedError) {
+    return 'Format lagu berubah saat mengunduh. Coba lagi nanti.';
   }
   return 'Unduhan gagal. Periksa koneksi internet kamu, lalu coba lagi.';
 }
@@ -645,8 +702,7 @@ export class DownloadManager {
           return;
         }
       }
-      const { startByte, partCount: keptParts } =
-        await this.resumeOffset(songId);
+      const resume = await this.resumeOffset(songId);
       const fetchRange: FetchRange = (url, start, end, signal) =>
         fetchRangeViaProxy(url, start, end, signal, {
           fetchImpl: this.fetchImpl,
@@ -656,44 +712,92 @@ export class DownloadManager {
       // (bukan offset / ukuran chunk): bila ukuran chunk
       // berubah antar sesi, rumus offset menimpa part lama
       // dan rakitan gagal cocok ukurannya (P5, 18 Nov).
+      //
+      // R7: itag awal DICATAT dan diperiksa di tiap re-resolve.
+      // Bila format berubah di tengah unduhan, chunk format
+      // baru TIDAK BOLEH ditempel ke part lama (rakitan
+      // campuran dua format lolos cek ukuran bila total tidak
+      // diketahui) — job mulai ulang dari byte 0 dengan URL
+      // dan format baru, part lama dibuang. Sekali per job:
+      // perubahan kedua menggagalkan job dengan pesan jelas.
+      let streamUrl = resolved.url;
+      let currentItag = resolved.itag;
+      let startByte = resume.startByte;
+      let keptParts = resume.partCount;
       let nextPartIndex = keptParts;
-      const result = await downloadChunked({
-        streamUrl: resolved.url,
-        startByte,
-        chunkSizeBytes: this.chunkSizeBytes,
-        fetchRange,
-        reResolve: async () => {
-          const fresh = await this.resolver.resolve(
-            { videoId: songId, title: song.song.title },
-            { itagPreference: preference },
-          );
-          return fresh.url;
-        },
-        onChunk: async (bytes, offset) => {
-          const index = nextPartIndex;
-          nextPartIndex += 1;
-          await this.store.putPart(songId, index, bytes);
-          await this.library.updateDownloadJob(songId, {
-            bytesDownloaded: offset + bytes.length,
+      let restarted = false;
+      let result: ChunkedDownloadResult | null = null;
+      for (;;) {
+        try {
+          result = await downloadChunked({
+            streamUrl,
+            startByte,
+            chunkSizeBytes: this.chunkSizeBytes,
+            fetchRange,
+            reResolve: async () => {
+              const fresh = await this.resolver.resolve(
+                { videoId: songId, title: song.song.title },
+                { itagPreference: preference },
+              );
+              if (fresh.itag !== currentItag) {
+                // Format berubah: downloadChunked TIDAK menangkap
+                // lemparan reResolve, jadi galat ini sampai ke
+                // loop restart di bawah (bukan ke retry chunk).
+                throw new ItagChangedError(fresh.url, fresh.itag);
+              }
+              return fresh.url;
+            },
+            onChunk: async (bytes, offset) => {
+              const index = nextPartIndex;
+              nextPartIndex += 1;
+              await this.store.putPart(songId, index, bytes);
+              await this.library.updateDownloadJob(songId, {
+                bytesDownloaded: offset + bytes.length,
+              });
+              if (this.active && this.activeSongId === songId) {
+                this.active.bytesDownloaded = offset + bytes.length;
+              }
+            },
+            onProgress: (downloaded, total) => {
+              if (this.active && this.activeSongId === songId) {
+                this.active.bytesDownloaded = downloaded;
+                this.active.totalBytes = total;
+              }
+              if (total !== null) {
+                void this.library.updateDownloadJob(songId, {
+                  totalBytes: total,
+                });
+              }
+            },
+            signal: abort.signal,
+            sleep: this.sleepFn,
           });
-          if (this.active && this.activeSongId === songId) {
-            this.active.bytesDownloaded = offset + bytes.length;
-          }
-        },
-        onProgress: (downloaded, total) => {
-          if (this.active && this.activeSongId === songId) {
-            this.active.bytesDownloaded = downloaded;
-            this.active.totalBytes = total;
-          }
-          if (total !== null) {
-            void this.library.updateDownloadJob(songId, {
-              totalBytes: total,
+          break;
+        } catch (error) {
+          if (error instanceof ItagChangedError && !restarted) {
+            restarted = true;
+            // Buang SEMUA part lama (format lama), mulai ulang
+            // dari byte 0 dengan URL + format baru.
+            await this.store.deleteParts(songId);
+            streamUrl = error.url;
+            currentItag = error.itag;
+            startByte = 0;
+            keptParts = 0;
+            nextPartIndex = 0;
+            if (this.active && this.activeSongId === songId) {
+              this.active.bytesDownloaded = 0;
+              this.active.totalBytes = null;
+            }
+            await this.library.updateDownloadJob(songId, {
+              bytesDownloaded: 0,
+              totalBytes: null,
             });
+            continue;
           }
-        },
-        signal: abort.signal,
-        sleep: this.sleepFn,
-      });
+          throw error;
+        }
+      }
+      if (!result) throw new RetryableError('Unduhan tidak menghasilkan file');
       if (abort.signal.aborted) return;
       // Rakit part menjadi satu file; ukuran WAJIB cocok.
       // Jumlah part = part lama yang dipertahankan + chunk
@@ -711,6 +815,13 @@ export class DownloadManager {
       if (assembled !== result.totalBytes) {
         throw new RetryableError('Ukuran rakitan tidak cocok');
       }
+      // R9: batal/hapus yang mendarat SELAMA rakit (fase async
+      // tanpa cek abort) tidak boleh membangkitkan file. Cek
+      // sekali lagi sebelum menulis, dan buang part.
+      if (abort.signal.aborted) {
+        await this.store.deleteParts(songId);
+        return;
+      }
       const blob = new Blob(parts, {
         type: result.contentType ?? 'application/octet-stream',
       });
@@ -720,11 +831,18 @@ export class DownloadManager {
         result.contentType ?? 'application/octet-stream',
       );
       await this.store.deleteParts(songId);
+      // R9 (jendela kedua): batal mendarat antara putDownload
+      // dan markDownloaded — hapus file yang baru ditulis
+      // supaya "Hapus semua unduhan" tidak dilanggar.
+      if (abort.signal.aborted) {
+        await this.store.deleteDownload(songId);
+        return;
+      }
       await this.library.markDownloaded({
         songId,
         filePath: downloadUrl(songId),
         fileSizeBytes: result.totalBytes,
-        formatId: String(resolved.itag),
+        formatId: String(currentItag),
       });
       await this.library.deleteDownloadJob(songId);
     } catch (error) {

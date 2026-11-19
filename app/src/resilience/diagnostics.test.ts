@@ -143,3 +143,63 @@ describe('snapshot kegagalan', () => {
     expect(parsed?.layer).toBe('resolve');
   });
 });
+
+describe('parseSnapshot validasi enum (I5)', () => {
+  it('kind/cause tak dikenal jatuh ke default, bukan undefined', () => {
+    const parsed = parseSnapshot(
+      JSON.stringify({
+        layer: 'resolve',
+        kind: 'zzz',
+        cause: 'zzz',
+        failedAt: FAILED_AT,
+        clientsTried: [],
+        lastClient: null,
+        lastPlayability: null,
+        playerHash: null,
+      }),
+    );
+    expect(parsed?.kind).toBe('unplayable');
+    expect(parsed?.cause).toBe('unknown');
+    // Sebelum perbaikan, kode dari snapshot ini berbunyi
+    // `LRS1-undefinedXX-...` (KIND_LETTER['zzz'] = undefined).
+    const code = buildDiagnosticCode({
+      kind: parsed!.kind,
+      cause: parsed!.cause,
+      failedAt: parsed!.failedAt,
+      clientsTried: [],
+      configVersion: null,
+      configIsRemote: false,
+      serviceStatus: null,
+    });
+    expect(code).not.toContain('undefined');
+    expect(code.startsWith('LRS1-UXX-')).toBe(true);
+  });
+
+  it("properti warisan ('constructor', 'toString') tidak lolos sebagai kind/cause", () => {
+    const parsed = parseSnapshot(
+      JSON.stringify({
+        layer: 'resolve',
+        kind: 'constructor',
+        cause: 'toString',
+        failedAt: 123,
+        clientsTried: [],
+      }),
+    );
+    expect(parsed?.kind).toBe('unplayable');
+    expect(parsed?.cause).toBe('unknown');
+  });
+
+  it('kind/cause valid dipertahankan', () => {
+    const parsed = parseSnapshot(
+      JSON.stringify({
+        layer: 'engine',
+        kind: 'engine',
+        cause: 'http-forbidden',
+        failedAt: 123,
+        clientsTried: [],
+      }),
+    );
+    expect(parsed?.kind).toBe('engine');
+    expect(parsed?.cause).toBe('http-forbidden');
+  });
+});

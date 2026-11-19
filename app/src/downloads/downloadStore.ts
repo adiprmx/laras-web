@@ -47,6 +47,29 @@ function defaultCaches(): CacheStorageLike {
   return caches as unknown as CacheStorageLike;
 }
 
+/**
+ * Tipe konten yang boleh disimpan/disajikan untuk unduhan (R8,
+ * Red 2): audio/*, video/*, atau application/octet-stream. Tipe
+ * lain (mis. text/html dari upstream yang lolos ke cache)
+ * diganti application/octet-stream supaya navigasi ke /dl/<id>
+ * tidak pernah me-render HTML same-origin (stored XSS lewat
+ * cache unduhan). Cerminan `safeDownloadContentType` di
+ * public/sw.js — SW tidak bisa mengimpor modul ini, jadi kedua
+ * salinan harus tetap sama (tes downloadStore.test.ts +
+ * sw.test.ts memaksanya).
+ */
+export function safeDownloadContentType(contentType: string): string {
+  const type = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  if (
+    type.startsWith('audio/') ||
+    type.startsWith('video/') ||
+    type === 'application/octet-stream'
+  ) {
+    return contentType;
+  }
+  return 'application/octet-stream';
+}
+
 /** Satu entri manifest cache runtime (dari store `cache_entries`). */
 export interface RuntimeCacheEntry {
   key: string;
@@ -93,8 +116,12 @@ export class DownloadStore {
     contentType: string,
   ): Promise<void> {
     const cache = await this.downloadsCache();
+    // Pertahanan lapis kedua (R8, Red 2): tipe di luar audio/*,
+    // video/*, application/octet-stream TIDAK PERNAH masuk cache
+    // (diganti application/octet-stream) — lapis pertama ada di
+    // Service Worker saat menyajikan (`public/sw.js`).
     const headers = new Headers({
-      'Content-Type': contentType,
+      'Content-Type': safeDownloadContentType(contentType),
       'Content-Length': String(blob.size),
     });
     await cache.put(

@@ -223,8 +223,24 @@ export function parseSnapshot(raw: string | null): FailureSnapshot | null {
     }
     return {
       layer: parsed.layer,
-      kind: parsed.kind ?? 'unplayable',
-      cause: parsed.cause ?? 'unknown',
+      // I5: validasi keanggotaan enum — snapshot yang dirusak
+      // (atau ditulis versi lain) dengan kind/cause tak dikenal
+      // membuat buildDiagnosticCode menghasilkan
+      // `LRS1-undefinedXX-...` karena KIND_LETTER/CAUSE_LETTER
+      // mengembalikan undefined. Nilai tak dikenal jatuh ke
+      // default yang sama dengan nilai hilang. hasOwn (bukan
+      // `in`) supaya properti warisan seperti 'constructor'
+      // tidak lolos sebagai kind/cause.
+      kind:
+        typeof parsed.kind === 'string' &&
+        Object.prototype.hasOwnProperty.call(KIND_LETTER, parsed.kind)
+          ? parsed.kind
+          : 'unplayable',
+      cause:
+        typeof parsed.cause === 'string' &&
+        Object.prototype.hasOwnProperty.call(CAUSE_LETTER, parsed.cause)
+          ? parsed.cause
+          : 'unknown',
       failedAt: parsed.failedAt,
       clientsTried: parsed.clientsTried.filter(
         (c): c is string => typeof c === 'string',

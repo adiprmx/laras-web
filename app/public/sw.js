@@ -88,6 +88,30 @@ function isCacheableAsset(url) {
   );
 }
 
+/**
+ * Tipe konten yang boleh disajikan untuk unduhan (R8, Red 2):
+ * audio/*, video/*, atau application/octet-stream. Tipe lain
+ * (mis. text/html dari upstream yang lolos ke cache) diganti
+ * application/octet-stream supaya navigasi ke /dl/<id> tidak
+ * pernah me-render HTML same-origin (stored XSS lewat cache
+ * unduhan). Cerminan `safeDownloadContentType` di
+ * `src/downloads/downloadStore.ts` — SW tidak bisa mengimpor
+ * modul itu, jadi kedua salinan harus tetap sama (tes
+ * downloadStore.test.ts + sw.test.ts memaksanya dengan kasus
+ * yang sama).
+ */
+function safeDownloadContentType(contentType) {
+  const type = (contentType || '').split(';')[0].trim().toLowerCase();
+  if (
+    type.startsWith('audio/') ||
+    type.startsWith('video/') ||
+    type === 'application/octet-stream'
+  ) {
+    return contentType;
+  }
+  return 'application/octet-stream';
+}
+
 /** Parse header Range (`bytes=start-end`, `bytes=start-`, `bytes=-n`). */
 function parseRange(header, size) {
   const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
@@ -117,6 +141,15 @@ function parseRange(header, size) {
  * Layani file unduhan dari cache unduhan. Tanpa Range: respons
  * utuh (200). Dengan Range: potong blob dan balas 206 manual
  * (pola S6 — elemen <audio> butuh Range untuk seek).
+ *
+ * Content-Type tersimpan TIDAK PERNAH dipercaya apa adanya
+ * (R8, Red 2): tipe dipaksa ke audio/*, video/*, atau
+ * application/octet-stream, dan setiap respons unduhan membawa
+ * `X-Content-Type-Options: nosniff` supaya browser tidak
+ * menebak tipe dari isi (stored XSS lewat cache unduhan).
+ * Respons 200 dibangun ulang dari stream tersimpan (tanpa
+ * buffering seluruh file ke memori); respons 206 sudah
+ * membangun header baru dari potongan blob.
  */
 async function serveDownload(request) {
   const cache = await caches.open(DOWNLOADS_CACHE_NAME);
@@ -125,7 +158,15 @@ async function serveDownload(request) {
     return new Response('Lagu tidak ditemukan', { status: 404 });
   }
   const range = request.headers.get('Range');
-  if (!range) return cached;
+  if (!range) {
+    const headers = new Headers(cached.headers);
+    headers.set(
+      'Content-Type',
+      safeDownloadContentType(cached.headers.get('Content-Type') || ''),
+    );
+    headers.set('X-Content-Type-Options', 'nosniff');
+    return new Response(cached.body, { status: cached.status, headers });
+  }
   const blob = await cached.blob();
   const parsed = parseRange(range, blob.size);
   if (!parsed) {
@@ -136,6 +177,11 @@ async function serveDownload(request) {
   }
   const slice = blob.slice(parsed.start, parsed.end + 1);
   const headers = new Headers(cached.headers);
+  headers.set(
+    'Content-Type',
+    safeDownloadContentType(cached.headers.get('Content-Type') || ''),
+  );
+  headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Content-Length', String(slice.size));
   headers.set(
     'Content-Range',

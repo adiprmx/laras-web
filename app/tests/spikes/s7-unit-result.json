@@ -1,0 +1,137 @@
+{
+  "at": "2026-11-18T23:57:00.922Z",
+  "worker": "workers/proxy/src/index.js (modul asli, fetch upstream di-stub)",
+  "upstream_calls": 76,
+  "results": [
+    {
+      "label": "Rate limit InnerTube: 60 lolos dari 70",
+      "status": 60,
+      "expect": 60,
+      "pass": true,
+      "note": "429=10, 429 pertama=#61, Retry-After=60"
+    },
+    {
+      "label": "Rate limit InnerTube: 10 ditolak 429",
+      "status": 10,
+      "expect": 10,
+      "pass": true
+    },
+    {
+      "label": "Rate limit InnerTube: 429 pertama di #61",
+      "status": 61,
+      "expect": 61,
+      "pass": true
+    },
+    {
+      "label": "Rate limit InnerTube: Retry-After 60 dtk",
+      "status": "60",
+      "expect": "60",
+      "pass": true
+    },
+    {
+      "label": "Rate limit media: 10 lolos dari 12",
+      "status": 10,
+      "expect": 10,
+      "pass": true,
+      "note": "429=2, 429 pertama=#11"
+    },
+    {
+      "label": "Rate limit media: 2 ditolak 429",
+      "status": 2,
+      "expect": 2,
+      "pass": true
+    },
+    {
+      "label": "Rate limit media: 429 pertama di #11",
+      "status": 11,
+      "expect": 11,
+      "pass": true
+    },
+    {
+      "label": "Cap body POST 1 MB + 7 byte -> 413",
+      "status": 413,
+      "expect": 413,
+      "pass": true,
+      "note": "code=BODY_TOO_BIG"
+    },
+    {
+      "label": "Cap body stream 1,2 MB tanpa Content-Length -> 413",
+      "status": 413,
+      "expect": 413,
+      "pass": true,
+      "note": "code=BODY_TOO_BIG"
+    },
+    {
+      "label": "Gerbang host media example.com -> 403",
+      "status": 403,
+      "expect": 403,
+      "pass": true
+    },
+    {
+      "label": "Gerbang hash player 00000000 -> 403",
+      "status": 403,
+      "expect": 403,
+      "pass": true
+    },
+    {
+      "label": "Hash player ad8d59ae lolos -> 200",
+      "status": 200,
+      "expect": 200,
+      "pass": true,
+      "note": "byte=100018"
+    },
+    {
+      "label": "Header x-proxy-cpu-ms < 10 ms (404 + OPTIONS)",
+      "cpu_404_ms": "0.023",
+      "cpu_options_ms": "0.007",
+      "pass": true
+    },
+    {
+      "label": "Redirect media ke example.com -> 502",
+      "status": 502,
+      "expect": 502,
+      "pass": true,
+      "note": "code=REDIRECT_NOT_ALLOWED"
+    },
+    {
+      "label": "Redirect media ke sesama googlevideo -> 206",
+      "status": 206,
+      "expect": 206,
+      "pass": true
+    },
+    {
+      "label": "Respons media membawa nosniff",
+      "status": "nosniff",
+      "expect": "nosniff",
+      "pass": true
+    },
+    {
+      "label": "Tanpa binding DB: request diizinkan (fail-open)",
+      "status": 200,
+      "expect": 200,
+      "pass": true
+    },
+    {
+      "label": "Media 206 meneruskan Content-Range",
+      "status": "bytes 0-1023/4808098",
+      "expect": "bytes 0-1023/4808098",
+      "pass": true
+    },
+    {
+      "label": "Media mengekspos Content-Range (CORS)",
+      "status": true,
+      "expect": true,
+      "pass": true,
+      "note": "expose=Content-Range, Accept-Ranges, x-proxy-cpu-ms"
+    },
+    {
+      "label": "Header CPU tetap terekspos di media",
+      "status": true,
+      "expect": true,
+      "pass": true,
+      "note": "expose=Content-Range, Accept-Ranges, x-proxy-cpu-ms"
+    }
+  ],
+  "passed": 20,
+  "total": 20
+}

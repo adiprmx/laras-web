@@ -23,7 +23,12 @@ import {
   reconcileDownloads,
   type DownloadResolver,
 } from './downloadManager';
-import { RetryableError, TooBigError, UrlExpiredError } from './chunkedDownloader';
+import {
+  DownloadAbortedError,
+  RetryableError,
+  TooBigError,
+  UrlExpiredError,
+} from './chunkedDownloader';
 
 // Blob global jsdom di lingkungan tes ini minimal (tanpa
 // arrayBuffer/text/stream) dan `new Response(blobJsdom)`
@@ -83,7 +88,12 @@ class FakeCaches implements CacheStorageLike {
 // ---------- Bantuan ----------
 
 const FIXTURE = new Uint8Array(2500).map((_, i) => i % 251);
+// Fixture format lain (R7): pola byte berbeda + panjang berbeda,
+// supaya rakitan campuran dua format bisa dibedakan dari file murni.
+const FIXTURE_B = new Uint8Array(1800).map((_, i) => (i * 7 + 3) % 251);
 const STREAM_URL = 'https://rr1.googlevideo.com/videoplayback?x=1';
+const STREAM_URL_2 = 'https://rr2.googlevideo.com/videoplayback?x=2';
+const STREAM_URL_3 = 'https://rr3.googlevideo.com/videoplayback?x=3';
 const sleepInstant = (): Promise<void> => Promise.resolve();
 
 let counter = 0;
@@ -181,6 +191,73 @@ function makeProxyFetch(opts: { status?: number } = {}): {
     });
   }) as unknown as typeof fetch;
   return { fetchImpl, calls };
+}
+
+/** Resolver yang mengembalikan URL/itag sesuai skrip per panggilan (R7). */
+function scriptedResolver(
+  scripts: Array<{ url: string; itag: number }>,
+): DownloadResolver {
+  let calls = 0;
+  return {
+    init: () => Promise.resolve(undefined),
+    resolve: (song) => {
+      const script = scripts[Math.min(calls, scripts.length - 1)];
+      calls += 1;
+      return Promise.resolve({
+        videoId: song.videoId,
+        title: song.title,
+        url: script.url,
+        itag: script.itag,
+        bitrate: 160000,
+        client: 'WEB_REMIX',
+        usedSolver: false,
+        hash: null,
+        resolveMs: 1,
+      } satisfies ResolvedTrack);
+    },
+  };
+}
+
+/**
+ * fetch palsu yang melayani Range PER URL stream (R7): tiap URL
+ * punya fixture sendiri, dan URL bisa "mati" (403) sesudah N
+ * request berhasil — memicu re-resolve di tengah unduhan.
+ */
+function makeMultiUrlFetch(opts: {
+  fixtures: Map<string, Uint8Array>;
+  dieAfter?: Map<string, number>;
+}): {
+  fetchImpl: typeof fetch;
+  ranges: Array<{ url: string; range: string | null }>;
+} {
+  const ranges: Array<{ url: string; range: string | null }> = [];
+  const counts = new Map<string, number>();
+  const fetchImpl = (async (input: unknown, init?: { headers?: unknown }) => {
+    const proxyUrl = new URL(String(input));
+    const streamUrl = proxyUrl.searchParams.get('u') ?? '';
+    const range = rangeFromInit(init);
+    ranges.push({ url: streamUrl, range });
+    const count = (counts.get(streamUrl) ?? 0) + 1;
+    counts.set(streamUrl, count);
+    const dieAfter = opts.dieAfter?.get(streamUrl);
+    if (dieAfter !== undefined && count > dieAfter) {
+      return new Response('mati', { status: 403 });
+    }
+    const fixture = opts.fixtures.get(streamUrl);
+    if (!fixture) return new Response('tidak dikenal', { status: 404 });
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range ?? '');
+    const start = match ? Number(match[1]) : 0;
+    const end = match ? Number(match[2]) : fixture.length - 1;
+    const slice = fixture.slice(start, Math.min(end + 1, fixture.length));
+    return new Response(slice as unknown as BodyInit, {
+      status: 206,
+      headers: {
+        'Content-Range': `bytes ${start}-${start + slice.length - 1}/${fixture.length}`,
+        'Content-Type': 'audio/webm',
+      },
+    });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, ranges };
 }
 
 /** Baca byte Blob (Blob Node punya arrayBuffer asli). */
@@ -377,6 +454,79 @@ describe('fetchRangeViaProxy', () => {
     ).rejects.toBeInstanceOf(RetryableError);
   });
 
+  it('tunggu 429 bisa dibatalkan: batal langsung, bukan sesudah 65 dtk (I6)', async () => {
+    const fetchImpl = (async () =>
+      new Response('rate limited', {
+        status: 429,
+        headers: { 'Retry-After': '65' },
+      })) as unknown as typeof fetch;
+    const abort = new AbortController();
+    // Tidur yang tidak pernah selesai: tanpa sleepAbortable,
+    // tes ini menggantung sampai timeout.
+    const neverSleep = (): Promise<void> => new Promise(() => undefined);
+    const pending = fetchRangeViaProxy(STREAM_URL, 0, 0, abort.signal, {
+      fetchImpl,
+      sleep: neverSleep,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    abort.abort();
+    await expect(pending).rejects.toBeInstanceOf(DownloadAbortedError);
+  });
+
+  it('tanpa AbortSignal.any, sinyal batal tetap sampai ke fetch (I7)', async () => {
+    // Fallback combineSignal (Safari/Chrome lama) hanya terjangkau
+    // bila AbortSignal.any tidak ada: sembunyikan sementara, lalu
+    // kembalikan apa adanya di finally.
+    const holder = AbortSignal as unknown as { any?: unknown };
+    const originalAny = holder.any;
+    try {
+      holder.any = undefined;
+      const abort = new AbortController();
+      // Fetch yang menggantung sampai sinyalnya dibatalkan, lalu
+      // menolak seperti fetch asli yang dibatalkan (galat bernama
+      // 'AbortError'). Dipakai Error biasa, bukan DOMException:
+      // klasifikasi di fetchRangeViaProxy memeriksa
+      // `instanceof Error` (perilaku lama; abort DOMException
+      // asli tetap sampai lewat throwIfAborted di loop chunk).
+      const abortError = (): Error => {
+        const error = new Error('Aborted');
+        error.name = 'AbortError';
+        return error;
+      };
+      const fetchImpl = (async (
+        _input: unknown,
+        init?: { signal?: AbortSignal },
+      ) => {
+        await new Promise<void>((_, reject) => {
+          const fetchSignal = init?.signal;
+          if (!fetchSignal) {
+            reject(new Error('fetch tanpa sinyal'));
+            return;
+          }
+          if (fetchSignal.aborted) {
+            reject(abortError());
+            return;
+          }
+          fetchSignal.addEventListener(
+            'abort',
+            () => reject(abortError()),
+            { once: true },
+          );
+        });
+        throw new Error('tidak tercapai');
+      }) as unknown as typeof fetch;
+      const pending = fetchRangeViaProxy(STREAM_URL, 0, 0, abort.signal, {
+        fetchImpl,
+        sleep: sleepInstant,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      abort.abort();
+      await expect(pending).rejects.toBeInstanceOf(DownloadAbortedError);
+    } finally {
+      holder.any = originalAny;
+    }
+  });
+
   it('403/404/410 berarti URL mati (UrlExpired)', async () => {
     for (const status of [403, 404, 410]) {
       const fetchImpl = (async () =>
@@ -547,6 +697,27 @@ function makeManager(library: LibraryService, opts: {
     sleep: sleepInstant,
     storageEstimate: opts.storageEstimate,
     chunkSizeBytes: opts.chunkSizeBytes ?? 1000,
+  });
+  return { manager, store };
+}
+
+/** Varian makeManager dengan resolver skrip (R7). */
+function makeManagerWithResolver(
+  library: LibraryService,
+  resolver: DownloadResolver,
+  fetchImpl: typeof fetch,
+): { manager: DownloadManager; store: DownloadStore } {
+  const store = new DownloadStore({
+    caches: new FakeCaches(),
+    origin: 'https://app.test',
+  });
+  const manager = new DownloadManager({
+    library,
+    store,
+    resolver,
+    fetchImpl,
+    sleep: sleepInstant,
+    chunkSizeBytes: 1000,
   });
   return { manager, store };
 }
@@ -786,6 +957,147 @@ describe('DownloadManager', () => {
     await waitFor(async () => library.isDownloaded('s1'), 's1 terunduh');
     // init kedua tidak-op (idempotent).
     expect(await manager.init()).toBeNull();
+  });
+
+  it('re-resolve beda itag: mulai ulang dari 0, file BUKAN campuran (R7)', async () => {
+    const library = await makeLibrary();
+    await seedSong(library, 's1');
+    // Resolve awal itag 251 (URL1); re-resolve itag 140 (URL2).
+    const resolver = scriptedResolver([
+      { url: STREAM_URL, itag: 251 },
+      { url: STREAM_URL_2, itag: 140 },
+    ]);
+    const { fetchImpl, ranges } = makeMultiUrlFetch({
+      fixtures: new Map([
+        [STREAM_URL, FIXTURE],
+        [STREAM_URL_2, FIXTURE_B],
+      ]),
+      // URL1 mati sesudah chunk pertama: memicu re-resolve.
+      dieAfter: new Map([[STREAM_URL, 1]]),
+    });
+    const { manager, store } = makeManagerWithResolver(
+      library,
+      resolver,
+      fetchImpl,
+    );
+
+    await manager.enqueue('s1', 'best', { title: 'Lagu s1' });
+    await waitFor(async () => library.isDownloaded('s1'), 's1 terunduh');
+
+    // File akhir 100% format baru (FIXTURE_B). Tanpa perbaikan,
+    // chunk pertama format lama (1000 byte FIXTURE) ditempel ke
+    // chunk format baru dan file campuran itu lolos sebagai
+    // unduhan "valid" (cek ukuran tidak menangkap bila total
+    // tidak diketahui).
+    const blob = await store.getDownload('s1');
+    expect(await blobBytes(blob!)).toEqual(FIXTURE_B);
+    const song = await library.songById('s1');
+    expect(song?.song.formatId).toBe('140');
+    expect(song?.song.fileSizeBytes).toBe(FIXTURE_B.length);
+    expect(await store.listPartIndexes('s1')).toEqual([]);
+    // URL baru diunduh dari byte 0 (bukan lanjut dari offset lama).
+    const url2Ranges = ranges
+      .filter((r) => r.url === STREAM_URL_2)
+      .map((r) => r.range);
+    expect(url2Ranges).toEqual(['bytes=0-999', 'bytes=1000-1799']);
+  });
+
+  it('itag berubah DUA kali: job gagal dengan pesan jelas, bukan loop (R7)', async () => {
+    const library = await makeLibrary();
+    await seedSong(library, 's1');
+    const resolver = scriptedResolver([
+      { url: STREAM_URL, itag: 251 },
+      { url: STREAM_URL_2, itag: 140 },
+      { url: STREAM_URL_3, itag: 139 },
+    ]);
+    const { fetchImpl } = makeMultiUrlFetch({
+      fixtures: new Map([
+        [STREAM_URL, FIXTURE],
+        [STREAM_URL_2, FIXTURE_B],
+        [STREAM_URL_3, FIXTURE_B],
+      ]),
+      dieAfter: new Map([
+        [STREAM_URL, 1],
+        [STREAM_URL_2, 1],
+      ]),
+    });
+    const { manager, store } = makeManagerWithResolver(
+      library,
+      resolver,
+      fetchImpl,
+    );
+
+    await manager.enqueue('s1', 'best', { title: 'Lagu s1' });
+    await waitFor(
+      async () =>
+        (await library.downloadJobBySongId('s1'))?.status ===
+        DownloadJobStatus.failed,
+      'job gagal',
+    );
+    const job = await library.downloadJobBySongId('s1');
+    expect(job?.errorMessage).toContain('Format lagu berubah');
+    expect(await store.hasDownload('s1')).toBe(false);
+    expect(await library.isDownloaded('s1')).toBe(false);
+  });
+
+  it('batal mendarat selama rakit: file tidak muncul kembali (R9)', async () => {
+    const library = await makeLibrary();
+    await seedSong(library, 's1');
+    const { manager, store } = makeManager(library);
+    let cancelled = false;
+    const origGetPart = store.getPart.bind(store);
+    store.getPart = async (videoId, index) => {
+      const part = await origGetPart(videoId, index);
+      // Rakit membaca part 0, 1, 2 berurutan; batal mendarat
+      // sesudah part terakhir dibaca — tepat di jendela race R9
+      // (cek abort terakhir sudah lewat, putDownload belum jalan).
+      // cancel() memanggil abort() secara sinkron sebelum await
+      // pertamanya, jadi sinyal sudah set saat rakit lanjut.
+      if (videoId === 's1' && index === 2 && !cancelled) {
+        cancelled = true;
+        void manager.cancel('s1');
+      }
+      return part;
+    };
+
+    await manager.enqueue('s1', 'best', { title: 'Lagu s1' });
+    await waitFor(async () => cancelled, 'batal mendarat');
+    await waitFor(async () => manager.getActive() === null, 'job selesai');
+    // Jeda singkat: tanpa cek R9, putDownload + markDownloaded
+    // akan menulis file sesudah titik ini.
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(await store.hasDownload('s1')).toBe(false);
+    expect(await library.isDownloaded('s1')).toBe(false);
+    expect(await library.downloadJobBySongId('s1')).toBeNull();
+    expect(await store.listPartIndexes('s1')).toEqual([]);
+  });
+
+  it('batal mendarat antara putDownload dan markDownloaded: file dihapus lagi (R9)', async () => {
+    const library = await makeLibrary();
+    await seedSong(library, 's1');
+    const { manager, store } = makeManager(library);
+    let cancelled = false;
+    const origPutDownload = store.putDownload.bind(store);
+    store.putDownload = async (videoId, blob, contentType) => {
+      await origPutDownload(videoId, blob, contentType);
+      // cancel() TIDAK menghapus file unduhan (hanya job + part),
+      // jadi bila file hilang sesudah tes ini, itu murni berkat
+      // cek abort kedua di runJob — bukan berkat cancel().
+      if (videoId === 's1' && !cancelled) {
+        cancelled = true;
+        void manager.cancel('s1');
+      }
+    };
+
+    await manager.enqueue('s1', 'best', { title: 'Lagu s1' });
+    await waitFor(async () => cancelled, 'batal mendarat');
+    await waitFor(async () => manager.getActive() === null, 'job selesai');
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(await store.hasDownload('s1')).toBe(false);
+    expect(await library.isDownloaded('s1')).toBe(false);
+    expect(await library.downloadJobBySongId('s1')).toBeNull();
   });
   // Timeout 30 dtk: fake-indexeddb lambat saat suite paralel
   // (lihat catatan di library.test.ts) — anggaran lingkungan.
