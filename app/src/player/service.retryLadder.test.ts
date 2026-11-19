@@ -1,7 +1,8 @@
 /**
  * Tes tangga retry latar (hotfix resolve) di tingkat service:
- * tangga mulai sesudah tangga cepat P6 gagal LOGIN_REQUIRED
- * murni, percobaan latar di +60 dtk dan +5 mnt, pembatalan saat
+ * tangga mulai sesudah tangga cepat P6 gagal mayoritas
+ * LOGIN_REQUIRED (Blue 7 R21: mayoritas, bukan lagi "semua"),
+ * percobaan latar di +60 dtk dan +5 mnt, pembatalan saat
  * skip/jeda, sinyal kanari, dan tenggat tab-latar.
  *
  * Jam palsu (vi.useFakeTimers): tangga 5 dtk/15 dtk/60 dtk/5 mnt
@@ -337,7 +338,7 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
     return playerCalls.filter((c) => c.videoId === videoId);
   }
 
-  it('tangga latar mulai sesudah tangga cepat gagal LOGIN_REQUIRED murni', async () => {
+  it('tangga latar mulai sesudah tangga cepat gagal LOGIN_REQUIRED (semua upaya)', async () => {
     const startedAt = Date.now();
     await playQueue([TRACK_1, TRACK_2]);
     // Tangga cepat P6: 3 putaran x 3 client = 9 request.
@@ -421,7 +422,9 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
     await drive(service.retry(), 30_000);
     expect(usePlayerStore.getState().status).toBe('playing');
     expect(port.loadedUrls).toEqual([STREAM_URL]);
-  }, 30000);
+    // I27: batas 60 dtk (tes ini memajukan ~400 dtk jam palsu +
+    // ~400 detak watchdog; 30 dtk flaky di bawah beban CPU).
+  }, 60000);
 
   it('skip saat tangga berjalan membatalkan retry lagu itu', async () => {
     behavior = (call) =>
@@ -440,7 +443,9 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
     expect(port.loadedUrls).toEqual([STREAM_URL]);
     expect(usePlayerStore.getState().status).toBe('playing');
     expect(service.debugState().retryLadder).toBeNull();
-  });
+    // I27: batas 15 dtk (drive 80 dtk + pra-resolve; batas
+    // default 5 dtk flaky di bawah beban CPU).
+  }, 15000);
 
   it('jeda saat tangga berjalan membatalkan retry', async () => {
     await playQueue([TRACK_1]);
@@ -452,7 +457,9 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
     await vi.advanceTimersByTimeAsync(400_000);
     expect(callsFor('vid11111111')).toHaveLength(9);
     expect(port.loadedUrls).toHaveLength(0);
-  }, 20000);
+    // I27: batas 30 dtk (400 dtk jam palsu + ~400 detak
+    // watchdog; 20 dtk flaky di bawah beban CPU).
+  }, 30000);
 
   it('jeda saat tangga cepat berjalan: tangga latar TIDAK mulai', async () => {
     const p = service.playQueue([TRACK_1]);
@@ -488,16 +495,66 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
     expect(usePlayerStore.getState().status).toBe('error');
   });
 
-  it('TIDAK ada tangga untuk campuran LOGIN_REQUIRED + UNPLAYABLE', async () => {
+  it('TIDAK ada tangga untuk campuran MINORITAS LOGIN_REQUIRED (1 dari 3 client, R21)', async () => {
     behavior = (call) =>
       call.clientId === '67'
         ? { playability: 'LOGIN_REQUIRED', withUrl: false }
         : { playability: 'UNPLAYABLE', withUrl: false };
     await playQueue([TRACK_1]);
+    // 3 dari 9 upaya LOGIN_REQUIRED (33%) — bukan mayoritas.
     expect(playerCalls).toHaveLength(9);
     expect(service.debugState().retryLadder).toBeNull();
     expect(usePlayerStore.getState().status).toBe('error');
   });
+
+  it('ADA tangga untuk campuran MAYORITAS LOGIN_REQUIRED (2 dari 3 client, R21)', async () => {
+    behavior = (call) =>
+      call.clientId === '14'
+        ? { playability: 'UNPLAYABLE', withUrl: false }
+        : { playability: 'LOGIN_REQUIRED', withUrl: false };
+    const startedAt = Date.now();
+    await playQueue([TRACK_1]);
+    // 6 dari 9 upaya LOGIN_REQUIRED (67%) — mayoritas: tangga
+    // mulai walau satu client UNPLAYABLE (pola campuran nyata
+    // probe 19 Nov 2026 15:57 WIB).
+    expect(playerCalls).toHaveLength(9);
+    const state = usePlayerStore.getState();
+    expect(state.status).toBe('loading');
+    expect(state.notice).toBe(strings.retryLimitingAuto);
+    const ladder = service.debugState().retryLadder;
+    expect(ladder).not.toBeNull();
+    expect(ladder?.videoId).toBe('vid11111111');
+    expect(ladder?.step).toBe(0);
+    expect(ladder!.nextAttemptAt).toBeGreaterThanOrEqual(startedAt + 60_000);
+  });
+
+  it('percobaan latar campuran mayoritas LOGIN_REQUIRED: tangga maju ke langkah 5 mnt (R21)', async () => {
+    behavior = (call) => {
+      if (call.index < 9) {
+        return { playability: 'LOGIN_REQUIRED', withUrl: false };
+      }
+      if (call.index < 12) {
+        // Percobaan latar 1: 2 LOGIN_REQUIRED + 1 UNPLAYABLE.
+        return call.clientId === '14'
+          ? { playability: 'UNPLAYABLE', withUrl: false }
+          : { playability: 'LOGIN_REQUIRED', withUrl: false };
+      }
+      return { playability: 'OK', withUrl: true };
+    };
+    await playQueue([TRACK_1]);
+    expect(service.debugState().retryLadder).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(61_000);
+    // Mayoritas LOGIN_REQUIRED di percobaan latar: maju ke
+    // langkah 5 mnt (bukan berhenti seperti aturan "semua").
+    expect(callsFor('vid11111111')).toHaveLength(12);
+    expect(service.debugState().retryLadder?.step).toBe(1);
+    expect(usePlayerStore.getState().status).toBe('loading');
+    await vi.advanceTimersByTimeAsync(301_000);
+    expect(callsFor('vid11111111')).toHaveLength(13);
+    expect(port.loadedUrls).toEqual([STREAM_URL]);
+    expect(usePlayerStore.getState().status).toBe('playing');
+    expect(service.debugState().retryLadder).toBeNull();
+  }, 20000);
 
   it('percobaan latar gagal BUKAN LOGIN_REQUIRED: tangga berhenti, perilaku lama', async () => {
     behavior = (call) =>

@@ -101,6 +101,8 @@ class FakeD1 {
   userMeta = new Map<string, number>();
   // Blue 6 (migrasi 0006): anggaran baca pull harian +
   // tombstone identitas terhapus (hash -> angka-angka saja).
+  // Blue 7 (migrasi 0007): + deleted_rows (baris yang dihapus
+  // akun itu — cooldown daftar ulang sebanding, S13).
   readBudget = new Map<string, number>();
   deletedIdentities = new Map<
     string,
@@ -110,6 +112,7 @@ class FakeD1 {
       budget_rows: number;
       read_rows: number;
       history_cleared_at: number | null;
+      deleted_rows: number;
     }
   >();
   // Bila true, baca sync_counts melempar (meniru tabel 0005
@@ -120,6 +123,9 @@ class FakeD1 {
   throwOnItemCounters = false;
   // Blue 6 (I23): query COUNT(*) melempar (D1 mati sesaat).
   throwOnCount = false;
+  // Blue 7 (I24): probe cap playlist melempar (D1 mati sesaat
+  // di fase cap/probe, sesudah reservasi anggaran).
+  throwOnCapProbe = false;
   // Model meteran baca D1 (Red 5 S9): baris yang DIPINDAI.
   // - first(): 1 baris (lookup); COUNT(*): + jumlah baris cocok.
   // - all(): jumlah baris dikembalikan, DITAMBAH seek IN yang
@@ -321,6 +327,8 @@ class FakeD1 {
     }
     // Blue 6 (S10c): tulis tombstone identitas (hanya hash +
     // angka; upsert per identitas — hapus kedua menimpa).
+    // Blue 7 (S13): + deleted_rows (v[6], ditulis 0 dulu lalu
+    // diperbarui sesudah batch hapus dengan jumlah sebenarnya).
     if (sql.startsWith('INSERT INTO sync_deleted_identities')) {
       this.deletedIdentities.set(String(v[0]), {
         deleted_at: Number(v[1]),
@@ -328,8 +336,25 @@ class FakeD1 {
         budget_rows: Number(v[3]),
         read_rows: Number(v[4]),
         history_cleared_at: v[5] === null ? null : Number(v[5]),
+        deleted_rows: Number(v[6] ?? 0),
       });
       this.lastChanges = 1;
+      return;
+    }
+    // Blue 7 (S13): catat jumlah baris terhapus di tombstone
+    // sesudah batch hapus (meta.changes per pernyataan).
+    if (
+      sql.startsWith(
+        'UPDATE sync_deleted_identities SET deleted_rows = ?',
+      )
+    ) {
+      const t = this.deletedIdentities.get(String(v[1]));
+      if (t) {
+        t.deleted_rows = Number(v[0]);
+        this.lastChanges = 1;
+      } else {
+        this.lastChanges = 0;
+      }
       return;
     }
     // Blue 6 (S10b): konsumsi tombstone saat daftar ulang.
@@ -356,11 +381,16 @@ class FakeD1 {
       return;
     }
     // Blue 6 (S10): hapus anggaran baca saat hapus akun.
+    // Blue 7 (S13): lastChanges eksak (dijumlah ke deleted_rows).
     if (sql.startsWith('DELETE FROM sync_read_budget WHERE user_id = ?')) {
+      let n = 0;
       for (const k of [...this.readBudget.keys()]) {
-        if (k.startsWith(`${String(v[0])}|`)) this.readBudget.delete(k);
+        if (k.startsWith(`${String(v[0])}|`)) {
+          this.readBudget.delete(k);
+          n++;
+        }
       }
-      this.lastChanges = 1;
+      this.lastChanges = n;
       return;
     }
     // S9: penghitung — tiga bentuk DO UPDATE: increment
@@ -468,13 +498,18 @@ class FakeD1 {
       return;
     }
     if (sql.startsWith('DELETE FROM sessions WHERE id = ?')) {
-      this.sessions.delete(String(v[0]));
+      this.lastChanges = this.sessions.delete(String(v[0])) ? 1 : 0;
       return;
     }
     if (sql.startsWith('DELETE FROM sessions WHERE user_id = ?')) {
+      let n = 0;
       for (const [id, s] of [...this.sessions]) {
-        if (s.user_id === String(v[0])) this.sessions.delete(id);
+        if (s.user_id === String(v[0])) {
+          this.sessions.delete(id);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (sql.startsWith('INSERT INTO users')) {
@@ -493,7 +528,7 @@ class FakeD1 {
       return;
     }
     if (sql.startsWith('DELETE FROM users WHERE id = ?')) {
-      this.users.delete(String(v[0]));
+      this.lastChanges = this.users.delete(String(v[0])) ? 1 : 0;
       return;
     }
     if (sql.startsWith('INSERT INTO sync_playlists')) {
@@ -644,16 +679,21 @@ class FakeD1 {
       return;
     }
     if (sql.startsWith('DELETE FROM sync_history WHERE user_id = ? AND played_at <= ?')) {
+      let n = 0;
       for (const [k, h] of [...this.history]) {
         if (h.user_id === String(v[0]) && h.played_at <= Number(v[1])) {
           this.history.delete(k);
+          n++;
         }
       }
+      this.lastChanges = n;
       return;
     }
     // Blue 6 (I22): hapus sapu tombstone — HARUS di atas cabang
     // hapus-akun di bawah (awalan 'DELETE FROM sync_playlists
     // WHERE user_id = ?' juga cocok dengan bentuk IN ini).
+    // Blue 7 (I25): lastChanges = baris yang BENAR-BENAR
+    // terhapus (decrement penghitung memakai meta.changes).
     if (
       sql.startsWith(
         'DELETE FROM sync_playlists WHERE user_id = ? AND id IN (',
@@ -661,9 +701,14 @@ class FakeD1 {
     ) {
       const userId = String(v[0]);
       const ids = new Set(v.slice(1).map(String));
+      let n = 0;
       for (const [id, p] of [...this.playlists]) {
-        if (p.user_id === userId && ids.has(id)) this.playlists.delete(id);
+        if (p.user_id === userId && ids.has(id)) {
+          this.playlists.delete(id);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (
@@ -673,9 +718,14 @@ class FakeD1 {
     ) {
       const userId = String(v[0]);
       const ids = new Set(v.slice(1).map(String));
+      let n = 0;
       for (const [k, l] of [...this.likes]) {
-        if (l.user_id === userId && ids.has(l.video_id)) this.likes.delete(k);
+        if (l.user_id === userId && ids.has(l.video_id)) {
+          this.likes.delete(k);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (
@@ -688,14 +738,63 @@ class FakeD1 {
       for (let i = 1; i + 1 < v.length; i += 2) {
         pairs.add(`${String(v[i])}|${String(v[i + 1])}`);
       }
+      let n = 0;
       for (const [k, item] of [...this.items]) {
         if (
           item.user_id === userId &&
           pairs.has(`${item.playlist_id}|${item.video_id}`)
         ) {
           this.items.delete(k);
+          n++;
         }
       }
+      this.lastChanges = n;
+      return;
+    }
+    // Blue 7 (I26a): sapu playlist ikut menghapus item dari
+    // playlist yang disapu — satu DELETE per playlist (supaya
+    // decrement penghitung items per playlist memakai
+    // meta.changes yang persis, I25).
+    if (
+      sql.startsWith(
+        'DELETE FROM sync_playlist_items WHERE user_id = ? AND playlist_id = ?',
+      )
+    ) {
+      const userId = String(v[0]);
+      const playlistId = String(v[1]);
+      let n = 0;
+      for (const [k, item] of [...this.items]) {
+        if (
+          item.user_id === userId &&
+          item.playlist_id === playlistId
+        ) {
+          this.items.delete(k);
+          n++;
+        }
+      }
+      this.lastChanges = n;
+      return;
+    }
+    // Blue 7 (I26b): sabuk pengaman hapus akun — hapus item
+    // yatim (playlist-nya sudah tidak ada di sync_playlists).
+    if (
+      sql.startsWith(
+        'DELETE FROM sync_playlist_items WHERE user_id = ? AND playlist_id NOT IN (SELECT id FROM sync_playlists)',
+      )
+    ) {
+      const userId = String(v[0]);
+      const existing = new Set([...this.playlists.keys()]);
+      let n = 0;
+      for (const [k, item] of [...this.items]) {
+        if (
+          item.user_id === userId &&
+          !existing.has(item.playlist_id)
+        ) {
+          this.items.delete(k);
+          n++;
+        }
+      }
+      this.lastChanges = n;
       return;
     }
     if (
@@ -708,50 +807,80 @@ class FakeD1 {
           .filter((p) => p.user_id === String(v[0]))
           .map((p) => p.id),
       );
+      let n = 0;
       for (const [k, item] of [...this.items]) {
-        if (userPlaylistIds.has(item.playlist_id)) this.items.delete(k);
+        if (userPlaylistIds.has(item.playlist_id)) {
+          this.items.delete(k);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (sql.startsWith('DELETE FROM sync_playlists WHERE user_id = ?')) {
+      let n = 0;
       for (const [id, p] of [...this.playlists]) {
-        if (p.user_id === String(v[0])) this.playlists.delete(id);
+        if (p.user_id === String(v[0])) {
+          this.playlists.delete(id);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (sql.startsWith('DELETE FROM sync_likes WHERE user_id = ?')) {
+      let n = 0;
       for (const [k, l] of [...this.likes]) {
-        if (l.user_id === String(v[0])) this.likes.delete(k);
+        if (l.user_id === String(v[0])) {
+          this.likes.delete(k);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (sql.startsWith('DELETE FROM sync_history WHERE user_id = ?')) {
+      let n = 0;
       for (const [k, h] of [...this.history]) {
-        if (h.user_id === String(v[0])) this.history.delete(k);
+        if (h.user_id === String(v[0])) {
+          this.history.delete(k);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (sql.startsWith('DELETE FROM sync_settings WHERE user_id = ?')) {
-      this.settings.delete(String(v[0]));
+      this.lastChanges = this.settings.delete(String(v[0])) ? 1 : 0;
       return;
     }
     // Blue 5: hapus akun juga menghapus kuota pengguna (0005).
     if (sql.startsWith('DELETE FROM sync_counts WHERE user_id = ?')) {
       const prefix = `${String(v[0])}|`;
+      let n = 0;
       for (const k of [...this.counts.keys()]) {
-        if (k.startsWith(prefix)) this.counts.delete(k);
+        if (k.startsWith(prefix)) {
+          this.counts.delete(k);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (sql.startsWith('DELETE FROM sync_write_budget WHERE user_id = ?')) {
       const prefix = `${String(v[0])}|`;
+      let n = 0;
       for (const k of [...this.writeBudget.keys()]) {
-        if (k.startsWith(prefix)) this.writeBudget.delete(k);
+        if (k.startsWith(prefix)) {
+          this.writeBudget.delete(k);
+          n++;
+        }
       }
+      this.lastChanges = n;
       return;
     }
     if (sql.startsWith('DELETE FROM sync_user_meta WHERE user_id = ?')) {
-      this.userMeta.delete(String(v[0]));
+      this.lastChanges = this.userMeta.delete(String(v[0])) ? 1 : 0;
       return;
     }
     throw new Error(`pernyataan tak dikenal: ${sql}`);
@@ -849,9 +978,10 @@ class FakeD1 {
       return used === undefined ? null : { rows_read: used };
     }
     // Blue 6 (S10b/c): baca tombstone identitas saat callback.
+    // Blue 7 (S13): + deleted_rows (migrasi 0007).
     if (
       sql.startsWith(
-        'SELECT deleted_at, budget_day, budget_rows, read_rows, history_cleared_at FROM sync_deleted_identities',
+        'SELECT deleted_at, budget_day, budget_rows, read_rows, history_cleared_at, deleted_rows FROM sync_deleted_identities',
       )
     ) {
       const t = this.deletedIdentities.get(String(v[0]));
@@ -862,6 +992,7 @@ class FakeD1 {
             budget_rows: t.budget_rows,
             read_rows: t.read_rows,
             history_cleared_at: t.history_cleared_at,
+            deleted_rows: t.deleted_rows,
           }
         : null;
     }
@@ -975,6 +1106,10 @@ class FakeD1 {
         'SELECT client_id FROM sync_playlists WHERE user_id = ? AND client_id IN (',
       )
     ) {
+      // Blue 7 (I24): D1 mati sesaat di fase cap/probe.
+      if (this.throwOnCapProbe) {
+        throw new Error('D1 probe cap gagal (simulasi)');
+      }
       const userId = String(v[0]);
       const wanted = new Set(v.slice(1).map((x) => String(x)));
       const out = [...this.playlists.values()]
@@ -1076,14 +1211,24 @@ class FakeD1 {
         'SELECT playlist_id, video_id FROM sync_playlist_items WHERE user_id = ? AND deleted_at < ?',
       )
     ) {
+      // Blue 7 (S14/I26a): bila sampel mengecualikan playlist
+      // yang disapu push ini (NOT IN), bind-nya adalah
+      // (userId, cutoff, ...kecuali, limit) — limit adalah bind
+      // TERAKHIR, bukan v[2].
+      const hasExclusion = sql.includes('AND playlist_id NOT IN (');
+      const sampleLimit = hasExclusion ? Number(v[v.length - 1]) : limit;
+      const excluded = hasExclusion
+        ? new Set(v.slice(2, -1).map((x) => String(x)))
+        : new Set<string>();
       return [...this.items.values()]
         .filter(
           (item) =>
             item.user_id === userId &&
             item.deleted_at !== null &&
-            item.deleted_at < since,
+            item.deleted_at < since &&
+            !excluded.has(item.playlist_id),
         )
-        .slice(0, limit)
+        .slice(0, sampleLimit)
         .map((item) => ({
           playlist_id: item.playlist_id,
           video_id: item.video_id,
@@ -3181,6 +3326,7 @@ describe('Worker sync: Blue 6 (S10/S11/S12/I21/I22/I23)', () => {
       budget_rows: 19999,
       read_rows: 39999,
       history_cleared_at: clearedAt,
+      deleted_rows: 0,
     });
     stubGoogleProfile('Nama Google');
     const res = await doOAuthLogin(env);
@@ -3824,5 +3970,587 @@ describe('Worker sync: Blue 6 (S10/S11/S12/I21/I22/I23)', () => {
     expect(retry.status).toBe(200);
     expect(budgetUsed(db, userId)).toBe(7);
     expect(db.likes.size).toBe(1);
+  });
+});
+
+describe('Worker sync: Blue 7 (S13/S14/R21/I24/I25/I26)', () => {
+  /** Stub profil Google (sub 'google-sub-9'), pola describe Blue 6. */
+  function stubGoogleProfile(displayName: string) {
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes('oauth2.googleapis.com/token')) {
+        return Response.json({ access_token: 'access-123' });
+      }
+      if (u.includes('openidconnect.googleapis.com')) {
+        return Response.json({ sub: 'google-sub-9', name: displayName });
+      }
+      throw new Error(`fetch tak terduga: ${u}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+  }
+
+  /** Alur login -> callback penuh; kembalikan respons callback. */
+  async function doOAuthLogin(
+    env: ReturnType<typeof makeEnv>,
+  ): Promise<Response> {
+    const login = await call(env, '/api/auth/login?provider=google');
+    expect(login.status).toBe(302);
+    const stateCookie = login.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('laras_oauth_state=')) as string;
+    const stateValue = stateCookie.split(';')[0].split('=')[1];
+    const state = stateValue.split('.')[0];
+    return call(env, `/api/auth/callback?code=code-abc&state=${state}`, {
+      headers: { Cookie: `laras_oauth_state=${stateValue}` },
+    });
+  }
+
+  /** Ambil nilai cookie sesi dari respons callback. */
+  function sessionCookie(res: Response): string {
+    const c = res.headers
+      .getSetCookie()
+      .find((x) => x.startsWith('laras_session=')) as string;
+    return c.split(';')[0];
+  }
+
+  async function deleteAccount(
+    env: ReturnType<typeof makeEnv>,
+    cookie: string,
+    ip?: string,
+  ): Promise<Response> {
+    return call(env, '/api/auth/delete', {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: APP_ORIGIN,
+        ...(ip ? { 'CF-Connecting-IP': ip } : {}),
+      },
+    });
+  }
+
+  /** Hari UTC hari ini (kunci anggaran harian). */
+  function todayDay(): string {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  function seedItem(
+    db: FakeD1,
+    userId: string,
+    playlistId: string,
+    videoId: string,
+    opts: { posisi?: number; deletedAt?: number | null } = {},
+  ): void {
+    db.items.set(`${playlistId}|${videoId}`, {
+      playlist_id: playlistId,
+      video_id: videoId,
+      posisi: opts.posisi ?? 0,
+      added_at: 1000,
+      device_id: 'dev-seed',
+      updated_at: 1000,
+      deleted_at: opts.deletedAt ?? null,
+      title: null,
+      artist: null,
+      user_id: userId,
+    });
+  }
+
+  /** Item yatim: playlist_id tidak ada di sync_playlists. */
+  function countOrphanItems(db: FakeD1, userId: string): number {
+    let n = 0;
+    for (const item of db.items.values()) {
+      if (item.user_id === userId && !db.playlists.has(item.playlist_id)) {
+        n++;
+      }
+    }
+    return n;
+  }
+
+  // ---- S14: sapu tombstone ditagih ke anggaran ----
+
+  it('S14: sapu ditagih PERSIS (hapus + UPDATE penghitung + 1 cadangan)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    for (let i = 0; i < 50; i++) {
+      seedPlaylist(db, userId, `pl-live-${i}`, `Hidup ${i}`);
+    }
+    for (let i = 0; i < 50; i++) {
+      seedPlaylist(db, userId, `pl-old-${i}`, `Lama ${i}`);
+      db.playlists.get(`pl-old-${i}`)!.deleted_at = now - 31 * dayMs;
+    }
+    seedCounter(db, userId, 'playlists', '', 100);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; pruned: number };
+    };
+    expect(body.data.applied).toBe(1);
+    expect(body.data.pruned).toBe(50);
+    // Tagihan push 7 + sapu 52 (50 hapus + 1 UPDATE penghitung
+    // + 1 upsert cadangan) = 59.
+    expect(budgetUsed(db, userId)).toBe(59);
+    expect(db.playlists.size).toBe(51);
+    expect(db.counts.get(FakeD1.countKey(userId, 'playlists', ''))!.n).toBe(
+      51,
+    );
+  });
+
+  it('S14: cadangan sapu gagal -> sapu dilewati, push TETAP jalan', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    for (let i = 0; i < 49; i++) {
+      seedPlaylist(db, userId, `pl-live-${i}`, `Hidup ${i}`);
+    }
+    for (let i = 0; i < 50; i++) {
+      seedPlaylist(db, userId, `pl-old-${i}`, `Lama ${i}`);
+      db.playlists.get(`pl-old-${i}`)!.deleted_at = now - 31 * dayMs;
+    }
+    seedCounter(db, userId, 'playlists', '', 99);
+    // Anggaran tersisa persis 7 (tagihan push 1 playlist) —
+    // reservasi push lolos, cadangan sapu (52) gagal.
+    db.writeBudget.set(`${userId}|${todayDay()}`, 19993);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; pruned: number };
+    };
+    expect(body.data.applied).toBe(1);
+    expect(body.data.pruned).toBe(0);
+    // Tombstone TIDAK tersapu (menunggu besok); penghitung hanya
+    // naik bump (+1), tanpa decrement sapu.
+    expect(db.playlists.size).toBe(100);
+    expect(db.playlists.has('pl-old-0')).toBe(true);
+    expect(db.counts.get(FakeD1.countKey(userId, 'playlists', ''))!.n).toBe(
+      100,
+    );
+    expect(budgetUsed(db, userId)).toBe(20000);
+  });
+
+  it('S14: cap total sapu 1.000 baris per push (playlist ke-2 menunggu)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    // 2 playlist tombstone, masing-masing 600 item hidup:
+    // yang pertama (1 + 600 = 601) muat, yang kedua
+    // (601 + 601 = 1.202) melewati cap 1.000.
+    for (const pid of ['pl-a', 'pl-b']) {
+      seedPlaylist(db, userId, pid, pid);
+      db.playlists.get(pid)!.deleted_at = now - 31 * dayMs;
+      for (let i = 0; i < 600; i++) {
+        seedItem(db, userId, pid, `vid-${pid}-${i}`, { posisi: i });
+      }
+      seedCounter(db, userId, 'items', pid, 600);
+    }
+    seedCounter(db, userId, 'playlists', '', 2);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; pruned: number };
+    };
+    expect(body.data.applied).toBe(1);
+    expect(body.data.pruned).toBe(601);
+    expect(db.playlists.has('pl-a')).toBe(false);
+    expect(db.playlists.has('pl-b')).toBe(true);
+    expect(
+      [...db.items.values()].filter((it) => it.playlist_id === 'pl-b').length,
+    ).toBe(600);
+    expect(
+      [...db.items.values()].filter((it) => it.playlist_id === 'pl-a').length,
+    ).toBe(0);
+    expect(db.counts.get(FakeD1.countKey(userId, 'items', 'pl-a'))!.n).toBe(0);
+    expect(db.counts.get(FakeD1.countKey(userId, 'items', 'pl-b'))!.n).toBe(
+      600,
+    );
+    // Tagihan push 7 + sapu 604 (601 hapus + 2 UPDATE + 1) = 611.
+    expect(budgetUsed(db, userId)).toBe(611);
+  });
+
+  it('S14: satu playlist penuh (1.000 item) disapu utuh (1.001 baris, tanpa macet)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    seedPlaylist(db, userId, 'pl-penuh', 'Penuh');
+    db.playlists.get('pl-penuh')!.deleted_at = now - 31 * dayMs;
+    for (let i = 0; i < 1000; i++) {
+      seedItem(db, userId, 'pl-penuh', `vid-${i}`, { posisi: i });
+    }
+    seedCounter(db, userId, 'playlists', '', 1);
+    seedCounter(db, userId, 'items', 'pl-penuh', 1000);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; pruned: number };
+    };
+    expect(body.data.applied).toBe(1);
+    expect(body.data.pruned).toBe(1001);
+    expect(db.playlists.has('pl-penuh')).toBe(false);
+    expect(db.items.size).toBe(0);
+    expect(countOrphanItems(db, userId)).toBe(0);
+    // Tagihan push 7 + sapu 1.004 (1.001 hapus + 2 UPDATE + 1).
+    expect(budgetUsed(db, userId)).toBe(1011);
+  });
+
+  // ---- I25: race decrement penghitung sapu ----
+
+  it('I25: balapan sapu — push yang kalah decrement 0 (meta.changes), penghitung eksak', async () => {
+    // D1 yang menyela push pesaing PERSIS di antara sampling dan
+    // DELETE sapu: pesaing menghapus 50 tombstone yang sama +
+    // decrement 50. Tanpa meta.changes, push ini tetap decrement
+    // 50 (ukuran sampel) dan penghitung jadi 1; dengan
+    // meta.changes, DELETE-nya menghapus 0 baris dan decrement 0.
+    // (Dua push bersamaan TIDAK bisa dipakai di sini: digest
+    // SHA-256 async di authUser memecah lockstep microtask
+    // sehingga push pertama selalu selesai dulu — injeksi
+    // deterministik seperti tes I21 adalah cara yang benar.)
+    class RacingPruneD1 extends FakeD1 {
+      private raced = false;
+      override runSql(sql: string, v: unknown[]): void {
+        // Sela sesaat sebelum cadangan sapu (tagihan 52) jalan:
+        // push pesaing menyapu 50 tombstone + decrement 50.
+        if (
+          !this.raced &&
+          sql.startsWith('INSERT INTO sync_write_budget') &&
+          Number(v[2]) === 52
+        ) {
+          this.raced = true;
+          const dayMs = 24 * 60 * 60 * 1000;
+          const cutoff = Date.now() - 30 * dayMs;
+          for (const [id, p] of [...this.playlists]) {
+            if (p.deleted_at !== null && p.deleted_at < cutoff) {
+              this.playlists.delete(id);
+            }
+          }
+          const key = FakeD1.countKey('user-1', 'playlists', '');
+          const cur = this.counts.get(key)!;
+          this.counts.set(key, { n: cur.n - 50, updated_at: cur.updated_at });
+        }
+        super.runSql(sql, v);
+      }
+    }
+    const db = new RacingPruneD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    for (let i = 0; i < 50; i++) {
+      seedPlaylist(db, userId, `pl-live-${i}`, `Hidup ${i}`);
+    }
+    for (let i = 0; i < 50; i++) {
+      seedPlaylist(db, userId, `pl-old-${i}`, `Lama ${i}`);
+      db.playlists.get(`pl-old-${i}`)!.deleted_at = now - 31 * dayMs;
+    }
+    seedCounter(db, userId, 'playlists', '', 100);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; pruned: number };
+    };
+    expect(body.data.applied).toBe(1);
+    // Push ini tidak menghapus apa pun (pesaing sudah menghapus).
+    expect(body.data.pruned).toBe(0);
+    // 100 - 50 (pesaing) - 0 (push ini) + 1 (bump) = 51.
+    // Tanpa meta.changes: 100 - 50 - 50 + 1 = 1 (undercount).
+    expect(db.counts.get(FakeD1.countKey(userId, 'playlists', ''))!.n).toBe(
+      51,
+    );
+    expect(db.playlists.size).toBe(51);
+    // Push ini tetap membayar cadangan sapunya (7 + 52 = 59):
+    // kelebihan-tagih (arah aman), bukan kekurangan.
+    expect(budgetUsed(db, userId)).toBe(59);
+  });
+
+  // ---- I26: item yatim ----
+
+  it('I26a: sapu playlist ikut menghapus itemnya (hidup + tombstone); yatim 0', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    // Playlist yang dihapus 31 hari lalu: 10 item hidup + 2
+    // tombstone item (ikut terhapus cabang playlist, bukan
+    // cabang item — sampel item mengecualikannya).
+    seedPlaylist(db, userId, 'pl-hapus', 'Dihapus');
+    db.playlists.get('pl-hapus')!.deleted_at = now - 31 * dayMs;
+    for (let i = 0; i < 10; i++) {
+      seedItem(db, userId, 'pl-hapus', `vid-live-${i}`, { posisi: i });
+    }
+    for (let i = 0; i < 2; i++) {
+      seedItem(db, userId, 'pl-hapus', `vid-tomb-${i}`, {
+        posisi: 10 + i,
+        deletedAt: now - 31 * dayMs,
+      });
+    }
+    seedCounter(db, userId, 'playlists', '', 2);
+    seedCounter(db, userId, 'items', 'pl-hapus', 12);
+    // Playlist hidup dengan 3 tombstone item + 5 item hidup.
+    seedPlaylist(db, userId, 'pl-hidup', 'Hidup');
+    for (let i = 0; i < 5; i++) {
+      seedItem(db, userId, 'pl-hidup', `vid-h-${i}`, { posisi: i });
+    }
+    for (let i = 0; i < 3; i++) {
+      seedItem(db, userId, 'pl-hidup', `vid-ht-${i}`, {
+        posisi: 5 + i,
+        deletedAt: now - 31 * dayMs,
+      });
+    }
+    seedCounter(db, userId, 'items', 'pl-hidup', 8);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+      playlistItems: [
+        {
+          playlistClientId: 'pl-hidup',
+          videoId: 'vid-baru',
+          posisi: 8,
+          title: null,
+          artist: null,
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; pruned: number };
+    };
+    expect(body.data.applied).toBe(2);
+    // 1 playlist + 12 itemnya + 3 tombstone item = 16.
+    expect(body.data.pruned).toBe(16);
+    expect(db.playlists.has('pl-hapus')).toBe(false);
+    expect(db.items.size).toBe(6);
+    expect(countOrphanItems(db, userId)).toBe(0);
+    expect(db.counts.get(FakeD1.countKey(userId, 'items', 'pl-hapus'))!.n).toBe(
+      0,
+    );
+    // Playlist hidup: 8 - 3 (sapu) + 1 (bump) = 6.
+    expect(db.counts.get(FakeD1.countKey(userId, 'items', 'pl-hidup'))!.n).toBe(
+      6,
+    );
+    // Playlist: 2 - 1 (sapu) + 1 (bump) = 2.
+    expect(db.counts.get(FakeD1.countKey(userId, 'playlists', ''))!.n).toBe(2);
+    // Tagihan push 10 + sapu 20 (16 hapus + 3 UPDATE + 1) = 30.
+    expect(budgetUsed(db, userId)).toBe(30);
+  });
+
+  it('I26b: hapus akun menghapus item yatim (sabuk pengaman); deleted_rows menghitungnya', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db, {
+      providerId: 'google-1',
+    });
+    seedPlaylist(db, userId, 'pl-1', 'P');
+    for (let i = 0; i < 5; i++) {
+      seedItem(db, userId, 'pl-1', `vid-${i}`, { posisi: i });
+    }
+    // 7 item yatim (playlist-nya sudah hilang — peninggalan
+    // sapu sebelum perbaikan I26a).
+    for (let i = 0; i < 7; i++) {
+      seedItem(db, userId, 'pl-hilang', `vid-yatim-${i}`, { posisi: i });
+    }
+    for (let i = 0; i < 3; i++) {
+      db.likes.set(`${userId}|vid-like-${i}`, {
+        user_id: userId,
+        video_id: `vid-like-${i}`,
+        liked_at: 1000,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+    }
+    seedCounter(db, userId, 'playlists', '', 1);
+    seedCounter(db, userId, 'items', 'pl-1', 5);
+    db.writeBudget.set(`${userId}|${todayDay()}`, 5);
+    expect(countOrphanItems(db, userId)).toBe(7);
+    const del = await deleteAccount(env, cookie);
+    expect(del.status).toBe(200);
+    expect(db.items.size).toBe(0);
+    expect(db.playlists.size).toBe(0);
+    expect(db.likes.size).toBe(0);
+    // deleted_rows = 5 item + 7 yatim + 1 playlist + 3 suka
+    // + 2 penghitung + 1 anggaran tulis + 1 sesi + 1 user = 21.
+    const hash = await sha256Hex('google:google-1');
+    expect(db.deletedIdentities.get(hash)!.deleted_rows).toBe(21);
+  });
+
+  // ---- S13: cooldown sebanding ukuran akun ----
+
+  it('S13: akun kecil (2 baris) cooldown 24 jam; redirect membawa tanggal buka kunci', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const first = await doOAuthLogin(env);
+    expect(first.status).toBe(302);
+    const del = await deleteAccount(env, sessionCookie(first));
+    expect(del.status).toBe(200);
+    // Akun segar: hanya 1 sesi + 1 user yang terhapus.
+    const hash = await sha256Hex('google:google-sub-9');
+    const tombstone = db.deletedIdentities.get(hash)!;
+    expect(tombstone.deleted_rows).toBe(2);
+    const unlockDate = new Date(tombstone.deleted_at + 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    // Daftar ulang dalam cooldown: ditolak + tanggal buka kunci.
+    const second = await doOAuthLogin(env);
+    expect(second.status).toBe(302);
+    expect(second.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=error&reason=deleted-recently&until=${unlockDate}`,
+    );
+    expect(db.users.size).toBe(0);
+    // Sesudah 25 jam: berhasil (cooldown 24 jam lewat).
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+    try {
+      const third = await doOAuthLogin(env);
+      expect(third.status).toBe(302);
+      expect(third.headers.get('Location')).toBe(
+        `${APP_ORIGIN}/settings?auth=ok`,
+      );
+      expect(db.users.size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('S13: akun penuh (111.209 baris) cooldown 6 hari; 25 jam masih ditolak', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const first = await doOAuthLogin(env);
+    expect(first.status).toBe(302);
+    const userId = [...db.users.values()][0].id;
+    // Akun di batas penuh: 100 playlist + 100.000 item +
+    // 10.000 suka + 1.000 riwayat + settings + 103 penghitung
+    // + 1 anggaran tulis + 1 stempel + 1 anggaran baca.
+    for (let p = 0; p < 100; p++) {
+      seedPlaylist(db, userId, `pl-${p}`, `P${p}`);
+      seedCounter(db, userId, 'items', `pl-${p}`, 1000);
+      for (let i = 0; i < 1000; i++) {
+        seedItem(db, userId, `pl-${p}`, `vid-${p}-${i}`, { posisi: i });
+      }
+    }
+    seedCounter(db, userId, 'playlists', '', 100);
+    seedCounter(db, userId, 'likes', '', 10000);
+    seedCounter(db, userId, 'history', '', 1000);
+    for (let i = 0; i < 10000; i++) {
+      db.likes.set(`${userId}|vid-like-${i}`, {
+        user_id: userId,
+        video_id: `vid-like-${i}`,
+        liked_at: 1000,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+    }
+    for (let i = 0; i < 1000; i++) {
+      db.history.set(`${userId}|vid-hist-${i}|${1000 + i}`, {
+        user_id: userId,
+        video_id: `vid-hist-${i}`,
+        played_at: 1000 + i,
+        seconds_played: 30,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        title: null,
+        artist: null,
+      });
+    }
+    db.settings.set(userId, {
+      user_id: userId,
+      settings_json: '{"version":1}',
+      device_id: 'dev-seed',
+      updated_at: 1000,
+    });
+    db.writeBudget.set(`${userId}|${todayDay()}`, 19999);
+    db.userMeta.set(userId, Date.now());
+    db.readBudget.set(`${userId}|${todayDay()}`, 39999);
+    const del = await deleteAccount(env, sessionCookie(first));
+    expect(del.status).toBe(200);
+    expect(db.users.size).toBe(0);
+    expect(db.items.size).toBe(0);
+    // 100.000 item + 0 yatim + 100 playlist + 10.000 suka +
+    // 1.000 riwayat + 1 settings + 103 penghitung + 1 anggaran
+    // tulis + 1 stempel + 1 anggaran baca + 1 sesi + 1 user
+    // = 111.209.
+    const hash = await sha256Hex('google:google-sub-9');
+    const tombstone = db.deletedIdentities.get(hash)!;
+    expect(tombstone.deleted_rows).toBe(111209);
+    // Cooldown: 24 jam + ceil(91.209 / 20.000) = 24 jam + 5 hari
+    // = 6 hari. Tanggal buka kunci = hapus + 6 hari.
+    const unlockDate = new Date(
+      tombstone.deleted_at + 6 * 24 * 60 * 60 * 1000,
+    )
+      .toISOString()
+      .slice(0, 10);
+    vi.useFakeTimers();
+    try {
+      // +25 jam: MASIH ditolak (cooldown 6 hari, bukan 24 jam).
+      vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+      const second = await doOAuthLogin(env);
+      expect(second.status).toBe(302);
+      expect(second.headers.get('Location')).toBe(
+        `${APP_ORIGIN}/settings?auth=error&reason=deleted-recently&until=${unlockDate}`,
+      );
+      expect(db.users.size).toBe(0);
+      // +6 hari 1 jam: berhasil.
+      vi.setSystemTime(Date.now() + (6 * 24 + 1) * 60 * 60 * 1000);
+      const third = await doOAuthLogin(env);
+      expect(third.status).toBe(302);
+      expect(third.headers.get('Location')).toBe(
+        `${APP_ORIGIN}/settings?auth=ok`,
+      );
+      expect(db.users.size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 60000);
+
+  // ---- I24: probe gagal sesudah reservasi ----
+
+  it('I24: probe cap melempar -> 500 jelas + anggaran dikembalikan; coba lagi berhasil', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    db.throwOnCapProbe = true;
+    const body1 = {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:p', nama: 'P', deskripsi: null }],
+    };
+    const failed = await push(env, cookie, body1);
+    expect(failed.status).toBe(500);
+    const failedBody = (await failed.json()) as { error: { code: string } };
+    expect(failedBody.error.code).toBe('SYNC_TEMPORARILY_UNAVAILABLE');
+    // Reservasi push yang gagal dikembalikan penuh (bukan hangus).
+    expect(budgetUsed(db, userId)).toBe(0);
+    // D1 pulih: percobaan berikut berhasil dengan satu tagihan.
+    db.throwOnCapProbe = false;
+    const retry = await push(env, cookie, body1);
+    expect(retry.status).toBe(200);
+    expect(budgetUsed(db, userId)).toBe(7);
   });
 });

@@ -1,0 +1,23 @@
+-- Migrasi 0007: kolom deleted_rows di tombstone identitas terhapus (Blue 7, Red 7 S13)
+-- Database: laras-web-sync (uuid 3a2cb6d6-5481-42a1-b213-070215cd2ce5)
+--
+-- KOORDINATOR WAJIB MENERAPKAN MIGRASI INI SEBELUM DEPLOY WORKER PASCA-BLUE 7.
+-- Tanpa kolom ini, tulis tombstone (yang kini menyebut deleted_rows)
+-- gagal dan Worker fail-open ke perilaku Blue 6 (cooldown tetap 24 jam
+-- untuk semua akun, tanpa tanggal buka kunci di redirect).
+--
+-- S13: batch hapus akun menghapus SEMUA baris pengguna tanpa batas —
+-- akun di batas penuh menulis ~111.210 baris dalam satu panggilan,
+-- melebihi kuota tulis harian bersama (100.000) sendirian. Mitigasi
+-- Blue 7 adalah cooldown daftar ulang SEBANDING ukuran akun:
+-- delete handler menjumlahkan meta.changes dari seluruh pernyataan
+-- DELETE batch (12 pernyataan sesudah I26b) dan menyimpan jumlahnya
+-- di kolom ini; callback menghitung cooldown dari angka itu:
+-- 24 jam + 1 hari per 20.000 baris di atas 20.000, maks 30 hari
+-- (akun normal <=20.000 baris tetap 24 jam; akun penuh ~111.210
+-- baris mendapat 6 hari). Kolom ini hanya angka, tanpa data
+-- pribadi — konsisten dengan janji privasi tombstone (0006).
+-- Hapus bertahap asinkron (penutup total) adalah tindak lanjut
+-- pasca-RC, bukan Blue 7.
+
+ALTER TABLE sync_deleted_identities ADD COLUMN deleted_rows INTEGER NOT NULL DEFAULT 0;

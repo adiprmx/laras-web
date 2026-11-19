@@ -111,6 +111,8 @@ export interface PushBody {
 export interface PushData {
   serverTime: number;
   applied: number;
+  /** Baris tombstone/item yang disapu push ini (Blue 7, S14). */
+  pruned?: number;
   /** Entri yang ditolak karena bukan milik pendorong (R11). */
   skippedNotOwned?: number;
   /** Entri yang dilewati karena melewati batas total per pengguna (S7). */

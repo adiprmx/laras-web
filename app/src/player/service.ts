@@ -1109,16 +1109,17 @@ export class PlayerService {
     // Log bertahan melewati reload (best-effort).
     void persistPlayerLog();
     this.recordResolveSnapshot(classified.cause, classified.isTimeout);
-    // Tangga latar (hotfix): LOGIN_REQUIRED MURNI berarti jendela
-    // buruk yang bisa berbalik dalam hitungan menit — jangan
-    // langsung pindah lagu; coba lagi di latar (+60 dtk, +5 mnt)
-    // sementara lagu tetap di antrean. Galat lain (termasuk
-    // UNPLAYABLE, yang bisa berarti lagu yang benar-benar tidak
-    // ada) memakai perilaku lama di bawah. Pengecualian: bila
-    // pengguna SUDAH menjeda saat resolve gagal (jeda manual atau
-    // timer tidur selama tangga cepat), tangga TIDAK mulai —
-    // lagu tidak boleh mulai sendiri menit-menit sesudah pengguna
-    // menjeda; perilaku lama (failCurrentTrack) yang berlaku.
+    // Tangga latar (hotfix): MAYORITAS upaya LOGIN_REQUIRED
+    // berarti jendela buruk yang bisa berbalik dalam hitungan
+    // menit — jangan langsung pindah lagu; coba lagi di latar
+    // (+60 dtk, +5 mnt) sementara lagu tetap di antrean. Galat
+    // lain (termasuk UNPLAYABLE murni di semua client, yang bisa
+    // berarti lagu yang benar-benar tidak ada) memakai perilaku
+    // lama di bawah. Pengecualian: bila pengguna SUDAH menjeda
+    // saat resolve gagal (jeda manual atau timer tidur selama
+    // tangga cepat), tangga TIDAK mulai — lagu tidak boleh mulai
+    // sendiri menit-menit sesudah pengguna menjeda; perilaku lama
+    // (failCurrentTrack) yang berlaku.
     if (
       isLoginRequiredOnly(attempts) &&
       usePlayerStore.getState().status !== 'paused'
@@ -1198,7 +1199,8 @@ export class PlayerService {
 
   /**
    * Mulai tangga retry latar untuk lagu saat ini sesudah tangga
-   * cepat P6 gagal LOGIN_REQUIRED murni. Status tetap 'loading'
+   * cepat P6 gagal mayoritas LOGIN_REQUIRED (Blue 7 R21).
+   * Status tetap 'loading'
    * + notice jujur ("YouTube sedang membatasi, mencoba lagi
    * otomatis."); lagu tetap di antrean; pengguna bisa skip kapan
    * saja (skip memanggil loadTrack yang membatalkan tangga).
@@ -1277,9 +1279,9 @@ export class PlayerService {
   /**
    * Satu percobaan latar: satu putaran resolve (maxRounds 1,
    * maks 3 request) untuk lagu yang sama. Lolos berarti putar
-   * seperti biasa; masih LOGIN_REQUIRED berarti maju ke langkah
-   * berikut atau habiskan tangga; galat lain berarti berhenti
-   * dengan perilaku lama.
+   * seperti biasa; masih mayoritas LOGIN_REQUIRED berarti maju
+   * ke langkah berikut atau habiskan tangga; galat lain berarti
+   * berhenti dengan perilaku lama.
    */
   private async runBackgroundRetryAttempt(
     retry: RetryLadderState & { trackId: string; token: number },
@@ -1333,8 +1335,9 @@ export class PlayerService {
         this.exhaustBackgroundRetry();
         return;
       }
-      // Bukan LOGIN_REQUIRED lagi (internet putus, proxy mati,
-      // format tidak ada): berhenti, perilaku lama yang berlaku.
+      // Bukan mayoritas LOGIN_REQUIRED lagi (internet putus,
+      // proxy mati, format tidak ada): berhenti, perilaku lama
+      // yang berlaku.
       this.cancelBackgroundRetry();
       const classified = classifyPlaybackFailure({
         online: navigator.onLine,

@@ -65,31 +65,40 @@ putaran 1 (tangga cepat P6) ── +5 dtk ──► putaran 2
   mencoba client sesuai urutan config (maks 3 request).
   Hemat kuota proxy adalah syarat desain, bukan efek samping.
 
-### 2.3 Hanya LOGIN_REQUIRED murni
+### 2.3 Mayoritas LOGIN_REQUIRED (Blue 7, R21)
 
-Tangga latar HANYA mulai bila SEMUA upaya tercatat adalah
-`=LOGIN_REQUIRED` (`isLoginRequiredOnly`, modul
+Tangga latar mulai (dan lanjut) bila MAYORITAS upaya tercatat
+adalah `=LOGIN_REQUIRED` (>50% dari `allAttempts`), tanpa satu
+pun upaya `=OK` (`isLoginRequiredOnly`, modul
 `resilience/retryLadder.ts`):
 
-- Satu saja upaya `UNPLAYABLE` berarti TIDAK ADA tangga latar:
-  UNPLAYABLE bisa berarti lagu yang benar-benar tidak ada
-  (permanen). Tangga cepat P6 tetap me-retry UNPLAYABLE
-  (perilaku lama, tidak diubah) — yang ketat hanyalah tangga
-  latar 7 menit.
-- `OK` tanpa format, `proxy-gagal`, `jaringan-gagal`,
-  `solver-gagal`: tidak ada tangga latar, perilaku lama.
-- Percobaan latar yang gagal BUKAN LOGIN_REQUIRED (mis. proxy
-  mati di tengah tangga): tangga BERHENTI, perilaku lama
-  (`failCurrentTrack` dengan pesan klasifikasi).
+- Satu upaya `UNPLAYABLE` tidak lagi membatalkan tangga:
+  UNPLAYABLE dihitung sebagai penolakan (konsisten dengan
+  `isRefusalPlayability`), dan pola campuran LOGIN_REQUIRED +
+  UNPLAYABLE TERBUKTI NYATA di jendela buruk (probe parent
+  19 Nov 2026 15:57 WIB: WEB_REMIX=UNPLAYABLE +
+  ANDROID_VR=LOGIN_REQUIRED pada video kanari yang diketahui
+  bagus; Red 7 R21).
+- Lagu semua-UNPLAYABLE (0 LOGIN_REQUIRED) tetap gagal cepat —
+  tidak ada tangga latar.
+- Satu saja upaya `OK` berarti setidaknya satu client lolos
+  bot-check — bukan jendela buruk, jadi tangga tidak jalan.
+- `proxy-gagal`, `jaringan-gagal`, `solver-gagal`: tidak
+  menghalangi bila mayoritas tetap LOGIN_REQUIRED.
+- Percobaan latar yang membuat mayoritas hilang (mis. proxy
+  mati di tengah tangga sehingga LOGIN_REQUIRED tidak lagi
+  mayoritas): tangga BERHENTI (`failCurrentTrack` dengan
+  pesan klasifikasi).
 
-Catatan kejujuran: probe parent 15:57 WIB menunjukkan campuran
-(WEB_REMIX=UNPLAYABLE, ANDROID_VR=LOGIN_REQUIRED) pada satu
-probe. Bila campuran ternyata menjadi pola umum jendela buruk
-(bukan anomali satu probe), aturan ketat ini membuat tangga
-latar jarang jalan — koordinator dapat mempertimbangkan
-pelonggaran (mis. tangga bila >= 1 client LOGIN_REQUIRED dan
-sisanya LOGIN_REQUIRED/UNPLAYABLE). Keputusan itu di luar
-mandat hotfix ini; aturan ketat adalah yang diperintahkan.
+Riwayat: aturan awal hotfix mensyaratkan SEMUA upaya
+`=LOGIN_REQUIRED`. Aturan itu dilonggarkan ke mayoritas oleh
+Blue 7 (Red 7 R21, keputusan parent 19 Nov 2026 18:43 WIB)
+karena pola campuran terbukti nyata dan tiga lapis kode lain
+(retry cepat P6, klasifikasi `errors.ts`, sinyal kanari)
+sama-sama mendefinisikan "penolakan" lebih longgar dari
+tangga. Biaya pelonggaran terbatas: video campuran yang
+ternyata permanen hanya menelan maks 6 request tambahan +
+penantian maks ~7 menit yang bisa di-skip kapan saja.
 
 ### 2.4 Di mana tangga hidup
 
@@ -324,8 +333,11 @@ Build produksi lokal (`npm run build`, chunk utama
 ## 7. Yang TIDAK diubah (eksplisit)
 
 - Perilaku galat BUKAN LOGIN_REQUIRED: identik dengan sebelum
-  hotfix (dibuktikan tes: OK-tanpa-format, UNPLAYABLE,
-  campuran, proxy-gagal).
+  hotfix, KECUALI pola campuran mayoritas LOGIN_REQUIRED yang
+  kini memicu tangga latar (Blue 7 R21, lihat §2.3). Lagu
+  semua-UNPLAYABLE, OK-tanpa-format, dan proxy-gagal tanpa
+  mayoritas LOGIN_REQUIRED tetap gagal cepat seperti sebelum
+  hotfix.
 - Resolve ulang tengah lagu (`doReResolve`, stream putus saat
   diputar): tetap memakai jalur lama, tanpa tangga latar.
   Alasan: lagu yang sudah berbunyi lalu putus adalah kasus
@@ -342,9 +354,11 @@ Build produksi lokal (`npm run build`, chunk utama
 
 ## 8. Batasan + utang
 
-1. **Aturan LOGIN_REQUIRED ketat vs campuran:** lihat §2.3 —
-   bila campuran UNPLAYABLE+LOGIN_REQUIRED ternyata pola umum
-   jendela buruk, koordinator perlu memutuskan pelonggaran.
+1. **Aturan LOGIN_REQUIRED ketat vs campuran: SELESAI
+   (Blue 7 R21)** — aturan dilonggarkan ke mayoritas
+   LOGIN_REQUIRED (>50%, tanpa OK); lihat §2.3. Campuran
+   mayoritas kini memicu tangga; lagu semua-UNPLAYABLE tetap
+   gagal cepat.
 2. **Bukti live menunggu §5 ulang:** tangga hanya terbukti di
    tes (mock). Bukti live butuh deploy + uji §5 di jendela
    buruk nyata (di luar jangkauan VM, seperti P6 K6/K7).

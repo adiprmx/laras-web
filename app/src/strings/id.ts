@@ -332,6 +332,10 @@ export const strings = {
   // Blue 6 (S10c): daftar ulang dalam 24 jam sesudah hapus akun.
   settingsAccountDeletedRecently:
     'Akun ini baru saja dihapus. Kamu bisa masuk lagi besok.',
+  // Blue 7 (S13): cooldown sebanding ukuran akun — redirect
+  // membawa tanggal buka kunci untuk cooldown panjang.
+  settingsAccountDeletedRecentlyUntil: (tanggal: string) =>
+    `Akun ini baru saja dihapus. Kamu bisa masuk lagi tanggal ${tanggal}.`,
   // Salinan data + impor Spotify (P8)
   settingsBackupSection: 'Salinan data',
   settingsBackupBody:

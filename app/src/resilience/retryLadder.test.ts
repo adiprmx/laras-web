@@ -87,10 +87,57 @@ describe('isLoginRequiredOnly', () => {
     expect(isLoginRequiredOnly(attempts)).toBe(true);
   });
 
-  it('salah bila satu upaya UNPLAYABLE (bisa lagu yang tidak ada)', () => {
+  it('benar bila mayoritas LOGIN_REQUIRED walau satu UNPLAYABLE (R21)', () => {
     expect(
       isLoginRequiredOnly([
         'WEB_REMIX=LOGIN_REQUIRED',
+        'MWEB=LOGIN_REQUIRED',
+        'ANDROID_VR=UNPLAYABLE',
+      ]),
+    ).toBe(true);
+  });
+
+  it('benar bila mayoritas tipis 5 dari 9 upaya (R21)', () => {
+    expect(
+      isLoginRequiredOnly([
+        'WEB_REMIX=LOGIN_REQUIRED',
+        'MWEB=LOGIN_REQUIRED',
+        'ANDROID_VR=UNPLAYABLE',
+        'WEB_REMIX=LOGIN_REQUIRED',
+        'MWEB=UNPLAYABLE',
+        'ANDROID_VR=LOGIN_REQUIRED',
+        'WEB_REMIX=UNPLAYABLE',
+        'MWEB=LOGIN_REQUIRED',
+        'ANDROID_VR=UNPLAYABLE',
+      ]),
+    ).toBe(true);
+  });
+
+  it('salah bila LOGIN_REQUIRED minoritas atau seri (R21)', () => {
+    expect(
+      isLoginRequiredOnly([
+        'WEB_REMIX=LOGIN_REQUIRED',
+        'MWEB=UNPLAYABLE',
+        'ANDROID_VR=UNPLAYABLE',
+      ]),
+    ).toBe(false);
+    // Seri 1 dari 2 bukan mayoritas (>50%).
+    expect(
+      isLoginRequiredOnly([
+        'WEB_REMIX=LOGIN_REQUIRED',
+        'MWEB=UNPLAYABLE',
+      ]),
+    ).toBe(false);
+    // 4 dari 9 bukan mayoritas.
+    expect(
+      isLoginRequiredOnly([
+        'WEB_REMIX=LOGIN_REQUIRED',
+        'MWEB=LOGIN_REQUIRED',
+        'ANDROID_VR=UNPLAYABLE',
+        'WEB_REMIX=UNPLAYABLE',
+        'MWEB=UNPLAYABLE',
+        'ANDROID_VR=LOGIN_REQUIRED',
+        'WEB_REMIX=UNPLAYABLE',
         'MWEB=LOGIN_REQUIRED',
         'ANDROID_VR=UNPLAYABLE',
       ]),
@@ -107,7 +154,7 @@ describe('isLoginRequiredOnly', () => {
     ).toBe(false);
   });
 
-  it('salah untuk OK tanpa format, proxy-gagal, jaringan-gagal, solver-gagal', () => {
+  it('salah bila ada upaya OK, walau mayoritas LOGIN_REQUIRED (R21)', () => {
     expect(
       isLoginRequiredOnly([
         'WEB_REMIX=OK',
@@ -115,27 +162,38 @@ describe('isLoginRequiredOnly', () => {
         'ANDROID_VR=OK',
       ]),
     ).toBe(false);
+    // Satu OK berarti setidaknya satu client lolos bot-check.
+    expect(
+      isLoginRequiredOnly([
+        'WEB_REMIX=LOGIN_REQUIRED',
+        'MWEB=OK',
+        'ANDROID_VR=LOGIN_REQUIRED',
+      ]),
+    ).toBe(false);
+  });
+
+  it('benar bila mayoritas LOGIN_REQUIRED walau satu upaya proxy/jaringan/solver gagal (R21)', () => {
     expect(
       isLoginRequiredOnly([
         'WEB_REMIX=LOGIN_REQUIRED',
         'MWEB=proxy-gagal',
         'ANDROID_VR=LOGIN_REQUIRED',
       ]),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       isLoginRequiredOnly([
         'WEB_REMIX=LOGIN_REQUIRED',
         'MWEB=jaringan-gagal',
         'ANDROID_VR=LOGIN_REQUIRED',
       ]),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       isLoginRequiredOnly([
         'WEB_REMIX=LOGIN_REQUIRED',
         'MWEB=solver-gagal',
         'ANDROID_VR=LOGIN_REQUIRED',
       ]),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('salah bila tidak ada upaya', () => {

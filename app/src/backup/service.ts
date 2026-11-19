@@ -246,8 +246,13 @@ export function triggerBrowserDownload(
     anchor.remove();
     // Beri jeda singkat sebelum mencabut URL supaya unduhan
     // sempat dimulai (pola umum; tanpa ini Chrome kadang gagal
-    // memulai unduhan untuk file besar).
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // memulai unduhan untuk file besar). Guard typeof: jsdom
+    // tidak mengimplementasikan revokeObjectURL (noise tes I30).
+    window.setTimeout(() => {
+      if (typeof URL.revokeObjectURL === 'function') {
+        URL.revokeObjectURL(url);
+      }
+    }, 1000);
     return true;
   } catch {
     return false;

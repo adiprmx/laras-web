@@ -40,6 +40,15 @@ selama 24 jam sesudah hapus (redirect
 tombstone berumur >30 hari per koleksi yang disentuh supaya
 cap kembali longgar (tanpa cron — tidak ada perubahan deploy).
 Detail + aritmetika kuota: `docs/blue6-red6-fixes.md`.
+Sejak Blue 7: sapu tombstone DITAGIH ke anggaran tulis lewat
+cadangan atomik sebesar biaya PERSIS (hapus + UPDATE penghitung
++ 1); bila cadangan gagal, sapu dilewati dan push tetap jalan.
+Sapu playlist ikut menghapus itemnya (maks total 1.000 baris
+per push), dan hapus akun ikut menghapus item yatim. Cooldown
+daftar ulang SEBANDING ukuran akun (24 jam + 1 hari per 20.000
+baris di atas 20.000, maks 30 hari); redirect membawa tanggal
+buka kunci (`reason=deleted-recently&until=<tanggal ISO>`).
+Detail + aritmetika kuota: `docs/blue7-red7-fixes.md`.
 
 ## Checklist deploy (koordinator)
 
@@ -53,6 +62,7 @@ Detail + aritmetika kuota: `docs/blue6-red6-fixes.md`.
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0004_oauth_states_item_owner.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0005_sync_quotas.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0006_blue6_quotas.sql --remote
+   wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0007_blue7_deleted_rows.sql --remote
    ```
    Migrasi 0003 WAJIB sebelum deploy Worker ini — SQL push/pull
    memakai kolom `title`/`artist` dari 0003. Migrasi 0004 WAJIB
@@ -70,6 +80,12 @@ Detail + aritmetika kuota: `docs/blue6-red6-fixes.md`.
    fail-open ke perilaku Blue 5: tanpa anggaran baca, tanpa
    tombstone identitas/cooldown daftar-ulang, sehingga S10/S11
    kembali terbuka sampai 0006 diterapkan).
+   Migrasi 0007 WAJIB sebelum deploy Worker pasca-Blue 7 — SQL
+   tombstone memakai kolom `deleted_rows` dari 0007 (tanpa
+   kolomnya, tulis tombstone gagal dan Worker fail-open ke
+   perilaku Blue 6: cooldown tetap 24 jam untuk semua akun,
+   tanpa tanggal buka kunci di redirect, sehingga mitigasi S13
+   tidak aktif sampai 0007 diterapkan).
 2. **Aplikasi OAuth (langkah owner — BELUM DIBUAT saat P7 ditulis).**
    Buat aplikasi OAuth Google + GitHub, daftarkan redirect URI:
    `https://laras-sync.hiroohengkerr.workers.dev/api/auth/callback`

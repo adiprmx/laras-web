@@ -1,5 +1,5 @@
 {
-  "at": "2026-11-19T09:54:43.460Z",
+  "at": "2026-11-19T12:33:38.019Z",
   "worker": "workers/proxy/src/index.js (modul asli, fetch upstream di-stub)",
   "upstream_calls": 76,
   "results": [
@@ -82,8 +82,8 @@
     },
     {
       "label": "Header x-proxy-cpu-ms < 10 ms (404 + OPTIONS)",
-      "cpu_404_ms": "0.044",
-      "cpu_options_ms": "0.005",
+      "cpu_404_ms": "0.014",
+      "cpu_options_ms": "0.004",
       "pass": true
     },
     {

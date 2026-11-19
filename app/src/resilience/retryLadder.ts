@@ -25,10 +25,20 @@
  * terlihat. Tes memakai jam palsu / nowMs injeksi, tanpa tidur
  * sungguhan.
  *
- * Retry latar HANYA untuk LOGIN_REQUIRED murni (semua upaya
- * `=LOGIN_REQUIRED`, lihat isLoginRequiredOnly): UNPLAYABLE bisa
- * berarti lagu yang benar-benar tidak ada (permanen), dan galat
- * jaringan/proxy/format punya jalurnya sendiri yang TIDAK diubah.
+ * Retry latar HANYA untuk jendela buruk yang didominasi
+ * LOGIN_REQUIRED (MAYORITAS upaya `=LOGIN_REQUIRED`, tanpa satu
+ * pun upaya OK — lihat isLoginRequiredOnly). Aturan awal hotfix
+ * ("SEMUA upaya LOGIN_REQUIRED") terbukti terlalu ketat (Red 7
+ * R21): probe 19 Nov 2026 15:57 WIB menunjukkan pola campuran
+ * WEB_REMIX=UNPLAYABLE + ANDROID_VR=LOGIN_REQUIRED pada video
+ * kanari yang diketahui bagus — UNPLAYABLE bukan sinyal andal
+ * "lagu benar-benar tidak ada" (tanpa sts server membalas
+ * UNPLAYABLE, bukan LOGIN_REQUIRED; penanda non-deterministik
+ * per client x waktu). Keputusan parent 19 Nov 2026 18:43 WIB:
+ * mayoritas. Video yang benar-benar UNPLAYABLE di semua client
+ * (0 LOGIN_REQUIRED) tetap gagal cepat; upaya proxy/jaringan/
+ * solver tidak menghalangi bila mayoritas tetap LOGIN_REQUIRED.
+ * Galat lain punya jalurnya sendiri yang TIDAK diubah.
  */
 import { RESOLVE_RETRY_BACKOFF_MS } from './retry';
 
@@ -106,20 +116,31 @@ export function isLadderDue(state: RetryLadderState, nowMs: number): boolean {
 }
 
 /**
- * Apakah SEMUA upaya tercatat adalah LOGIN_REQUIRED (dan ada
- * minimal satu upaya). Syarat ketat untuk memulai tangga latar:
- * satu saja upaya bukan LOGIN_REQUIRED (UNPLAYABLE, OK tanpa
- * format, proxy-gagal, jaringan-gagal, solver-gagal) berarti
- * kegagalan ini BUKAN penolakan bot-check murni — tangga latar
- * tidak jalan, perilaku lama yang berlaku.
+ * Apakah MAYORITAS upaya tercatat adalah LOGIN_REQUIRED (dan ada
+ * minimal satu upaya), tanpa satu pun upaya OK. Syarat untuk
+ * memulai (dan melanjutkan) tangga latar.
+ *
+ * Aturan awal ("SEMUA upaya LOGIN_REQUIRED") dilonggarkan ke
+ * mayoritas (Blue 7, Red 7 R21, keputusan parent 19 Nov 2026
+ * 18:43 WIB): pola campuran LOGIN_REQUIRED + UNPLAYABLE terbukti
+ * nyata di jendela buruk, dan UNPLAYABLE bukan sinyal andal
+ * "lagu benar-benar tidak ada" (konsisten dengan
+ * isRefusalPlayability yang menghitung keduanya sebagai
+ * penolakan). Upaya proxy/jaringan/solver tidak menghalangi bila
+ * mayoritas tetap LOGIN_REQUIRED. Satu saja upaya OK berarti
+ * setidaknya satu client lolos bot-check — kegagalan itu bukan
+ * jendela buruk, jadi tangga tidak jalan. Lagu yang
+ * semua-UNPLAYABLE (0 LOGIN_REQUIRED) tetap gagal cepat.
  *
  * Upaya berbentuk `CLIENT=STATUS` (ResolveError.attempts, semua
- * putaran digabung). Memakai akhiran `=LOGIN_REQUIRED` supaya
- * nama client apa pun lolos.
+ * putaran digabung). Memakai akhiran `=LOGIN_REQUIRED` / `=OK`
+ * supaya nama client apa pun lolos.
  */
 export function isLoginRequiredOnly(attempts: string[]): boolean {
-  return (
-    attempts.length > 0 &&
-    attempts.every((a) => a.endsWith('=LOGIN_REQUIRED'))
-  );
+  if (attempts.length === 0) return false;
+  if (attempts.some((a) => a.endsWith('=OK'))) return false;
+  const loginRequired = attempts.filter((a) =>
+    a.endsWith('=LOGIN_REQUIRED'),
+  ).length;
+  return loginRequired * 2 > attempts.length;
 }

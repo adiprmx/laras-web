@@ -176,6 +176,20 @@ const DELETE_RATE_WINDOW_MS = 60 * 60 * 1000;
 // Warisan anggaran/stempel (S10b) tetap diterapkan sebagai
 // lapis kedua bila cooldown gagal ditegakkan.
 const RE_REGISTER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// Blue 7 (S13): cooldown SEBANDING ukuran akun — batch hapus
+// akun penuh menulis ~111.210 baris sekali (melebihi kuota tulis
+// harian bersama 100.000 sendirian). Cooldown = 24 jam + 1 hari
+// per 20.000 baris di atas 20.000, maks 30 hari (= retensi
+// tombstone; cooldown lebih lama tidak bisa ditegakkan karena
+// tombstone disapu sesudah 30 hari). Akun normal (<=20.000 baris,
+// mencakup sinkronisasi penuh di batas skalar ~12.100) TIDAK
+// berubah (24 jam); akun penuh ~111.210 baris mendapat 6 hari
+// (24 jam + 5 hari). Jumlah baris dicatat delete handler di
+// kolom deleted_rows (migrasi 0007); hitungannya di
+// reRegisterCooldownMs (di bawah, dekat helper tombstone).
+const RE_REGISTER_COOLDOWN_ROWS_FREE = 20000;
+const RE_REGISTER_COOLDOWN_ROWS_PER_DAY = 20000;
+const RE_REGISTER_COOLDOWN_MAX_DAYS = 30;
 // Tombstone identitas dipertahankan 30 hari, lalu disapu malas
 // tiap pendaftaran akun baru (1 pernyataan best-effort).
 const DELETED_IDENTITY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -189,6 +203,16 @@ const DELETED_IDENTITY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 // Tombstone baru (<30 hari) tidak pernah disentuh.
 const TOMBSTONE_PRUNE_PER_PUSH = 100;
 const TOMBSTONE_PRUNE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+// Blue 7 (S14/I26): cap TOTAL baris yang disapu satu push
+// (tombstone + item yatim dari playlist yang disapu). Tanpa cap,
+// satu push bisa menghapus 100 playlist x 1.000 item = 100.000
+// baris. Pengecualian: satu playlist penuh (1.000 item) selalu
+// disapu utuh (1.001 baris) supaya tidak pernah macet di cap.
+// Cadangan anggaran sapu (S14) menagih biaya PERSIS (hapus +
+// UPDATE penghitung + 1 upsert cadangan); maksimum cadangan
+// adalah 1.203 (1.000 hapus + 202 UPDATE + 1), atau 1.004 untuk
+// satu playlist penuh (1.001 hapus + 2 UPDATE + 1).
+const TOMBSTONE_PRUNE_MAX_ROWS_PER_PUSH = 1000;
 // Hapus riwayat dihonori paling sering sekali per 24 jam per
 // pengguna (S8a). Menghapus riwayat adalah tindakan sadar yang
 // jarang (seperti membersihkan riwayat browser); sekali sehari
@@ -695,12 +719,26 @@ async function identityHashFor(provider, providerId) {
   return sha256Hex(`${provider}:${providerId}`);
 }
 
+/**
+ * Cooldown daftar ulang sebanding ukuran akun (Blue 7, S13):
+ * 24 jam + 1 hari per 20.000 baris di atas 20.000, maks 30 hari.
+ * Akun normal (<=20.000 baris) tetap 24 jam; akun penuh ~111.210
+ * baris mendapat 6 hari (24 jam + 5 hari). Baris 0 / tidak ada
+ * (tombstone pra-0007) berarti 24 jam.
+ */
+function reRegisterCooldownMs(deletedRows) {
+  const extra = Math.max(0, (deletedRows || 0) - RE_REGISTER_COOLDOWN_ROWS_FREE);
+  const extraDays = Math.ceil(extra / RE_REGISTER_COOLDOWN_ROWS_PER_DAY);
+  const days = Math.min(1 + extraDays, RE_REGISTER_COOLDOWN_MAX_DAYS);
+  return days * RE_REGISTER_COOLDOWN_MS;
+}
+
 /** Baca tombstone identitas; null bila tidak ada / tabel belum ada. */
 async function readDeletedIdentity(env, identityHash) {
   if (!env.DB) return null;
   try {
     const row = await env.DB.prepare(
-      'SELECT deleted_at, budget_day, budget_rows, read_rows, history_cleared_at FROM sync_deleted_identities WHERE identity_hash = ?',
+      'SELECT deleted_at, budget_day, budget_rows, read_rows, history_cleared_at, deleted_rows FROM sync_deleted_identities WHERE identity_hash = ?',
     )
       .bind(identityHash)
       .first();
@@ -714,6 +752,10 @@ async function readDeletedIdentity(env, identityHash) {
         row.history_cleared_at === null || row.history_cleared_at === undefined
           ? null
           : Number(row.history_cleared_at),
+      // Blue 7 (S13): baris yang dihapus akun itu (migrasi 0007).
+      // Tombstone pra-0007 tidak punya kolom ini (fail-open: 0
+      // berarti cooldown dasar 24 jam).
+      deletedRows: Number(row.deleted_rows ?? 0),
     };
   } catch (e) {
     console.warn(
@@ -776,11 +818,11 @@ async function restoreFromTombstone(env, userId, identityHash, tombstone, now) {
 
 async function handleCallback(request, env, url) {
   const base = appUrl(env);
-  const fail = (reason) =>
+  const fail = (reason, extraParams = '') =>
     new Response(null, {
       status: 302,
       headers: {
-        Location: `${base}/settings?auth=error&reason=${reason}`,
+        Location: `${base}/settings?auth=error&reason=${reason}${extraParams}`,
         'Set-Cookie': clearStateCookieHeader(),
       },
     });
@@ -848,8 +890,19 @@ async function handleCallback(request, env, url) {
       // Abaikan: tabel mungkin belum termigrasi (fail-open).
     }
     const tombstone = await readDeletedIdentity(env, identityHash);
-    if (tombstone && now - tombstone.deletedAt < RE_REGISTER_COOLDOWN_MS) {
-      return fail('deleted-recently');
+    // Blue 7 (S13): cooldown SEBANDING ukuran akun yang dihapus
+    // (24 jam + 1 hari per 20.000 baris di atas 20.000, maks
+    // 30 hari). Redirect membawa tanggal buka kunci (ISO
+    // YYYY-MM-DD, UTC) supaya pesan klien menyebut tanggal itu —
+    // "masuk lagi besok" akan berbohong untuk cooldown panjang.
+    if (tombstone) {
+      const cooldownMs = reRegisterCooldownMs(tombstone.deletedRows);
+      if (now - tombstone.deletedAt < cooldownMs) {
+        const unlockDate = new Date(tombstone.deletedAt + cooldownMs)
+          .toISOString()
+          .slice(0, 10);
+        return fail('deleted-recently', `&until=${unlockDate}`);
+      }
     }
     const id = crypto.randomUUID();
     await env.DB.prepare(
@@ -1584,23 +1637,62 @@ async function failCountsUnavailable(db, userId, day, reservedCharge) {
 }
 
 /**
- * Sapu tombstone malas (I22): hapus paling banyak 100 tombstone
- * berumur >30 hari per koleksi yang disentuh push ini, lalu
- * kurangi penghitung koleksi itu sejumlah yang terhapus (supaya
- * cap kembali longgar — tombstone dihitung di sync_counts).
+ * Sapu tombstone malas (I22, diperkuat Blue 7: S14 + I25 + I26):
+ * hapus tombstone berumur >30 hari per koleksi yang disentuh push
+ * ini, lalu kurangi penghitung koleksi itu sejumlah yang terhapus
+ * (supaya cap kembali longgar — tombstone dihitung di sync_counts).
  * Hanya koleksi yang disentuh yang disapu: sapu memakai 1 SELECT
  * per koleksi, dan koleksi yang tidak didorong tidak butuh
- * dilonggarkan cap-nya. Best-effort total: gagal sapu tidak
- * menggagalkan push (tombstone lama hanya menunda kelonggaran
- * cap, bukan merusak data). Tulis sapu TIDAK ditagih ke anggaran
- * push: jumlahnya dibatasi tombstone yang sudah ada (tiap
- * tombstone menelan anggaran saat dibuat), dan penghapusan
- * massal lewat hapus akun sudah merupakan jalur yang lebih cepat
- * — sapu tidak membuka kelas serang baru.
+ * dilonggarkan cap-nya.
+ *
+ * Blue 7 (S14): tulis sapu DITAGIH ke anggaran tulis — sesudah
+ * sampling, biaya PERSIS (baris yang dihapus + UPDATE penghitung
+ * + 1 upsert cadangan) dicadangkan secara atomik (upsert
+ * berkondisi yang sama seperti reservasi push, SEBELUM DELETE
+ * apa pun). Bila cadangan gagal (anggaran habis), sapu push ini
+ * DILEWATI (tombstone menunggu besok; push sendiri tetap jalan).
+ * Tanpa ini, stok tombstone 110.100 baris bisa disapu dalam
+ * sehari tanpa anggaran (~210.200 tulis termasuk UPDATE
+ * penghitung). Sesudah ini, invarian "semua tulis ditagih"
+ * pulih penuh: total tulis per akun/hari kembali dibatasi
+ * anggaran 20.000.
+ *
+ * Blue 7 (I25): decrement penghitung memakai `meta.changes` dari
+ * DELETE (baris yang BENAR-BENAR terhapus), bukan ukuran sampel.
+ * Dua push bersamaan yang menyampel tombstone yang sama tidak
+ * lagi mengurangi dua kali (yang kalah balapan menghapus 0 baris
+ * dan mengurangi 0). Item dihapus per playlist (satu DELETE per
+ * playlist, lewat db.batch) supaya decrement per playlist eksak.
+ *
+ * Blue 7 (I26): cabang sapu playlist ikut menghapus ITEM dari
+ * playlist yang disapu (item yatim: tidak pernah kembali lewat
+ * pull, tidak pernah disapu cabang item, tidak terhapus saat
+ * hapus akun) + mengurangi penghitung items per playlist.
+ * Total baris yang disapu satu push dibatasi
+ * TOMBSTONE_PRUNE_MAX_ROWS_PER_PUSH (1.000, termasuk item);
+ * satu playlist penuh (1.000 item) selalu disapu utuh (1.001
+ * baris) supaya tidak macet di cap.
+ *
+ * Mengembalikan jumlah baris yang disapu (0 bila tidak ada yang
+ * disapu / cadangan gagal / sapu gagal). Best-effort total:
+ * gagal sapu tidak menggagalkan push; penghitung yang tidak
+ * dikurangi hanya kelebihan-hitung (arah aman). Cadangan yang
+ * sudah sukses TIDAK di-refund bila eksekusi gagal di tengah
+ * (sebagian baris sudah terhapus — refund penuh akan
+ * kekurangan-tagih; arah kelebihan-tagih yang aman).
  */
-async function pruneOldTombstones(db, userId, now, collections) {
+async function pruneOldTombstones(db, userId, now, day, collections) {
   const cutoff = now - TOMBSTONE_PRUNE_AGE_MS;
   try {
+    // ---- Fase 1: sampling (tanpa tulis apa pun). ----
+    // Playlist dulu: himpunan playlist yang disapu menentukan
+    // sampel item (item dari playlist yang disapu ikut terhapus
+    // cabang playlist, jadi tidak boleh ikut tersampel cabang
+    // item — kalau tidak, biaya yang sama dihitung dua kali).
+    let playlistIds = [];
+    // playlistId -> jumlah item (hidup + tombstone) di playlist
+    // yang disapu; dipakai cap + cadangan + decrement.
+    const playlistItemCounts = new Map();
     if (collections.includes('playlists')) {
       const rows = await db
         .prepare(
@@ -1608,23 +1700,38 @@ async function pruneOldTombstones(db, userId, now, collections) {
         )
         .bind(userId, cutoff, TOMBSTONE_PRUNE_PER_PUSH)
         .all();
-      const ids = (rows.results || []).map((r) => r.id);
-      if (ids.length > 0) {
-        const marks = ids.map(() => '?').join(', ');
-        await db
+      playlistIds = (rows.results || []).map((r) => r.id);
+      if (playlistIds.length > 0) {
+        const marks = playlistIds.map(() => '?').join(', ');
+        const counts = await db
           .prepare(
-            `DELETE FROM sync_playlists WHERE user_id = ? AND id IN (${marks})`,
+            `SELECT playlist_id, COUNT(*) AS n FROM sync_playlist_items WHERE user_id = ? AND playlist_id IN (${marks}) GROUP BY playlist_id`,
           )
-          .bind(userId, ...ids)
-          .run();
-        await db
-          .prepare(
-            'UPDATE sync_counts SET n = MAX(0, n - ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
-          )
-          .bind(ids.length, now, userId, 'playlists', '')
-          .run();
+          .bind(userId, ...playlistIds)
+          .all();
+        for (const r of counts.results || []) {
+          playlistItemCounts.set(r.playlist_id, Number(r.n));
+        }
+        // Cap total sapu: ambil playlist berurutan sampai total
+        // baris (playlist + itemnya) mencapai cap; selalu ambil
+        // minimal 1 supaya playlist penuh tidak macet.
+        const taken = [];
+        let takenRows = 0;
+        for (const id of playlistIds) {
+          const cost = 1 + (playlistItemCounts.get(id) ?? 0);
+          if (
+            taken.length > 0 &&
+            takenRows + cost > TOMBSTONE_PRUNE_MAX_ROWS_PER_PUSH
+          ) {
+            break;
+          }
+          taken.push(id);
+          takenRows += cost;
+        }
+        playlistIds = taken;
       }
     }
+    let likeIds = [];
     if (collections.includes('likes')) {
       const rows = await db
         .prepare(
@@ -1632,57 +1739,173 @@ async function pruneOldTombstones(db, userId, now, collections) {
         )
         .bind(userId, cutoff, TOMBSTONE_PRUNE_PER_PUSH)
         .all();
-      const ids = (rows.results || []).map((r) => r.video_id);
-      if (ids.length > 0) {
-        const marks = ids.map(() => '?').join(', ');
-        await db
-          .prepare(
-            `DELETE FROM sync_likes WHERE user_id = ? AND video_id IN (${marks})`,
-          )
-          .bind(userId, ...ids)
-          .run();
+      likeIds = (rows.results || []).map((r) => r.video_id);
+    }
+    let itemPairs = [];
+    if (collections.includes('items')) {
+      // Kecualikan item dari playlist yang disapu push ini
+      // (sudah dihitung cabang playlist — lihat atas).
+      const excludeMarks =
+        playlistIds.length > 0
+          ? ` AND playlist_id NOT IN (${playlistIds.map(() => '?').join(', ')})`
+          : '';
+      const rows = await db
+        .prepare(
+          `SELECT playlist_id, video_id FROM sync_playlist_items WHERE user_id = ? AND deleted_at < ?${excludeMarks} LIMIT ?`,
+        )
+        .bind(userId, cutoff, ...playlistIds, TOMBSTONE_PRUNE_PER_PUSH)
+        .all();
+      itemPairs = rows.results || [];
+    }
+    // Cap sisa untuk suka + item (playlist sudah dicap di atas).
+    let playlistRows = playlistIds.length;
+    for (const id of playlistIds) {
+      playlistRows += playlistItemCounts.get(id) ?? 0;
+    }
+    let remaining = TOMBSTONE_PRUNE_MAX_ROWS_PER_PUSH - playlistRows;
+    if (remaining < 0) remaining = 0;
+    likeIds = likeIds.slice(0, remaining);
+    remaining -= likeIds.length;
+    itemPairs = itemPairs.slice(0, remaining);
+
+    // ---- Fase 2: biaya PERSIS + cadangan atomik (S14). ----
+    // hapus = tombstone playlist + itemnya + tombstone suka +
+    // tombstone item; UPDATE = 1 per penghitung yang disentuh
+    // (playlist 1 + items per playlist yang disapu + suka 1 +
+    // items per playlist cabang item); +1 = upsert cadangan ini
+    // sendiri (satu baris tulis, seperti tunjangan push S8b).
+    const itemPlaylists = new Set(itemPairs.map((r) => r.playlist_id));
+    let sweptWithItems = 0;
+    for (const id of playlistIds) {
+      if ((playlistItemCounts.get(id) ?? 0) > 0) sweptWithItems += 1;
+    }
+    const deletes =
+      playlistRows + likeIds.length + itemPairs.length;
+    const updates =
+      (playlistIds.length > 0 ? 1 : 0) +
+      sweptWithItems +
+      (likeIds.length > 0 ? 1 : 0) +
+      itemPlaylists.size;
+    const sweepCharge = deletes + updates + 1;
+    if (deletes === 0) return 0;
+    const reserve = await db
+      .prepare(
+        'INSERT INTO sync_write_budget (user_id, day, rows_written) VALUES (?, ?, ?) ON CONFLICT(user_id, day) DO UPDATE SET rows_written = sync_write_budget.rows_written + excluded.rows_written WHERE sync_write_budget.rows_written + excluded.rows_written <= ?',
+      )
+      .bind(userId, day, sweepCharge, DAILY_WRITE_BUDGET)
+      .run();
+    if (reserve.meta?.changes !== 1) {
+      // Anggaran habis: lewati sapu push ini (tombstone menunggu
+      // besok). Push sendiri TETAP jalan — sapu adalah optimasi
+      // cap, bukan bagian dari data push.
+      return 0;
+    }
+
+    // ---- Fase 3: eksekusi (decrement pakai meta.changes, I25). ----
+    let swept = 0;
+    if (playlistIds.length > 0) {
+      const marks = playlistIds.map(() => '?').join(', ');
+      const del = await db
+        .prepare(
+          `DELETE FROM sync_playlists WHERE user_id = ? AND id IN (${marks})`,
+        )
+        .bind(userId, ...playlistIds)
+        .run();
+      const deletedPlaylists = del.meta?.changes ?? 0;
+      swept += deletedPlaylists;
+      // I26a: hapus item dari playlist yang disapu (per playlist,
+      // supaya decrement penghitung items per playlist eksak).
+      const withItems = playlistIds.filter(
+        (id) => (playlistItemCounts.get(id) ?? 0) > 0,
+      );
+      if (withItems.length > 0) {
+        const results = await db.batch(
+          withItems.map((id) =>
+            db
+              .prepare(
+                'DELETE FROM sync_playlist_items WHERE user_id = ? AND playlist_id = ?',
+              )
+              .bind(userId, id),
+          ),
+        );
+        for (let i = 0; i < withItems.length; i++) {
+          const n = results[i]?.meta?.changes ?? 0;
+          swept += n;
+          if (n > 0) {
+            await db
+              .prepare(
+                'UPDATE sync_counts SET n = MAX(0, n - ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
+              )
+              .bind(n, now, userId, 'items', withItems[i])
+              .run();
+          }
+        }
+      }
+      if (deletedPlaylists > 0) {
         await db
           .prepare(
             'UPDATE sync_counts SET n = MAX(0, n - ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
           )
-          .bind(ids.length, now, userId, 'likes', '')
+          .bind(deletedPlaylists, now, userId, 'playlists', '')
           .run();
       }
     }
-    if (collections.includes('items')) {
-      const rows = await db
+    if (likeIds.length > 0) {
+      const marks = likeIds.map(() => '?').join(', ');
+      const del = await db
         .prepare(
-          'SELECT playlist_id, video_id FROM sync_playlist_items WHERE user_id = ? AND deleted_at < ? LIMIT ?',
+          `DELETE FROM sync_likes WHERE user_id = ? AND video_id IN (${marks})`,
         )
-        .bind(userId, cutoff, TOMBSTONE_PRUNE_PER_PUSH)
-        .all();
-      const found = rows.results || [];
-      if (found.length > 0) {
-        const marks = found.map(() => '(?, ?)').join(', ');
-        const binds = found.flatMap((r) => [r.playlist_id, r.video_id]);
+        .bind(userId, ...likeIds)
+        .run();
+      const deletedLikes = del.meta?.changes ?? 0;
+      swept += deletedLikes;
+      if (deletedLikes > 0) {
         await db
           .prepare(
-            `DELETE FROM sync_playlist_items WHERE user_id = ? AND (playlist_id, video_id) IN (${marks})`,
+            'UPDATE sync_counts SET n = MAX(0, n - ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
           )
-          .bind(userId, ...binds)
+          .bind(deletedLikes, now, userId, 'likes', '')
           .run();
-        const perPlaylist = new Map();
-        for (const r of found) {
-          perPlaylist.set(
-            r.playlist_id,
-            (perPlaylist.get(r.playlist_id) || 0) + 1,
-          );
-        }
-        for (const [playlistId, count] of perPlaylist) {
+      }
+    }
+    if (itemPairs.length > 0) {
+      // Satu DELETE per playlist (lewat db.batch = satu round
+      // trip) supaya decrement per playlist memakai meta.changes
+      // yang PERSIS (I25), bukan alokasi dari total.
+      const byPlaylist = new Map();
+      for (const r of itemPairs) {
+        const list = byPlaylist.get(r.playlist_id) || [];
+        list.push(r.video_id);
+        byPlaylist.set(r.playlist_id, list);
+      }
+      const playlistList = [...byPlaylist.keys()];
+      const results = await db.batch(
+        playlistList.map((pid) => {
+          const vids = byPlaylist.get(pid);
+          const marks = vids.map(() => '(?, ?)').join(', ');
+          const binds = vids.flatMap((vid) => [pid, vid]);
+          return db
+            .prepare(
+              `DELETE FROM sync_playlist_items WHERE user_id = ? AND (playlist_id, video_id) IN (${marks})`,
+            )
+            .bind(userId, ...binds);
+        }),
+      );
+      for (let i = 0; i < playlistList.length; i++) {
+        const n = results[i]?.meta?.changes ?? 0;
+        swept += n;
+        if (n > 0) {
           await db
             .prepare(
               'UPDATE sync_counts SET n = MAX(0, n - ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
             )
-            .bind(count, now, userId, 'items', playlistId)
+            .bind(n, now, userId, 'items', playlistList[i])
             .run();
         }
       }
     }
+    return swept;
   } catch (e) {
     // Best-effort: sapu gagal (mis. tabel 0006 belum ada / D1
     // sesaat) tidak menggagalkan push; penghitung yang tidak
@@ -1691,6 +1914,7 @@ async function pruneOldTombstones(db, userId, now, collections) {
       'sapu tombstone: gagal (best-effort):',
       e instanceof Error ? e.message : 'unknown',
     );
+    return 0;
   }
 }
 
@@ -1801,7 +2025,11 @@ async function handlePush(env, user, body) {
 
   // ---- I22: sapu tombstone malas (SEBELUM fase cap, supaya cap
   // memakai penghitung yang sudah dikurangi). Hanya koleksi yang
-  // disentuh push ini (lihat pruneOldTombstones).
+  // disentuh push ini (lihat pruneOldTombstones). Blue 7 (S14):
+  // sapu ditagih ke anggaran lewat cadangan atomik di dalam
+  // prune; bila cadangan gagal, sapu dilewati dan push tetap
+  // jalan (prunedRows 0). Jumlah yang disapu dilaporkan di
+  // respons untuk observabilitas.
   const touchedCollections = [];
   if (playlistsIn.length > 0 || deletedPlaylistsIn.length > 0) {
     touchedCollections.push('playlists');
@@ -1812,8 +2040,15 @@ async function handlePush(env, user, body) {
   if (itemsIn.length > 0 || deletedItemsIn.length > 0) {
     touchedCollections.push('items');
   }
+  let prunedRows = 0;
   if (touchedCollections.length > 0) {
-    await pruneOldTombstones(db, user.id, now, touchedCollections);
+    prunedRows = await pruneOldTombstones(
+      db,
+      user.id,
+      now,
+      day,
+      touchedCollections,
+    );
   }
 
   // ---- S7 + S9: tegakkan batas TOTAL per pengguna (§4.3)
@@ -1912,219 +2147,237 @@ async function handlePush(env, user, body) {
       return failCountsUnavailable(db, user.id, day, reservedCharge);
     }
   }
-  if (playlistsIn.length > 0) {
-    const result = await capNewEntries({
-      count: playlistCount,
-      cap: MAX_PLAYLISTS_PER_USER,
-      entries: playlistsIn,
-      keyOf: (p) => p.clientId,
-      // S9: hanya cek kunci yang didorong (maks 100), bukan
-      // seluruh koleksi milik pengguna.
-      fetchExisting: async (unique) => {
-        const marks = unique.map(() => '?').join(', ');
-        const rows = await db
-          .prepare(
-            `SELECT client_id FROM sync_playlists WHERE user_id = ? AND client_id IN (${marks})`,
-          )
-          .bind(
-            user.id,
-            ...unique.map((p) => p.clientId),
-          )
-          .all();
-        return (rows.results || []).map((r) => r.client_id);
-      },
-    });
-    body.playlists = result.kept;
-    skippedOverLimit.playlists = result.skipped;
-    playlistNewKeys = result.newKeys;
-    playlistAdded = result.added;
-  }
-  // Cap item ada di bawah (sesudah cek kepemilikan, I20):
-  // hitungan cap tidak boleh menyentuh playlist orang lain.
-  if (likesIn.length > 0) {
-    const result = await capNewEntries({
-      count: likesCount,
-      cap: MAX_LIKES_PER_USER,
-      entries: likesIn,
-      keyOf: (l) => l.videoId,
-      // S9: hanya cek kunci yang didorong (maks 100).
-      fetchExisting: async (unique) => {
-        const marks = unique.map(() => '?').join(', ');
-        const rows = await db
-          .prepare(
-            `SELECT video_id FROM sync_likes WHERE user_id = ? AND video_id IN (${marks})`,
-          )
-          .bind(
-            user.id,
-            ...unique.map((l) => l.videoId),
-          )
-          .all();
-        return (rows.results || []).map((r) => r.video_id);
-      },
-    });
-    body.likes = result.kept;
-    skippedOverLimit.likes = result.skipped;
-    likesNewKeys = result.newKeys;
-    likesAdded = result.added;
-  }
-  if (historyIn.length > 0) {
-    const result = await capNewEntries({
-      count: historyCount,
-      cap: MAX_HISTORY_PER_USER,
-      entries: historyIn,
-      keyOf: (h) => `${h.videoId}|${h.playedAt}`,
-      // S9: hanya cek pasangan (videoId, playedAt) yang didorong
-      // (row-value IN, maks 100) — bukan seluruh riwayat.
-      fetchExisting: async (unique) => {
-        const marks = unique.map(() => '(?, ?)').join(', ');
-        const binds = unique.flatMap((h) => [h.videoId, h.playedAt]);
-        const rows = await db
-          .prepare(
-            `SELECT video_id, played_at FROM sync_history WHERE user_id = ? AND (video_id, played_at) IN (${marks})`,
-          )
-          .bind(user.id, ...binds)
-          .all();
-        return (rows.results || []).map(
-          (r) => `${r.video_id}|${r.played_at}`,
-        );
-      },
-    });
-    body.history = result.kept;
-    skippedOverLimit.history = result.skipped;
-    historyNewKeys = result.newKeys;
-    historyAdded = result.added;
-  }
-  // R11 + I20: verifikasi kepemilikan playlist untuk item
-  // SEBELUM cap item dihitung. Playlist yang sudah ada di D1
-  // harus milik pendorong; playlist baru (belum ada di D1)
-  // diizinkan hanya bila ikut dibuat di push ini (di
-  // body.playlists yang lolos cap) — jadi item yatim dan item ke
-  // playlist orang lain ditolak, sementara push "playlist baru +
-  // lagunya sekaligus" tetap jalan. Urutan ini penting (I20):
-  // item ke playlist orang lain ditolak sebagai notOwned TANPA
-  // menyentuh perhitungan cap, jadi skippedOverLimit tidak
-  // pernah membocorkan perkiraan jumlah item playlist orang lain.
-  const newPlaylistIds = new Set(
-    (body.playlists || []).map((p) => p.clientId),
-  );
-  const ownedCache = new Map();
-  async function playlistOwned(clientId) {
-    if (ownedCache.has(clientId)) return ownedCache.get(clientId);
-    const row = await db
-      .prepare('SELECT user_id FROM sync_playlists WHERE id = ?')
-      .bind(clientId)
-      .first();
-    const owned = row
-      ? row.user_id === user.id
-      : newPlaylistIds.has(clientId);
-    ownedCache.set(clientId, owned);
-    return owned;
-  }
+  // I24: fase cap/probe dibungkus try/catch — bila satu query
+  // probe (fetchExisting / playlistOwned) melempar galat D1
+  // transien SESUDAH reservasi anggaran, push gagal dengan 500
+  // yang JELAS + anggaran dikembalikan (pola I23 yang sama
+  // persis), bukan 500 generik tanpa refund. skippedNotOwned
+  // dideklarasikan di luar try karena dipakai respons di bawah.
   let skippedNotOwned = 0;
-  const ownedItems = [];
-  for (const item of itemsIn) {
-    if (await playlistOwned(item.playlistClientId)) {
-      ownedItems.push(item);
-    } else {
-      skippedNotOwned += 1;
-    }
-  }
-  const ownedDeletedItems = [];
-  for (const d of deletedItemsIn) {
-    if (await playlistOwned(d.playlistClientId)) {
-      ownedDeletedItems.push(d);
-    } else {
-      skippedNotOwned += 1;
-    }
-  }
-  // Cap item (batas 1.000 berlaku PER playlist, bukan total),
-  // hanya untuk item ke playlist milik pendorong.
-  if (ownedItems.length > 0) {
-    const touchedIds = [
-      ...new Set(ownedItems.map((i) => i.playlistClientId)),
-    ];
-    let itemCounts;
-    if (countersOk) {
-      // I23a: blok penghitung ITEM dibungkus try/catch yang sama
-      // dengan blok skalar — galat D1 sesaat di sini dulu
-      // menggagalkan SELURUH push dengan 500 (fail-closed),
-      // padahal galat yang sama di jalur skalar hanya fail-open
-      // ke COUNT. Bila COUNT juga gagal, tolak dengan 500 yang
-      // JELAS + kembalikan anggaran (bukan diam-diam).
-      try {
-        const rows = await readItemCounters(db, user.id, touchedIds);
-        const resolved = await Promise.all(
-          touchedIds.map((pid) =>
-            resolveCount(
-              db,
-              user.id,
-              'items',
-              pid,
-              MAX_ITEMS_PER_PLAYLIST,
-              rows.get(pid),
-              now,
-            ),
-          ),
-        );
-        itemCounts = new Map(touchedIds.map((pid, i) => [pid, resolved[i]]));
-      } catch (e) {
-        console.warn(
-          'penghitung item: gagal baca, fallback ke COUNT:',
-          e instanceof Error ? e.message : 'unknown',
-        );
-        countersOk = false;
-        try {
-          itemCounts = await countItemsPerPlaylist(db, user.id, touchedIds);
-        } catch (e2) {
-          return failCountsUnavailable(db, user.id, day, reservedCharge);
-        }
-      }
-    } else {
-      try {
-        itemCounts = await countItemsPerPlaylist(db, user.id, touchedIds);
-      } catch (e) {
-        return failCountsUnavailable(db, user.id, day, reservedCharge);
-      }
-    }
-    const byPlaylist = new Map();
-    for (const item of ownedItems) {
-      const list = byPlaylist.get(item.playlistClientId) || [];
-      list.push(item);
-      byPlaylist.set(item.playlistClientId, list);
-    }
-    const keptItems = [];
-    for (const [playlistId, entries] of byPlaylist) {
+  try {
+    if (playlistsIn.length > 0) {
       const result = await capNewEntries({
-        count: itemCounts.get(playlistId) || 0,
-        cap: MAX_ITEMS_PER_PLAYLIST,
-        entries,
-        keyOf: (i) => i.videoId,
-        // S9: hanya cek kunci yang didorong di playlist ini.
+        count: playlistCount,
+        cap: MAX_PLAYLISTS_PER_USER,
+        entries: playlistsIn,
+        keyOf: (p) => p.clientId,
+        // S9: hanya cek kunci yang didorong (maks 100), bukan
+        // seluruh koleksi milik pengguna.
         fetchExisting: async (unique) => {
           const marks = unique.map(() => '?').join(', ');
           const rows = await db
             .prepare(
-              `SELECT video_id FROM sync_playlist_items WHERE playlist_id = ? AND user_id = ? AND video_id IN (${marks})`,
+              `SELECT client_id FROM sync_playlists WHERE user_id = ? AND client_id IN (${marks})`,
             )
             .bind(
-              playlistId,
               user.id,
-              ...unique.map((i) => i.videoId),
+              ...unique.map((p) => p.clientId),
+            )
+            .all();
+          return (rows.results || []).map((r) => r.client_id);
+        },
+      });
+      body.playlists = result.kept;
+      skippedOverLimit.playlists = result.skipped;
+      playlistNewKeys = result.newKeys;
+      playlistAdded = result.added;
+    }
+    // Cap item ada di bawah (sesudah cek kepemilikan, I20):
+    // hitungan cap tidak boleh menyentuh playlist orang lain.
+    if (likesIn.length > 0) {
+      const result = await capNewEntries({
+        count: likesCount,
+        cap: MAX_LIKES_PER_USER,
+        entries: likesIn,
+        keyOf: (l) => l.videoId,
+        // S9: hanya cek kunci yang didorong (maks 100).
+        fetchExisting: async (unique) => {
+          const marks = unique.map(() => '?').join(', ');
+          const rows = await db
+            .prepare(
+              `SELECT video_id FROM sync_likes WHERE user_id = ? AND video_id IN (${marks})`,
+            )
+            .bind(
+              user.id,
+              ...unique.map((l) => l.videoId),
             )
             .all();
           return (rows.results || []).map((r) => r.video_id);
         },
       });
-      keptItems.push(...result.kept);
-      skippedOverLimit.playlistItems += result.skipped;
-      itemNewKeys.set(playlistId, result.newKeys);
-      itemAdded.set(playlistId, result.added);
+      body.likes = result.kept;
+      skippedOverLimit.likes = result.skipped;
+      likesNewKeys = result.newKeys;
+      likesAdded = result.added;
     }
-    body.playlistItems = keptItems;
-  } else {
-    body.playlistItems = [];
+    if (historyIn.length > 0) {
+      const result = await capNewEntries({
+        count: historyCount,
+        cap: MAX_HISTORY_PER_USER,
+        entries: historyIn,
+        keyOf: (h) => `${h.videoId}|${h.playedAt}`,
+        // S9: hanya cek pasangan (videoId, playedAt) yang didorong
+        // (row-value IN, maks 100) — bukan seluruh riwayat.
+        fetchExisting: async (unique) => {
+          const marks = unique.map(() => '(?, ?)').join(', ');
+          const binds = unique.flatMap((h) => [h.videoId, h.playedAt]);
+          const rows = await db
+            .prepare(
+              `SELECT video_id, played_at FROM sync_history WHERE user_id = ? AND (video_id, played_at) IN (${marks})`,
+            )
+            .bind(user.id, ...binds)
+            .all();
+          return (rows.results || []).map(
+            (r) => `${r.video_id}|${r.played_at}`,
+          );
+        },
+      });
+      body.history = result.kept;
+      skippedOverLimit.history = result.skipped;
+      historyNewKeys = result.newKeys;
+      historyAdded = result.added;
+    }
+    // R11 + I20: verifikasi kepemilikan playlist untuk item
+    // SEBELUM cap item dihitung. Playlist yang sudah ada di D1
+    // harus milik pendorong; playlist baru (belum ada di D1)
+    // diizinkan hanya bila ikut dibuat di push ini (di
+    // body.playlists yang lolos cap) — jadi item yatim dan item ke
+    // playlist orang lain ditolak, sementara push "playlist baru +
+    // lagunya sekaligus" tetap jalan. Urutan ini penting (I20):
+    // item ke playlist orang lain ditolak sebagai notOwned TANPA
+    // menyentuh perhitungan cap, jadi skippedOverLimit tidak
+    // pernah membocorkan perkiraan jumlah item playlist orang lain.
+    const newPlaylistIds = new Set(
+      (body.playlists || []).map((p) => p.clientId),
+    );
+    const ownedCache = new Map();
+    async function playlistOwned(clientId) {
+      if (ownedCache.has(clientId)) return ownedCache.get(clientId);
+      const row = await db
+        .prepare('SELECT user_id FROM sync_playlists WHERE id = ?')
+        .bind(clientId)
+        .first();
+      const owned = row
+        ? row.user_id === user.id
+        : newPlaylistIds.has(clientId);
+      ownedCache.set(clientId, owned);
+      return owned;
+    }
+    const ownedItems = [];
+    for (const item of itemsIn) {
+      if (await playlistOwned(item.playlistClientId)) {
+        ownedItems.push(item);
+      } else {
+        skippedNotOwned += 1;
+      }
+    }
+    const ownedDeletedItems = [];
+    for (const d of deletedItemsIn) {
+      if (await playlistOwned(d.playlistClientId)) {
+        ownedDeletedItems.push(d);
+      } else {
+        skippedNotOwned += 1;
+      }
+    }
+    // Cap item (batas 1.000 berlaku PER playlist, bukan total),
+    // hanya untuk item ke playlist milik pendorong.
+    if (ownedItems.length > 0) {
+      const touchedIds = [
+        ...new Set(ownedItems.map((i) => i.playlistClientId)),
+      ];
+      let itemCounts;
+      if (countersOk) {
+        // I23a: blok penghitung ITEM dibungkus try/catch yang sama
+        // dengan blok skalar — galat D1 sesaat di sini dulu
+        // menggagalkan SELURUH push dengan 500 (fail-closed),
+        // padahal galat yang sama di jalur skalar hanya fail-open
+        // ke COUNT. Bila COUNT juga gagal, tolak dengan 500 yang
+        // JELAS + kembalikan anggaran (bukan diam-diam).
+        try {
+          const rows = await readItemCounters(db, user.id, touchedIds);
+          const resolved = await Promise.all(
+            touchedIds.map((pid) =>
+              resolveCount(
+                db,
+                user.id,
+                'items',
+                pid,
+                MAX_ITEMS_PER_PLAYLIST,
+                rows.get(pid),
+                now,
+              ),
+            ),
+          );
+          itemCounts = new Map(touchedIds.map((pid, i) => [pid, resolved[i]]));
+        } catch (e) {
+          console.warn(
+            'penghitung item: gagal baca, fallback ke COUNT:',
+            e instanceof Error ? e.message : 'unknown',
+          );
+          countersOk = false;
+          try {
+            itemCounts = await countItemsPerPlaylist(db, user.id, touchedIds);
+          } catch (e2) {
+            return failCountsUnavailable(db, user.id, day, reservedCharge);
+          }
+        }
+      } else {
+        try {
+          itemCounts = await countItemsPerPlaylist(db, user.id, touchedIds);
+        } catch (e) {
+          return failCountsUnavailable(db, user.id, day, reservedCharge);
+        }
+      }
+      const byPlaylist = new Map();
+      for (const item of ownedItems) {
+        const list = byPlaylist.get(item.playlistClientId) || [];
+        list.push(item);
+        byPlaylist.set(item.playlistClientId, list);
+      }
+      const keptItems = [];
+      for (const [playlistId, entries] of byPlaylist) {
+        const result = await capNewEntries({
+          count: itemCounts.get(playlistId) || 0,
+          cap: MAX_ITEMS_PER_PLAYLIST,
+          entries,
+          keyOf: (i) => i.videoId,
+          // S9: hanya cek kunci yang didorong di playlist ini.
+          fetchExisting: async (unique) => {
+            const marks = unique.map(() => '?').join(', ');
+            const rows = await db
+              .prepare(
+                `SELECT video_id FROM sync_playlist_items WHERE playlist_id = ? AND user_id = ? AND video_id IN (${marks})`,
+              )
+              .bind(
+                playlistId,
+                user.id,
+                ...unique.map((i) => i.videoId),
+              )
+              .all();
+            return (rows.results || []).map((r) => r.video_id);
+          },
+        });
+        keptItems.push(...result.kept);
+        skippedOverLimit.playlistItems += result.skipped;
+        itemNewKeys.set(playlistId, result.newKeys);
+        itemAdded.set(playlistId, result.added);
+      }
+      body.playlistItems = keptItems;
+    } else {
+      body.playlistItems = [];
+    }
+    body.deletedPlaylistItems = ownedDeletedItems;
+  } catch (e) {
+    // I24: probe/kepemilikan gagal sesudah reservasi — kembalikan
+    // anggaran + 500 yang JELAS (pola I23 yang sama persis).
+    // Cadangan sapu (S14) TIDAK di-refund di sini: sapu sudah
+    // jalan dan barisnya benar-benar terhapus.
+    console.warn(
+      'push: fase cap/probe gagal, anggaran dikembalikan:',
+      e instanceof Error ? e.message : 'unknown',
+    );
+    return failCountsUnavailable(db, user.id, day, reservedCharge);
   }
-  body.deletedPlaylistItems = ownedDeletedItems;
 
   // ---- S9: pembaruan penghitung — PALING AWAL di batch.
   // Penghitung ditambah delta push ini SEBELUM upsert, supaya
@@ -2368,6 +2621,9 @@ async function handlePush(env, user, body) {
     // "entri yang diterapkan".
     applied: stmts.length - bookkeepingStmts,
     skippedNotOwned,
+    // Blue 7 (S14): baris tombstone/item yang disapu push ini
+    // (0 bila tidak ada / cadangan sapu gagal).
+    pruned: prunedRows,
     // S7: kelebihan di atas batas total, per koleksi, + nilai
     // batasnya — klien bisa menampilkan pesan yang jelas
     // tanpa menebak angka dari server.
@@ -2513,6 +2769,11 @@ export default {
         }
         if (env.DB) {
           const db = env.DB;
+          // Blue 7 (S13): hash identitas dipakai lagi sesudah
+          // batch hapus (untuk mencatat jumlah baris terhapus di
+          // tombstone) — dideklarasikan di luar try supaya tetap
+          // terlihat di bawah.
+          let identityHash = null;
           // S10b/c: tulis tombstone identitas SEBELUM menghapus
           // data — HANYA hash identitas + angka (waktu hapus,
           // pemakaian anggaran hari ini, stempel clear), tanpa
@@ -2521,7 +2782,7 @@ export default {
           // menggagalkan hapus (fail-open; S10 aktif sesudah
           // koordinator menerapkan 0006).
           try {
-            const identityHash = await identityHashFor(
+            identityHash = await identityHashFor(
               user.provider,
               user.provider_id,
             );
@@ -2549,7 +2810,7 @@ export default {
             ]);
             await db
               .prepare(
-                'INSERT INTO sync_deleted_identities (identity_hash, deleted_at, budget_day, budget_rows, read_rows, history_cleared_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(identity_hash) DO UPDATE SET deleted_at = excluded.deleted_at, budget_day = excluded.budget_day, budget_rows = excluded.budget_rows, read_rows = excluded.read_rows, history_cleared_at = excluded.history_cleared_at',
+                'INSERT INTO sync_deleted_identities (identity_hash, deleted_at, budget_day, budget_rows, read_rows, history_cleared_at, deleted_rows) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(identity_hash) DO UPDATE SET deleted_at = excluded.deleted_at, budget_day = excluded.budget_day, budget_rows = excluded.budget_rows, read_rows = excluded.read_rows, history_cleared_at = excluded.history_cleared_at, deleted_rows = excluded.deleted_rows',
               )
               .bind(
                 identityHash,
@@ -2558,6 +2819,10 @@ export default {
                 budgetRow ? Number(budgetRow.rows_written) : 0,
                 readRow ? Number(readRow.rows_read) : 0,
                 metaRow ? Number(metaRow.history_cleared_at) : null,
+                // Blue 7 (S13): jumlah baris terhapus baru
+                // diketahui SESUDAH batch hapus di bawah — ditulis
+                // 0 dulu, diperbarui sesudah batch (1 UPDATE).
+                0,
               )
               .run();
           } catch (e) {
@@ -2568,10 +2833,21 @@ export default {
           }
           // Hapus eksplisit berurutan (tidak mengandalkan
           // ON DELETE CASCADE — penegakan FK D1 tidak dijamin).
-          await db.batch([
+          const deleteResults = await db.batch([
             db
               .prepare(
                 'DELETE FROM sync_playlist_items WHERE playlist_id IN (SELECT id FROM sync_playlists WHERE user_id = ?)',
+              )
+              .bind(user.id),
+            // Blue 7 (I26b): sabuk pengaman — hapus juga item
+            // YATIM (playlist-nya sudah hilang lewat sapu
+            // tombstone sebelum perbaikan I26a, jadi subquery di
+            // atas tidak menemukannya). Berjalan selagi playlist
+            // masih ada (posisi ke-2 batch), jadi hanya item yang
+            // benar-benar yatim yang kena.
+            db
+              .prepare(
+                'DELETE FROM sync_playlist_items WHERE user_id = ? AND playlist_id NOT IN (SELECT id FROM sync_playlists)',
               )
               .bind(user.id),
             db.prepare('DELETE FROM sync_playlists WHERE user_id = ?').bind(user.id),
@@ -2591,6 +2867,31 @@ export default {
             db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM users WHERE id = ?').bind(user.id),
           ]);
+          // Blue 7 (S13): jumlahkan baris yang BENAR-BENAR
+          // terhapus (meta.changes per pernyataan batch, 12
+          // pernyataan sesudah I26b) dan catat di tombstone —
+          // callback menghitung cooldown sebanding dari angka
+          // ini. Best-effort: gagal catat berarti cooldown dasar
+          // 24 jam (fail-open; akun tetap terhapus).
+          if (identityHash) {
+            try {
+              const deletedRows = deleteResults.reduce(
+                (sum, r) => sum + (r?.meta?.changes ?? 0),
+                0,
+              );
+              await db
+                .prepare(
+                  'UPDATE sync_deleted_identities SET deleted_rows = ? WHERE identity_hash = ?',
+                )
+                .bind(deletedRows, identityHash)
+                .run();
+            } catch (e) {
+              console.warn(
+                'tombstone identitas: gagal catat deleted_rows:',
+                e instanceof Error ? e.message : 'unknown',
+              );
+            }
+          }
         }
         const res = jsonOk({ deleted: true }, cors);
         res.headers.set('Set-Cookie', clearSessionCookieHeader(env));

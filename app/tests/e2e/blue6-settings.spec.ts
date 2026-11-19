@@ -37,6 +37,22 @@ test('?auth=error&reason=deleted-recently menampilkan pesan "masuk lagi besok"',
   expect(page.url()).not.toContain('auth=error');
 });
 
+test('?auth=error&reason=deleted-recently&until=2026-11-25 menampilkan pesan bertanggal (Blue 7 S13)', async ({
+  page,
+}) => {
+  await mockSignedOut(page);
+  await page.goto(
+    '/settings?auth=error&reason=deleted-recently&until=2026-11-25',
+  );
+  await expect(page.getByTestId('settings-account-error')).toHaveText(
+    'Akun ini baru saja dihapus. Kamu bisa masuk lagi tanggal 25 November 2026.',
+  );
+  // Query dibersihkan dari URL (termasuk until).
+  expect(page.url()).not.toContain('reason=deleted-recently');
+  expect(page.url()).not.toContain('until=2026-11-25');
+  expect(page.url()).not.toContain('auth=error');
+});
+
 test('?auth=error tanpa reason deleted-recently menampilkan pesan galat umum', async ({
   page,
 }) => {

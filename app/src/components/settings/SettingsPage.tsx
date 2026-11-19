@@ -42,6 +42,35 @@ function formatTime(ms: number | null): string {
   });
 }
 
+/**
+ * Format tanggal buka kunci cooldown daftar ulang (Blue 7, S13):
+ * `until` ISO YYYY-MM-DD (UTC, dari redirect worker) menjadi
+ * tanggal Indonesia ("25 November 2026"). Dibangun sebagai
+ * tanggal lokal (bukan UTC tengah malam) supaya tidak bergeser
+ * sehari di zona waktu barat UTC. Null bila format tidak valid
+ * (pemanggil memakai pesan "besok" lama).
+ */
+function formatUnlockDate(until: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(until);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const d = new Date(year, month - 1, day);
+  if (
+    d.getFullYear() !== year ||
+    d.getMonth() !== month - 1 ||
+    d.getDate() !== day
+  ) {
+    return null;
+  }
+  return new Intl.DateTimeFormat('id-ID', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  }).format(d);
+}
+
 function Section({
   title,
   testId,
@@ -88,7 +117,12 @@ function AccountSection() {
   const [authError, setAuthError] = useState(false);
   // Blue 6 (S10c): daftar ulang ditolak karena akun baru saja
   // dihapus (cooldown 24 jam) — pesan khusus, bukan galat umum.
+  // Blue 7 (S13): cooldown sebanding ukuran akun — redirect
+  // membawa tanggal buka kunci (until) untuk cooldown panjang.
   const [authDeletedRecently, setAuthDeletedRecently] = useState(false);
+  const [authDeletedUntil, setAuthDeletedUntil] = useState<string | null>(
+    null,
+  );
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteDone, setDeleteDone] = useState(false);
   const [deleteFailed, setDeleteFailed] = useState(false);
@@ -103,9 +137,11 @@ function AccountSection() {
     const params = new URLSearchParams(window.location.search);
     const auth = params.get('auth');
     const reason = params.get('reason');
+    const until = params.get('until');
     if (auth === 'ok' || auth === 'error') {
       params.delete('auth');
       params.delete('reason');
+      params.delete('until');
       const next = params.toString();
       window.history.replaceState(
         null,
@@ -114,7 +150,15 @@ function AccountSection() {
       );
     }
     if (auth === 'error') {
-      if (reason === 'deleted-recently') setAuthDeletedRecently(true);
+      if (reason === 'deleted-recently') {
+        setAuthDeletedRecently(true);
+        // Tanggal buka kunci (bila ada + valid): pesan menyebut
+        // tanggal itu; bila tidak ada, pesan "besok" lama.
+        if (until) {
+          const formatted = formatUnlockDate(until);
+          if (formatted) setAuthDeletedUntil(formatted);
+        }
+      }
       setAuthError(true);
       void refreshAuth();
       return;
@@ -181,7 +225,11 @@ function AccountSection() {
               className="mt-3 text-sm text-red-300"
             >
               {authDeletedRecently
-                ? strings.settingsAccountDeletedRecently
+                ? authDeletedUntil
+                  ? strings.settingsAccountDeletedRecentlyUntil(
+                      authDeletedUntil,
+                    )
+                  : strings.settingsAccountDeletedRecently
                 : strings.settingsAccountUnavailable}
             </p>
           ) : null}
