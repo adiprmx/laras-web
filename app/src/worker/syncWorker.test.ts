@@ -99,9 +99,27 @@ class FakeD1 {
   counts = new Map<string, { n: number; updated_at: number }>();
   writeBudget = new Map<string, number>();
   userMeta = new Map<string, number>();
+  // Blue 6 (migrasi 0006): anggaran baca pull harian +
+  // tombstone identitas terhapus (hash -> angka-angka saja).
+  readBudget = new Map<string, number>();
+  deletedIdentities = new Map<
+    string,
+    {
+      deleted_at: number;
+      budget_day: string;
+      budget_rows: number;
+      read_rows: number;
+      history_cleared_at: number | null;
+    }
+  >();
   // Bila true, baca sync_counts melempar (meniru tabel 0005
   // belum termigrasi) — untuk tes jalur fallback S9.
   throwOnCounts = false;
+  // Blue 6 (I23): hanya baca penghitung ITEM yang melempar
+  // (skalar tetap jalan) — untuk tes fail-open blok item.
+  throwOnItemCounters = false;
+  // Blue 6 (I23): query COUNT(*) melempar (D1 mati sesaat).
+  throwOnCount = false;
   // Model meteran baca D1 (Red 5 S9): baris yang DIPINDAI.
   // - first(): 1 baris (lookup); COUNT(*): + jumlah baris cocok.
   // - all(): jumlah baris dikembalikan, DITAMBAH seek IN yang
@@ -245,8 +263,15 @@ class FakeD1 {
     }
     // S8b: cadangan anggaran atomik — upsert berkondisi: gagal
     // (changes 0) bila pemakaian + tagihan melewati anggaran.
+    // Bentuk 3-bind (INSERT polos) = warisan tombstone S10b:
+    // langsung tetapkan nilainya (akun baru, belum ada baris).
     if (sql.startsWith('INSERT INTO sync_write_budget')) {
       const key = `${String(v[0])}|${String(v[1])}`;
+      if (v.length === 3) {
+        this.writeBudget.set(key, Number(v[2]));
+        this.lastChanges = 1;
+        return;
+      }
       const charge = Number(v[2]);
       const budget = Number(v[3]);
       const used = this.writeBudget.get(key) ?? 0;
@@ -258,8 +283,91 @@ class FakeD1 {
       }
       return;
     }
+    // Blue 6 (S11b): reservasi anggaran baca pull (analog).
+    // Bentuk 3-bind = warisan tombstone S10b.
+    if (sql.startsWith('INSERT INTO sync_read_budget')) {
+      const key = `${String(v[0])}|${String(v[1])}`;
+      if (v.length === 3) {
+        this.readBudget.set(key, Number(v[2]));
+        this.lastChanges = 1;
+        return;
+      }
+      const charge = Number(v[2]);
+      const budget = Number(v[3]);
+      const used = this.readBudget.get(key) ?? 0;
+      if (used + charge <= budget) {
+        this.readBudget.set(key, used + charge);
+        this.lastChanges = 1;
+      } else {
+        this.lastChanges = 0;
+      }
+      return;
+    }
+    // Blue 6 (S11b): refund anggaran baca (sisa reservasi).
+    if (sql.startsWith('UPDATE sync_read_budget SET rows_read = MAX(0,')) {
+      const key = `${String(v[1])}|${String(v[2])}`;
+      const used = this.readBudget.get(key) ?? 0;
+      this.readBudget.set(key, Math.max(0, used - Number(v[0])));
+      this.lastChanges = 1;
+      return;
+    }
+    // Blue 6 (I23b): refund anggaran tulis (push gagal).
+    if (sql.startsWith('UPDATE sync_write_budget SET rows_written = MAX(0,')) {
+      const key = `${String(v[1])}|${String(v[2])}`;
+      const used = this.writeBudget.get(key) ?? 0;
+      this.writeBudget.set(key, Math.max(0, used - Number(v[0])));
+      this.lastChanges = 1;
+      return;
+    }
+    // Blue 6 (S10c): tulis tombstone identitas (hanya hash +
+    // angka; upsert per identitas — hapus kedua menimpa).
+    if (sql.startsWith('INSERT INTO sync_deleted_identities')) {
+      this.deletedIdentities.set(String(v[0]), {
+        deleted_at: Number(v[1]),
+        budget_day: String(v[2]),
+        budget_rows: Number(v[3]),
+        read_rows: Number(v[4]),
+        history_cleared_at: v[5] === null ? null : Number(v[5]),
+      });
+      this.lastChanges = 1;
+      return;
+    }
+    // Blue 6 (S10b): konsumsi tombstone saat daftar ulang.
+    if (
+      sql.startsWith(
+        'DELETE FROM sync_deleted_identities WHERE identity_hash = ?',
+      )
+    ) {
+      this.lastChanges = this.deletedIdentities.delete(String(v[0])) ? 1 : 0;
+      return;
+    }
+    // Blue 6 (S10c): sapu malas tombstone > 30 hari.
+    if (
+      sql.startsWith('DELETE FROM sync_deleted_identities WHERE deleted_at < ?')
+    ) {
+      let n = 0;
+      for (const [k, t] of this.deletedIdentities) {
+        if (t.deleted_at < Number(v[0])) {
+          this.deletedIdentities.delete(k);
+          n++;
+        }
+      }
+      this.lastChanges = n;
+      return;
+    }
+    // Blue 6 (S10): hapus anggaran baca saat hapus akun.
+    if (sql.startsWith('DELETE FROM sync_read_budget WHERE user_id = ?')) {
+      for (const k of [...this.readBudget.keys()]) {
+        if (k.startsWith(`${String(v[0])}|`)) this.readBudget.delete(k);
+      }
+      this.lastChanges = 1;
+      return;
+    }
     // S9: penghitung — tiga bentuk DO UPDATE: increment
     // (n = n + delta), nilai absolut (rekonsiliasi), sentinel -1.
+    // Blue 6 (I21): + CAS (WHERE n = ? AND updated_at = ?) dan
+    // MAX-merge (nilai lama vs nilai hitung) — dicek SEBELUM
+    // cabang absolut karena keduanya mengandung "excluded.n".
     if (sql.startsWith('INSERT INTO sync_counts')) {
       const key = FakeD1.countKey(
         String(v[0]),
@@ -274,10 +382,61 @@ class FakeD1 {
         });
       } else if (sql.includes('SET n = -1')) {
         this.counts.set(key, { n: -1, updated_at: Number(v[3]) });
+      } else if (sql.includes('WHERE sync_counts.n = ?')) {
+        // CAS: hanya timpa bila nilai tersimpan masih sama
+        // dengan yang dibaca (v[5] = n, v[6] = updated_at).
+        const cur = this.counts.get(key);
+        if (
+          !cur ||
+          (cur.n === Number(v[5]) && cur.updated_at === Number(v[6]))
+        ) {
+          this.counts.set(key, {
+            n: Number(v[3]),
+            updated_at: Number(v[4]),
+          });
+          this.lastChanges = 1;
+        } else {
+          this.lastChanges = 0;
+        }
+        return;
+      } else if (sql.includes('MAX(sync_counts.n, excluded.n)')) {
+        const cur = this.counts.get(key);
+        this.counts.set(key, {
+          n: Math.max(cur?.n ?? -Infinity, Number(v[3])),
+          updated_at: Number(v[4]),
+        });
       } else {
         this.counts.set(key, {
           n: Number(v[3]),
           updated_at: Number(v[4]),
+        });
+      }
+      this.lastChanges = 1;
+      return;
+    }
+    // Blue 6 (I21): fallback MAX atomik sesudah CAS gagal.
+    if (sql.startsWith('UPDATE sync_counts SET n = MAX(n, ?)')) {
+      const key = FakeD1.countKey(String(v[2]), String(v[3]), String(v[4]));
+      const cur = this.counts.get(key);
+      if (cur) {
+        this.counts.set(key, {
+          n: Math.max(cur.n, Number(v[0])),
+          updated_at: Number(v[1]),
+        });
+      }
+      this.lastChanges = 1;
+      return;
+    }
+    // Blue 6 (I22): kurangi penghitung sejumlah tombstone yang
+    // disapu (tanpa INSERT — tidak membuat baris 0 untuk
+    // pengguna yang belum punya baris penghitung).
+    if (sql.startsWith('UPDATE sync_counts SET n = MAX(0, n - ?)')) {
+      const key = FakeD1.countKey(String(v[2]), String(v[3]), String(v[4]));
+      const cur = this.counts.get(key);
+      if (cur) {
+        this.counts.set(key, {
+          n: Math.max(0, cur.n - Number(v[0])),
+          updated_at: Number(v[1]),
         });
       }
       this.lastChanges = 1;
@@ -492,6 +651,53 @@ class FakeD1 {
       }
       return;
     }
+    // Blue 6 (I22): hapus sapu tombstone — HARUS di atas cabang
+    // hapus-akun di bawah (awalan 'DELETE FROM sync_playlists
+    // WHERE user_id = ?' juga cocok dengan bentuk IN ini).
+    if (
+      sql.startsWith(
+        'DELETE FROM sync_playlists WHERE user_id = ? AND id IN (',
+      )
+    ) {
+      const userId = String(v[0]);
+      const ids = new Set(v.slice(1).map(String));
+      for (const [id, p] of [...this.playlists]) {
+        if (p.user_id === userId && ids.has(id)) this.playlists.delete(id);
+      }
+      return;
+    }
+    if (
+      sql.startsWith(
+        'DELETE FROM sync_likes WHERE user_id = ? AND video_id IN (',
+      )
+    ) {
+      const userId = String(v[0]);
+      const ids = new Set(v.slice(1).map(String));
+      for (const [k, l] of [...this.likes]) {
+        if (l.user_id === userId && ids.has(l.video_id)) this.likes.delete(k);
+      }
+      return;
+    }
+    if (
+      sql.startsWith(
+        'DELETE FROM sync_playlist_items WHERE user_id = ? AND (playlist_id, video_id) IN (',
+      )
+    ) {
+      const userId = String(v[0]);
+      const pairs = new Set<string>();
+      for (let i = 1; i + 1 < v.length; i += 2) {
+        pairs.add(`${String(v[i])}|${String(v[i + 1])}`);
+      }
+      for (const [k, item] of [...this.items]) {
+        if (
+          item.user_id === userId &&
+          pairs.has(`${item.playlist_id}|${item.video_id}`)
+        ) {
+          this.items.delete(k);
+        }
+      }
+      return;
+    }
     if (
       sql.startsWith(
         'DELETE FROM sync_playlist_items WHERE playlist_id IN (SELECT id FROM sync_playlists WHERE user_id = ?)',
@@ -560,6 +766,8 @@ class FakeD1 {
     // S9: COUNT memindai seluruh baris yang cocok (model meteran
     // baca D1) — dipakai hanya rekonsiliasi + fallback.
     if (sql.startsWith('SELECT COUNT(*) AS n FROM ')) {
+      // Blue 6 (I23): D1 mati sesaat di tengah COUNT.
+      if (this.throwOnCount) throw new Error('D1 COUNT gagal (simulasi)');
       this.countQueries += 1;
       let n = 0;
       if (sql.includes('FROM sync_playlist_items')) {
@@ -612,10 +820,49 @@ class FakeD1 {
       }
       return null;
     }
-    if (sql.startsWith('SELECT id, display_name, provider FROM users WHERE id = ?')) {
+    if (sql.startsWith('SELECT id, display_name, provider, provider_id FROM users WHERE id = ?')) {
       const u = this.users.get(String(v[0]));
       return u
-        ? { id: u.id, display_name: u.display_name, provider: u.provider }
+        ? {
+            id: u.id,
+            display_name: u.display_name,
+            provider: u.provider,
+            provider_id: u.provider_id,
+          }
+        : null;
+    }
+    // Blue 6 (S11b/S12a): pra-cek anggaran (tulis + baca).
+    if (
+      sql.startsWith(
+        'SELECT rows_written FROM sync_write_budget WHERE user_id = ? AND day = ?',
+      )
+    ) {
+      const used = this.writeBudget.get(`${String(v[0])}|${String(v[1])}`);
+      return used === undefined ? null : { rows_written: used };
+    }
+    if (
+      sql.startsWith(
+        'SELECT rows_read FROM sync_read_budget WHERE user_id = ? AND day = ?',
+      )
+    ) {
+      const used = this.readBudget.get(`${String(v[0])}|${String(v[1])}`);
+      return used === undefined ? null : { rows_read: used };
+    }
+    // Blue 6 (S10b/c): baca tombstone identitas saat callback.
+    if (
+      sql.startsWith(
+        'SELECT deleted_at, budget_day, budget_rows, read_rows, history_cleared_at FROM sync_deleted_identities',
+      )
+    ) {
+      const t = this.deletedIdentities.get(String(v[0]));
+      return t
+        ? {
+            deleted_at: t.deleted_at,
+            budget_day: t.budget_day,
+            budget_rows: t.budget_rows,
+            read_rows: t.read_rows,
+            history_cleared_at: t.history_cleared_at,
+          }
         : null;
     }
     if (
@@ -673,6 +920,10 @@ class FakeD1 {
       )
     ) {
       if (this.throwOnCounts) throw new Error('no such table: sync_counts');
+      // Blue 6 (I23): hanya penghitung ITEM yang gagal.
+      if (this.throwOnItemCounters) {
+        throw new Error('D1 baca penghitung item gagal (simulasi)');
+      }
       const userId = String(v[0]);
       const wanted = v.slice(1).map((x) => String(x));
       const out = wanted
@@ -787,6 +1038,57 @@ class FakeD1 {
     const userId = String(v[0]);
     const since = Number(v[1]);
     const limit = Number(v[2]);
+    // Blue 6 (I22): sampel tombstone lama untuk sapu malas.
+    // Bentuk SELECT sama (user_id, cutoff, LIMIT) — pakai
+    // variabel since (= cutoff) + limit yang sudah diparse.
+    if (
+      sql.startsWith(
+        'SELECT id FROM sync_playlists WHERE user_id = ? AND deleted_at < ?',
+      )
+    ) {
+      return [...this.playlists.values()]
+        .filter(
+          (p) =>
+            p.user_id === userId &&
+            p.deleted_at !== null &&
+            p.deleted_at < since,
+        )
+        .slice(0, limit)
+        .map((p) => ({ id: p.id }));
+    }
+    if (
+      sql.startsWith(
+        'SELECT video_id FROM sync_likes WHERE user_id = ? AND deleted_at < ?',
+      )
+    ) {
+      return [...this.likes.values()]
+        .filter(
+          (l) =>
+            l.user_id === userId &&
+            l.deleted_at !== null &&
+            l.deleted_at < since,
+        )
+        .slice(0, limit)
+        .map((l) => ({ video_id: l.video_id }));
+    }
+    if (
+      sql.startsWith(
+        'SELECT playlist_id, video_id FROM sync_playlist_items WHERE user_id = ? AND deleted_at < ?',
+      )
+    ) {
+      return [...this.items.values()]
+        .filter(
+          (item) =>
+            item.user_id === userId &&
+            item.deleted_at !== null &&
+            item.deleted_at < since,
+        )
+        .slice(0, limit)
+        .map((item) => ({
+          playlist_id: item.playlist_id,
+          video_id: item.video_id,
+        }));
+    }
     if (sql.startsWith('SELECT client_id, nama, deskripsi, updated_at, deleted_at FROM sync_playlists')) {
       return [...this.playlists.values()]
         .filter((p) => p.user_id === userId && p.updated_at > since)
@@ -804,11 +1106,11 @@ class FakeD1 {
       const playlistById = new Map(
         [...this.playlists.values()].map((p) => [p.id, p]),
       );
+      // Blue 6 (S11a): query pull item memfilter i.user_id
+      // LANGSUNG (bukan kepemilikan playlist lewat JOIN) —
+      // filter di sini mengikuti query baru.
       return [...this.items.values()]
-        .filter((item) => {
-          const p = playlistById.get(item.playlist_id);
-          return p?.user_id === userId && item.updated_at > since;
-        })
+        .filter((item) => item.user_id === userId && item.updated_at > since)
         .sort((a, b) => a.updated_at - b.updated_at)
         .slice(0, limit)
         .map((item) => ({
@@ -886,14 +1188,20 @@ async function sha256Hex(text: string): Promise<string> {
 /** Buat pengguna + sesi langsung di D1 palsu; kembalikan header Cookie. */
 async function seedSession(
   db: FakeD1,
-  opts: { userId?: string; displayName?: string } = {},
+  opts: {
+    userId?: string;
+    displayName?: string;
+    // Blue 6 (S10): provider_id eksplisit (default 'google-1')
+    // — identitas yang di-hash untuk tombstone.
+    providerId?: string;
+  } = {},
 ): Promise<{ cookie: string; userId: string }> {
   const userId = opts.userId ?? 'user-1';
   const token = `token-${userId}-${Math.random().toString(36).slice(2)}`;
   db.users.set(userId, {
     id: userId,
     provider: 'google',
-    provider_id: 'google-1',
+    provider_id: opts.providerId ?? 'google-1',
     display_name: opts.displayName ?? 'Pengguna Uji',
     created_at: Date.now(),
   });
@@ -926,6 +1234,15 @@ function seedCounter(
 function budgetUsed(db: FakeD1, userId: string): number {
   let total = 0;
   for (const [k, v] of db.writeBudget) {
+    if (k.startsWith(`${userId}|`)) total += v;
+  }
+  return total;
+}
+
+/** Total anggaran baca pull terpakai pengguna di semua hari (tes S11). */
+function readBudgetUsed(db: FakeD1, userId: string): number {
+  let total = 0;
+  for (const [k, v] of db.readBudget) {
     if (k.startsWith(`${userId}|`)) total += v;
   }
   return total;
@@ -2256,19 +2573,21 @@ describe('Worker sync: Blue 5 (S8/S9/R19/I20)', () => {
     // Clear ke-2 dan seterusnya diabaikan: riwayat mentok di batas
     // 1.000 (bukan berputar tanpa henti seperti sebelum Blue 5).
     expect(db.history.size).toBe(1000);
-    // Tagihan: push 1 = 100 + 1.000 (clear) + 5 tunjangan = 1.105;
-    // 24 push berikut = 100 + 5 = 105 tiap push. Total 3.625 —
-    // jauh di bawah anggaran 20.000, dan tidak bisa tumbuh lagi
-    // (entri baru dilewati cap, tetapi TETAP ditagih 105/push).
-    expect(budgetUsed(db, userId)).toBe(3625);
+    // Tagihan: push 1 = 100 + 1.000 (clear) + 5 tunjangan + 1
+    // baris rate-limit (S12a) = 1.106; 24 push berikut =
+    // 100 + 5 + 1 = 106 tiap push. Total 3.650 — jauh di bawah
+    // anggaran 20.000, dan tidak bisa tumbuh lagi (entri baru
+    // dilewati cap, tetapi TETAP ditagih 106/push).
+    expect(budgetUsed(db, userId)).toBe(3650);
   });
 
   it('S8: anggaran tulis habis -> 429 + Retry-After; push kecil masih jalan; besok bisa lagi', async () => {
     const db = new FakeD1();
     const env = makeEnv(db);
     const { cookie, userId } = await seedSession(db);
-    // Push muatan penuh: 700 entri + settings. Tagihan 712/push
-    // (700 + 1 settings + tunjangan 2x(3 skalar + 1 playlist) + 3).
+    // Push muatan penuh: 700 entri + settings. Tagihan 713/push
+    // (700 + 1 settings + tunjangan 2x(3 skalar + 1 playlist) + 3
+    // + 1 baris rate-limit (S12a)).
     const maxBody = () => ({
       deviceId: 'dev-1',
       playlists: Array.from({ length: 100 }, (_, i) => ({
@@ -2308,13 +2627,13 @@ describe('Worker sync: Blue 5 (S8/S9/R19/I20)', () => {
       })),
       settings: { settingsJson: '{"version":1}' },
     });
-    // 28 push x 712 = 19.936 (di bawah 20.000).
+    // 28 push x 713 = 19.964 (di bawah 20.000).
     for (let i = 0; i < 28; i++) {
       const res = await push(env, cookie, maxBody());
       expect(res.status).toBe(200);
     }
-    expect(budgetUsed(db, userId)).toBe(19936);
-    // Push ke-29 (712) melewati anggaran -> 429 + Retry-After.
+    expect(budgetUsed(db, userId)).toBe(19964);
+    // Push ke-29 (713) melewati anggaran -> 429 + Retry-After.
     const over = await push(env, cookie, maxBody());
     expect(over.status).toBe(429);
     const retryAfter = Number(over.headers.get('Retry-After'));
@@ -2326,7 +2645,7 @@ describe('Worker sync: Blue 5 (S8/S9/R19/I20)', () => {
     };
     expect(overBody.error.code).toBe('DAILY_WRITE_BUDGET_EXCEEDED');
     expect(overBody.error.message.length).toBeGreaterThan(0);
-    // Sisa anggaran (64) masih bisa dipakai push kecil.
+    // Sisa anggaran (36) masih bisa dipakai push kecil.
     const small = await push(env, cookie, {
       deviceId: 'dev-1',
       likes: [{ videoId: 'vid-0', likedAt: 2000, title: null, artist: null }],
@@ -2700,5 +3019,810 @@ describe('Worker sync: Blue 5 (S8/S9/R19/I20)', () => {
     expect(
       db.counts.has(FakeD1.countKey(b.userId, 'items', 'dev-a:target')),
     ).toBe(false);
+  });
+});
+
+// ------------------------------------------------------------------
+// Blue 6 (Red 6): S10/S11/S12/I21/I22/I23
+// ------------------------------------------------------------------
+
+describe('Worker sync: Blue 6 (S10/S11/S12/I21/I22/I23)', () => {
+  /** Stub profil Google (sub 'google-sub-9'), pola describe callback. */
+  function stubGoogleProfile(displayName: string) {
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes('oauth2.googleapis.com/token')) {
+        return Response.json({ access_token: 'access-123' });
+      }
+      if (u.includes('openidconnect.googleapis.com')) {
+        return Response.json({ sub: 'google-sub-9', name: displayName });
+      }
+      throw new Error(`fetch tak terduga: ${u}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+  }
+
+  /** Alur login -> callback penuh; kembalikan respons callback. */
+  async function doOAuthLogin(
+    env: ReturnType<typeof makeEnv>,
+  ): Promise<Response> {
+    const login = await call(env, '/api/auth/login?provider=google');
+    expect(login.status).toBe(302);
+    const stateCookie = login.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('laras_oauth_state=')) as string;
+    const stateValue = stateCookie.split(';')[0].split('=')[1];
+    const state = stateValue.split('.')[0];
+    return call(env, `/api/auth/callback?code=code-abc&state=${state}`, {
+      headers: { Cookie: `laras_oauth_state=${stateValue}` },
+    });
+  }
+
+  /** Ambil nilai cookie sesi dari respons callback. */
+  function sessionCookie(res: Response): string {
+    const c = res.headers
+      .getSetCookie()
+      .find((x) => x.startsWith('laras_session=')) as string;
+    return c.split(';')[0];
+  }
+
+  async function deleteAccount(
+    env: ReturnType<typeof makeEnv>,
+    cookie: string,
+    ip?: string,
+  ): Promise<Response> {
+    return call(env, '/api/auth/delete', {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: APP_ORIGIN,
+        ...(ip ? { 'CF-Connecting-IP': ip } : {}),
+      },
+    });
+  }
+
+  /** Hari UTC hari ini (kunci anggaran harian). */
+  function todayDay(): string {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  function seedItem(
+    db: FakeD1,
+    userId: string,
+    playlistId: string,
+    videoId: string,
+    opts: { posisi?: number; deletedAt?: number | null } = {},
+  ): void {
+    db.items.set(`${playlistId}|${videoId}`, {
+      playlist_id: playlistId,
+      video_id: videoId,
+      posisi: opts.posisi ?? 0,
+      added_at: 1000,
+      device_id: 'dev-seed',
+      updated_at: 1000,
+      deleted_at: opts.deletedAt ?? null,
+      title: null,
+      artist: null,
+      user_id: userId,
+    });
+  }
+
+  // ---- S10: hapus akun + daftar lagi ----
+
+  it('S10: hapus + daftar ulang dalam 24 jam ditolak (deleted-recently)', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const first = await doOAuthLogin(env);
+    expect(first.status).toBe(302);
+    expect(first.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=ok`,
+    );
+    expect(db.users.size).toBe(1);
+    const del = await deleteAccount(env, sessionCookie(first));
+    expect(del.status).toBe(200);
+    expect(db.users.size).toBe(0);
+    // Daftar ulang dengan Google yang sama dalam cooldown.
+    const second = await doOAuthLogin(env);
+    expect(second.status).toBe(302);
+    expect(second.headers.get('Location')).toContain(
+      'auth=error&reason=deleted-recently',
+    );
+    expect(db.users.size).toBe(0);
+  });
+
+  it('S10: daftar ulang sesudah 25 jam berhasil; anggaran hari lama tidak diwariskan', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const first = await doOAuthLogin(env);
+    expect(first.status).toBe(302);
+    const cookie = sessionCookie(first);
+    // Pakai sebagian anggaran sebelum hapus (1 like = tagihan 7).
+    const pushed = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 1000, title: null, artist: null }],
+    });
+    expect(pushed.status).toBe(200);
+    const del = await deleteAccount(env, cookie);
+    expect(del.status).toBe(200);
+    // Besok: cooldown lewat, hari UTC sudah berganti.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+    try {
+      const second = await doOAuthLogin(env);
+      expect(second.status).toBe(302);
+      expect(second.headers.get('Location')).toBe(
+        `${APP_ORIGIN}/settings?auth=ok`,
+      );
+      expect(db.users.size).toBe(1);
+      // Tombstone dikonsumsi; anggaran hari LAMA tidak diwariskan
+      // (hari sudah berganti — pertahanan berlapis S10b).
+      expect(db.deletedIdentities.size).toBe(0);
+      const newUserId = [...db.users.values()][0].id;
+      expect(budgetUsed(db, newUserId)).toBe(0);
+      expect(readBudgetUsed(db, newUserId)).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('S10: warisan tombstone (white-box) — anggaran + stempel ikut akun baru', async () => {
+    // Simulasi keadaan yang hanya mungkin bila cooldown gagal
+    // ditegakkan: tombstone 25 jam lalu TAPI budget_day hari ini
+    // (cooldown normal selalu mengganti hari UTC). Daftar ulang
+    // harus mewarisi anggaran penuh, bukan reset.
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const clearedAt = Date.now() - 60 * 60 * 1000;
+    db.deletedIdentities.set(await sha256Hex('google:google-sub-9'), {
+      deleted_at: Date.now() - 25 * 60 * 60 * 1000,
+      budget_day: todayDay(),
+      budget_rows: 19999,
+      read_rows: 39999,
+      history_cleared_at: clearedAt,
+    });
+    stubGoogleProfile('Nama Google');
+    const res = await doOAuthLogin(env);
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=ok`,
+    );
+    expect(db.users.size).toBe(1);
+    const newUserId = [...db.users.values()][0].id;
+    expect(budgetUsed(db, newUserId)).toBe(19999);
+    expect(readBudgetUsed(db, newUserId)).toBe(39999);
+    expect(db.userMeta.get(newUserId)).toBe(clearedAt);
+    // Tombstone dikonsumsi (tidak bisa dipakai dua kali).
+    expect(db.deletedIdentities.size).toBe(0);
+    // Anggaran warisan langsung ditegakkan: 1 like (tagihan 7)
+    // melewati sisa 1; pull (cadangan 4.002) melewati sisa 1.
+    const cookie = sessionCookie(res);
+    const overPush = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 1000, title: null, artist: null }],
+    });
+    expect(overPush.status).toBe(429);
+    const overPushBody = (await overPush.json()) as {
+      error: { code: string };
+    };
+    expect(overPushBody.error.code).toBe('DAILY_WRITE_BUDGET_EXCEEDED');
+    const overPull = await pull(env, cookie);
+    expect(overPull.status).toBe(429);
+    const overPullBody = (await overPull.json()) as {
+      error: { code: string };
+    };
+    expect(overPullBody.error.code).toBe('DAILY_READ_BUDGET_EXCEEDED');
+  });
+
+  it('S10a: hapus ke-4 dari satu IP dalam sejam ditolak 429', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const ip = '203.0.113.77';
+    const cookies: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const s = await seedSession(db, { userId: `user-${i}` });
+      cookies.push(s.cookie);
+    }
+    for (let i = 0; i < 3; i++) {
+      const res = await deleteAccount(env, cookies[i], ip);
+      expect(res.status).toBe(200);
+    }
+    const fourth = await deleteAccount(env, cookies[3], ip);
+    expect(fourth.status).toBe(429);
+    expect(fourth.headers.get('Retry-After')).toBe('3600');
+    // Akun ke-4 TIDAK terhapus (rate limit menolak sebelum hapus).
+    expect(db.users.has('user-3')).toBe(true);
+  });
+
+  it('S10a: hapus ke-2 satu akun dalam sejam ditolak 429 (walau hapus ke-1 gagal)', async () => {
+    // Batch pertama gagal (D1 sesaat) -> hapus ke-1 melempar 500;
+    // percobaan ke-2 tetap kena batas per-akun 1/jam.
+    class FailBatchOnceD1 extends FakeD1 {
+      private failed = false;
+      override async batch(stmts: Array<{ run: () => Promise<unknown> }>) {
+        if (!this.failed) {
+          this.failed = true;
+          throw new Error('batch gagal (simulasi)');
+        }
+        return super.batch(stmts);
+      }
+    }
+    const db = new FailBatchOnceD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // Hapus ke-1: batch D1 gagal -> 500 (worker menangkap galat
+    // dan mengembalikan respons 500, bukan melempar).
+    const first = await deleteAccount(env, cookie);
+    expect(first.status).toBe(500);
+    // Akun masih ada (batch gagal sebelum menghapus apa pun).
+    expect(db.users.has(userId)).toBe(true);
+    const second = await deleteAccount(env, cookie);
+    expect(second.status).toBe(429);
+    expect(second.headers.get('Retry-After')).toBe('3600');
+  });
+
+  it('S10: hapus akun benar-benar menghapus data pribadi; tombstone hanya hash + angka', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db, {
+      providerId: 'google-1',
+      displayName: 'Pengguna Uji',
+    });
+    // Isi data + anggaran + stempel clear sebelum hapus.
+    const pushed = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:p', nama: 'P', deskripsi: null }],
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:p',
+          videoId: 'vid-0',
+          posisi: 0,
+          title: null,
+          artist: null,
+        },
+      ],
+      likes: [{ videoId: 'vid-0', likedAt: 1000, title: null, artist: null }],
+      history: [
+        {
+          videoId: 'vid-0',
+          playedAt: 1000,
+          secondsPlayed: 30,
+          title: null,
+          artist: null,
+        },
+      ],
+      settings: { settingsJson: '{"version":1}' },
+      historyClearedBefore: 9999999999999,
+    });
+    expect(pushed.status).toBe(200);
+    const pulled = await pull(env, cookie);
+    expect(pulled.status).toBe(200);
+    expect(budgetUsed(db, userId)).toBeGreaterThan(0);
+    expect(readBudgetUsed(db, userId)).toBeGreaterThan(0);
+    const del = await deleteAccount(env, cookie);
+    expect(del.status).toBe(200);
+    // TIDAK ADA baris pengguna/sync tersisa.
+    expect(db.users.size).toBe(0);
+    expect(db.playlists.size).toBe(0);
+    expect(db.items.size).toBe(0);
+    expect(db.likes.size).toBe(0);
+    expect(db.history.size).toBe(0);
+    expect(db.settings.size).toBe(0);
+    expect(db.counts.size).toBe(0);
+    expect(db.sessions.size).toBe(0);
+    expect(budgetUsed(db, userId)).toBe(0);
+    expect(readBudgetUsed(db, userId)).toBe(0);
+    expect(db.userMeta.size).toBe(0);
+    // Hanya tombstone: kunci = SHA-256 'google:google-1', isi
+    // hanya angka — tanpa provider_id mentah / nama tampilan.
+    expect(db.deletedIdentities.size).toBe(1);
+    const hash = await sha256Hex('google:google-1');
+    const tombstone = db.deletedIdentities.get(hash);
+    expect(tombstone).toBeDefined();
+    expect(tombstone!.budget_rows).toBeGreaterThan(0);
+    expect(tombstone!.read_rows).toBeGreaterThan(0);
+    expect(tombstone!.history_cleared_at).not.toBeNull();
+    const serialized = JSON.stringify([...db.deletedIdentities.entries()]);
+    expect(serialized).not.toContain('google-1');
+    expect(serialized).not.toContain('Pengguna Uji');
+  });
+
+  // ---- S11: pull read-burning ----
+
+  it('S11a: pull hanya mengembalikan item milik pemanggil (filter i.user_id)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const a = await seedSession(db, { userId: 'user-1' });
+    const b = await seedSession(db, { userId: 'user-2' });
+    // 10 playlist + 1.000 item milik user-1 (100 per playlist).
+    for (let p = 0; p < 10; p++) {
+      seedPlaylist(db, a.userId, `pl-${p}`, `P${p}`);
+      for (let i = 0; i < 100; i++) {
+        seedItem(db, a.userId, `pl-${p}`, `vid-1-${p * 100 + i}`, {
+          posisi: i,
+        });
+      }
+    }
+    // Playlist + 50 item milik user-2 (harus TIDAK terbaca).
+    seedPlaylist(db, b.userId, 'pl-other', 'Milik Orang');
+    for (let i = 0; i < 50; i++) {
+      seedItem(db, b.userId, 'pl-other', `vid-2-${i}`, { posisi: i });
+    }
+    const res = await pull(env, a.cookie);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: {
+        playlists: unknown[];
+        playlistItems: Array<{ videoId: string }>;
+      };
+    };
+    expect(body.data.playlists).toHaveLength(10);
+    expect(body.data.playlistItems).toHaveLength(1000);
+    expect(
+      body.data.playlistItems.every((it) => it.videoId.startsWith('vid-1-')),
+    ).toBe(true);
+  });
+
+  it('S11b: pull penuh (3.101 baris) x 12 jalan, ke-13 ditolak 429; besok bisa lagi', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // Akun di batas: 100 playlist + 1.000 item + 1.000 suka +
+    // 1.000 riwayat + settings = 3.101 baris kembali, tagihan
+    // bersih 3.102/pull (termasuk 1 baris rate-limit).
+    for (let p = 0; p < 100; p++) {
+      seedPlaylist(db, userId, `pl-${p}`, `P${p}`);
+      for (let i = 0; i < 10; i++) {
+        seedItem(db, userId, `pl-${p}`, `vid-${p * 10 + i}`, { posisi: i });
+      }
+    }
+    for (let i = 0; i < 1000; i++) {
+      db.likes.set(`${userId}|vid-${i}`, {
+        user_id: userId,
+        video_id: `vid-${i}`,
+        liked_at: 1000,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+      db.history.set(`${userId}|vid-${i}|${1000 + i}`, {
+        user_id: userId,
+        video_id: `vid-${i}`,
+        played_at: 1000 + i,
+        seconds_played: 30,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        title: null,
+        artist: null,
+      });
+    }
+    db.settings.set(userId, {
+      user_id: userId,
+      settings_json: '{"version":1}',
+      device_id: 'dev-seed',
+      updated_at: 1000,
+    });
+    // 12 pull x 3.102 = 37.224 (di bawah 40.000).
+    for (let i = 0; i < 12; i++) {
+      const res = await pull(env, cookie);
+      expect(res.status).toBe(200);
+      if (i === 0) {
+        const body = (await res.json()) as {
+          data: {
+            playlists: unknown[];
+            playlistItems: unknown[];
+            likes: unknown[];
+            history: unknown[];
+          };
+        };
+        expect(body.data.playlists).toHaveLength(100);
+        expect(body.data.playlistItems).toHaveLength(1000);
+        expect(body.data.likes).toHaveLength(1000);
+        expect(body.data.history).toHaveLength(1000);
+      }
+    }
+    expect(readBudgetUsed(db, userId)).toBe(37224);
+    // S12a: tiap pull juga menagih 4 baris anggaran TULIS
+    // (rate-limit + 2 cadangan + refund): 12 x 4 = 48.
+    expect(budgetUsed(db, userId)).toBe(48);
+    // Pull ke-13: 37.224 + cadangan 4.002 = 41.226 > 40.000.
+    const over = await pull(env, cookie);
+    expect(over.status).toBe(429);
+    const retryAfter = Number(over.headers.get('Retry-After'));
+    expect(Number.isFinite(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(86400);
+    const overBody = (await over.json()) as { error: { code: string } };
+    expect(overBody.error.code).toBe('DAILY_READ_BUDGET_EXCEEDED');
+    // Besok (hari UTC baru): anggaran reset, pull jalan lagi.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+    try {
+      const nextDay = await pull(env, cookie);
+      expect(nextDay.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30000);
+
+  it('S11b: batas anggaran baca persis — 36.000 ditolak, 35.998 lolos', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const a = await seedSession(db, { userId: 'user-a' });
+    const b = await seedSession(db, { userId: 'user-b' });
+    // Cadangan per pull 4.002: 36.000 + 4.002 = 40.002 > 40.000.
+    db.readBudget.set(`${a.userId}|${todayDay()}`, 36000);
+    const over = await pull(env, a.cookie);
+    expect(over.status).toBe(429);
+    const overBody = (await over.json()) as { error: { code: string } };
+    expect(overBody.error.code).toBe('DAILY_READ_BUDGET_EXCEEDED');
+    // 35.998 + 4.002 = 40.000 persis (lolos); pull kosong
+    // mengembalikan 0 baris -> refund 4.001, bersih 35.999.
+    db.readBudget.set(`${b.userId}|${todayDay()}`, 35998);
+    const ok = await pull(env, b.cookie);
+    expect(ok.status).toBe(200);
+    expect(readBudgetUsed(db, b.userId)).toBe(35999);
+  });
+
+  // ---- S12: tulis rate-limit residual ----
+
+  it('S12b: 35 pull cepat -> baris rate-limit berhenti di 31 (bukan 35)', async () => {
+    // Jam dibekukan supaya ke-35 pull jatuh di jendela menit
+    // yang sama (tanpa ini, tes yang melintasi batas menit
+    // membelah hitungan ke dua jendela).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-19T10:00:00.000Z'));
+    try {
+      const db = new FakeD1();
+      const env = makeEnv(db);
+      const { cookie, userId } = await seedSession(db);
+      let ok = 0;
+      let limited = 0;
+      for (let i = 0; i < 35; i++) {
+        const res = await pull(env, cookie);
+        if (res.status === 200) ok++;
+        else if (res.status === 429) limited++;
+        else throw new Error(`status tak terduga: ${res.status}`);
+      }
+      expect(ok).toBe(30);
+      expect(limited).toBe(5);
+      // Percobaan ke-31 menulis (31 > 30), ke-32..35 ditolak
+      // TANPA menulis (SELECT dulu, S12b).
+      const row = [...db.rateLimits.entries()].find(([k]) =>
+        k.startsWith(`sync:${userId}|`),
+      );
+      expect(row).toBeDefined();
+      expect(row![1]).toBe(31);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('S12a: pull yang kehabisan anggaran tulis ditolak 429 tanpa menulis baris rate-limit', async () => {
+    // Pull menagih 4 baris tulis; tanpa tagihan ini, pull kosong
+    // (bersih 1 baris baca) bisa diulang 36.000x dan menulis
+    // 108.000 baris — satu akun membunuh kuota tulis.
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // Sisa anggaran 1; pull menagih 4 -> pra-cek menolak.
+    db.writeBudget.set(`${userId}|${todayDay()}`, 19999);
+    const res = await pull(env, cookie);
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('DAILY_WRITE_BUDGET_EXCEEDED');
+    expect(
+      [...db.rateLimits.keys()].some((k) =>
+        k.startsWith(`sync:${userId}|`),
+      ),
+    ).toBe(false);
+    expect(budgetUsed(db, userId)).toBe(19999);
+    // Sisa 4 persis: pull lolos, anggaran tulis habis tepat.
+    db.writeBudget.set(`${userId}|${todayDay()}`, 19996);
+    const ok = await pull(env, cookie);
+    expect(ok.status).toBe(200);
+    expect(budgetUsed(db, userId)).toBe(20000);
+  });
+
+  it('S12a: push yang pasti ditolak anggaran tidak menulis baris rate-limit', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // Sisa anggaran 1; 1 like menagih 7 -> pra-cek menolak.
+    db.writeBudget.set(`${userId}|${todayDay()}`, 19999);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 1000, title: null, artist: null }],
+    });
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('DAILY_WRITE_BUDGET_EXCEEDED');
+    // Pra-cek jalan SEBELUM rate limit: tidak ada baris sync.
+    expect(
+      [...db.rateLimits.keys()].some((k) =>
+        k.startsWith(`sync:${userId}|`),
+      ),
+    ).toBe(false);
+    // Anggaran tidak berubah (tidak ada reservasi).
+    expect(budgetUsed(db, userId)).toBe(19999);
+  });
+
+  // ---- I21: race rekonsiliasi ----
+
+  it('I21: bump di antara COUNT dan store tidak melonggarkan cap (CAS + MAX)', async () => {
+    // D1 yang menyela bump +100 suka PERSIS di antara COUNT
+    // dan storeCount (meniru push bersamaan yang mendarat
+    // di jendela race). Tanpa CAS, storeCount basi (9.900)
+    // menimpa bump dan cap longgar ~100 baris.
+    class RacingFakeD1 extends FakeD1 {
+      private raced = false;
+      override firstSql(sql: string, v: unknown[]): unknown {
+        const out = super.firstSql(sql, v);
+        if (
+          !this.raced &&
+          sql.startsWith('SELECT COUNT(*) AS n FROM ') &&
+          sql.includes('FROM sync_likes')
+        ) {
+          this.raced = true;
+          const key = FakeD1.countKey('user-1', 'likes', '');
+          const cur = this.counts.get(key)!;
+          this.counts.set(key, { n: cur.n + 100, updated_at: cur.updated_at });
+          for (let i = 0; i < 100; i++) {
+            this.likes.set(`user-1|vid-race-${i}`, {
+              user_id: 'user-1',
+              video_id: `vid-race-${i}`,
+              liked_at: 1000,
+              device_id: 'dev-race',
+              updated_at: 1000,
+              deleted_at: null,
+              title: null,
+              artist: null,
+            });
+          }
+        }
+        return out;
+      }
+    }
+    const db = new RacingFakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // Penghitung 9.900 yang sudah tua (25 jam) + dekat batas ->
+    // memicu rekonsiliasi COUNT saat push.
+    for (let i = 0; i < 9900; i++) {
+      db.likes.set(`${userId}|vid-${i}`, {
+        user_id: userId,
+        video_id: `vid-${i}`,
+        liked_at: 1000 + i,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+    }
+    seedCounter(
+      db,
+      userId,
+      'likes',
+      '',
+      9900,
+      Date.now() - 25 * 60 * 60 * 1000,
+    );
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: [
+        { videoId: 'vid-baru', likedAt: 9999, title: null, artist: null },
+      ],
+    });
+    expect(res.status).toBe(200);
+    // CAS gagal (penghitung bergerak 9.900 -> 10.000) -> MAX
+    // menyimpan 10.000; bump push ini +1 -> 10.001 (BUKAN
+    // 9.901 seperti bila nilai basi menimpa bump).
+    expect(db.counts.get(FakeD1.countKey(userId, 'likes', ''))!.n).toBe(
+      10001,
+    );
+    // Guard-WHERE memblokir insert (penghitung 10.000 saat
+    // batch jalan): jumlah nyata tetap 10.000, tidak 10.001.
+    expect(db.likes.size).toBe(10000);
+    expect(db.likes.has(`${userId}|vid-baru`)).toBe(false);
+    // Push susulan: penghitung 10.001 -> suka baru dilewati cap.
+    const follow = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: [
+        { videoId: 'vid-baru-2', likedAt: 9999, title: null, artist: null },
+      ],
+    });
+    expect(follow.status).toBe(200);
+    const followBody = (await follow.json()) as {
+      data: { applied: number; skippedOverLimit: { likes: number } };
+    };
+    expect(followBody.data.applied).toBe(0);
+    expect(followBody.data.skippedOverLimit.likes).toBe(1);
+  }, 30000);
+
+  // ---- I22: sapu tombstone malas ----
+
+  it('I22: push menyapu tombstone playlist >30 hari; cap longgar; tombstone baru bertahan', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    // 50 playlist hidup + 50 tombstone lama (31 hari) + 1
+    // tombstone baru (1 hari); penghitung di cap (100).
+    for (let i = 0; i < 50; i++) {
+      seedPlaylist(db, userId, `pl-live-${i}`, `Hidup ${i}`);
+    }
+    for (let i = 0; i < 50; i++) {
+      seedPlaylist(db, userId, `pl-old-${i}`, `Lama ${i}`);
+      db.playlists.get(`pl-old-${i}`)!.deleted_at = now - 31 * dayMs;
+    }
+    seedPlaylist(db, userId, 'pl-new-tomb', 'Baru Dihapus');
+    db.playlists.get('pl-new-tomb')!.deleted_at = now - 1 * dayMs;
+    seedCounter(db, userId, 'playlists', '', 100);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; skippedOverLimit: { playlists: number } };
+    };
+    expect(body.data.applied).toBe(1);
+    expect(body.data.skippedOverLimit.playlists).toBe(0);
+    // 50 tombstone lama hilang; tombstone baru + 50 hidup + 1
+    // baru = 52 baris tersisa.
+    expect(db.playlists.size).toBe(52);
+    expect(db.playlists.has('pl-old-0')).toBe(false);
+    expect(db.playlists.has('pl-new-tomb')).toBe(true);
+    // Penghitung: 100 - 50 (sapu) + 1 (bump) = 51.
+    expect(db.counts.get(FakeD1.countKey(userId, 'playlists', ''))!.n).toBe(
+      51,
+    );
+  });
+
+  it('I22: sapu item mengurangi penghitung per playlist', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    seedPlaylist(db, userId, 'dev-1:pl', 'P');
+    for (let i = 0; i < 50; i++) {
+      seedItem(db, userId, 'dev-1:pl', `vid-live-${i}`, { posisi: i });
+    }
+    for (let i = 0; i < 50; i++) {
+      seedItem(db, userId, 'dev-1:pl', `vid-old-${i}`, {
+        posisi: 50 + i,
+        deletedAt: now - 31 * dayMs,
+      });
+    }
+    seedCounter(db, userId, 'items', 'dev-1:pl', 100);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:pl',
+          videoId: 'vid-baru',
+          posisi: 100,
+          title: null,
+          artist: null,
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; skippedOverLimit: { playlistItems: number } };
+    };
+    expect(body.data.applied).toBe(1);
+    expect(body.data.skippedOverLimit.playlistItems).toBe(0);
+    expect(db.items.size).toBe(51);
+    expect(db.items.has('dev-1:pl|vid-old-0')).toBe(false);
+    expect(db.counts.get(FakeD1.countKey(userId, 'items', 'dev-1:pl'))!.n).toBe(
+      51,
+    );
+  });
+
+  // ---- I23: fail-open penghitung item + refund anggaran ----
+
+  it('I23a: penghitung item gagal -> fail-open ke COUNT (bukan 500)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    seedPlaylist(db, userId, 'dev-1:penuh', 'Penuh');
+    seedPlaylist(db, userId, 'dev-1:kosong', 'Kosong');
+    for (let i = 0; i < 1000; i++) {
+      seedItem(db, userId, 'dev-1:penuh', `vid-${i}`, { posisi: i });
+    }
+    // Hanya baca penghitung ITEM yang gagal (skalar tetap jalan).
+    db.throwOnItemCounters = true;
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:penuh',
+          videoId: 'vid-lebih',
+          posisi: 1000,
+          title: null,
+          artist: null,
+        },
+        {
+          playlistClientId: 'dev-1:kosong',
+          videoId: 'vid-ok',
+          posisi: 0,
+          title: null,
+          artist: null,
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; skippedOverLimit: { playlistItems: number } };
+    };
+    // COUNT fallback menegakkan cap dengan benar: penuh dilewati,
+    // kosong diterapkan.
+    expect(body.data.applied).toBe(1);
+    expect(body.data.skippedOverLimit.playlistItems).toBe(1);
+    expect(db.items.has('dev-1:kosong|vid-ok')).toBe(true);
+    expect(db.items.has('dev-1:penuh|vid-lebih')).toBe(false);
+  });
+
+  it('I23a: COUNT juga gagal -> 500 jelas + anggaran dikembalikan; coba lagi berhasil', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // Penghitung + COUNT sama-sama gagal (D1 mati sesaat).
+    db.throwOnCounts = true;
+    db.throwOnCount = true;
+    const body1 = {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 1000, title: null, artist: null }],
+    };
+    const failed = await push(env, cookie, body1);
+    expect(failed.status).toBe(500);
+    const failedBody = (await failed.json()) as { error: { code: string } };
+    expect(failedBody.error.code).toBe('SYNC_TEMPORARILY_UNAVAILABLE');
+    // Reservasi push yang gagal dikembalikan penuh (bukan hangus).
+    expect(budgetUsed(db, userId)).toBe(0);
+    // D1 pulih: percobaan berikut berhasil dengan satu tagihan.
+    db.throwOnCounts = false;
+    db.throwOnCount = false;
+    const retry = await push(env, cookie, body1);
+    expect(retry.status).toBe(200);
+    expect(budgetUsed(db, userId)).toBe(7);
+  });
+
+  it('I23b: batch gagal -> 500 + refund; coba lagi berhasil dengan satu tagihan', async () => {
+    class FailBatchOnceD1 extends FakeD1 {
+      private failed = false;
+      override async batch(stmts: Array<{ run: () => Promise<unknown> }>) {
+        if (!this.failed) {
+          this.failed = true;
+          throw new Error('batch gagal (simulasi)');
+        }
+        return super.batch(stmts);
+      }
+    }
+    const db = new FailBatchOnceD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const body1 = {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 1000, title: null, artist: null }],
+    };
+    const failed = await push(env, cookie, body1);
+    expect(failed.status).toBe(500);
+    const failedBody = (await failed.json()) as { error: { code: string } };
+    expect(failedBody.error.code).toBe('SYNC_TEMPORARILY_UNAVAILABLE');
+    // Anggaran push yang gagal dikembalikan (refund tepat
+    // sebesar reservasi — tidak bisa menggandakan anggaran).
+    expect(budgetUsed(db, userId)).toBe(0);
+    const retry = await push(env, cookie, body1);
+    expect(retry.status).toBe(200);
+    expect(budgetUsed(db, userId)).toBe(7);
+    expect(db.likes.size).toBe(1);
   });
 });

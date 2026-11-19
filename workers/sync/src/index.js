@@ -12,14 +12,22 @@
 // (tabel oauth_states + kolom user_id di sync_playlist_items)
 // + migrations/0005_sync_quotas.sql (tabel sync_counts,
 // sync_write_budget, sync_user_meta — penghitung batas, anggaran
-// tulis harian, stempel hapus riwayat).
-// Worker ini WAJIB di-deploy sesudah kelima migrasi diterapkan
+// tulis harian, stempel hapus riwayat)
+// + migrations/0006_blue6_quotas.sql (tabel
+// sync_deleted_identities, sync_read_budget, indeks sapu
+// tombstone — tombstone identitas terhapus, anggaran baca pull
+// harian, sapu tombstone malas).
+// Worker ini WAJIB di-deploy sesudah keenam migrasi diterapkan
 // (SQL push/pull memakai kolom title/artist dari 0003, SQL
 // callback memakai tabel oauth_states dari 0004, SQL push item
-// memakai kolom user_id dari 0004, SQL kuota memakai tabel 0005).
+// memakai kolom user_id dari 0004, SQL kuota memakai tabel 0005,
+// SQL tombstone/anggaran-baca memakai tabel 0006).
 // Tanpa 0005, Worker fail-open ke perilaku Blue 4 (COUNT per push
 // + tanpa anggaran tulis) supaya sync tidak mati — tetapi S8/S9
-// kembali terbuka sampai 0005 diterapkan.
+// kembali terbuka sampai 0005 diterapkan. Tanpa 0006, Worker
+// fail-open ke perilaku Blue 5 (anggaran tulis tetap jalan, tetapi
+// S10/S11 kembali terbuka: daftar ulang me-reset anggaran dan
+// pull tanpa anggaran baca) sampai 0006 diterapkan.
 //
 // KREDENSIAL (langkah owner, belum ada saat P7 ditulis):
 // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GITHUB_CLIENT_ID,
@@ -63,6 +71,19 @@
 //   Tiap INSERT entri baru dijaga klausa guard-WHERE berbasis
 //   penghitung (R19) sehingga batas ditegakkan per pernyataan
 //   secara atomik, bukan hanya check-then-act di level push.
+//   Anggaran BACA pull harian per akun 40.000 baris (S11b —
+//   maks 0,8% kuota baca bersama per akun per hari; pull
+//   mencadangkan maks 4.002 baris SEBELUM query jalan, selisih
+//   yang tidak terpakai dikembalikan). Hapus akun dibatasi
+//   3/jam/IP + 1/jam/akun (S10a) dan daftar ulang sesudah hapus
+//   dibatasi cooldown 24 jam per identitas provider (S10c);
+//   anggaran + stempel clear diwariskan lewat tombstone identitas
+//   (hash saja, tanpa data pribadi) supaya hapus + daftar lagi
+//   tidak me-reset apa pun (S10b). Baris rate-limit sync
+//   dibebankan ke anggaran akun (S12a) dan request yang sudah
+//   dibatasi tidak menulis baris (S12b). Tombstone server
+//   disapu malas tiap push (maks 100/koleksi, umur >30 hari,
+//   I22) supaya cap tidak tersumbat permanen.
 // Tanpa log isi: Worker tidak mencatat body, token, atau data
 // pengguna; hanya metrik agregat di console (jumlah request
 // per endpoint per jam) bila dibutuhkan.
@@ -98,7 +119,76 @@ const MAX_HISTORY_PER_USER = 1000;
 // berkoordinasi. Dihitung dari ISI BODY push (termasuk entri
 // yang dilewati cap / bukan milik pendorong) supaya push "gratis"
 // tidak bisa dipakai membakar kuota BACA lewat probe (S9).
+// Sejak Blue 6, tagihan push ditambah 1 untuk baris rate-limit
+// push itu sendiri (S12a), dan anggaran diikat ke identitas
+// provider lewat tombstone (S10b) supaya hapus + daftar lagi
+// tidak me-resetnya.
 const DAILY_WRITE_BUDGET = 20000;
+// Anggaran BACA pull harian per akun (S11b): 40.000 baris/hari/
+// akun = 0,8% kuota baca bersama (5.000.000/hari). Longgar untuk
+// pemakaian normal: sinkronisasi penuh akun di batas koleksi
+// skalar (~12.100 baris: 100 playlist + 1.000 item + 10.000 suka
+// + 1.000 riwayat) muat 3x sehari; akun ekstrem 100.000 item
+// (111.101 baris) tersinkron bertahap ~3 hari — simetris dengan
+// sisi tulis yang butuh ~6 hari untuk mendorongnya, dan klien
+// sudah inkremental (kursor `since` dipertahankan), jadi bukan
+// gagal total. Satu akun tidak bisa menguras kuota baca
+// sendirian: butuh 125 akun yang kompak menghabiskan anggaran
+// penuh (sebelum S11: 1 akun, 49 pull, ~1,6 menit).
+const DAILY_READ_BUDGET = 40000;
+// Cadangan anggaran baca per pull (S11b): maksimum baris yang
+// bisa dikembalikan satu pull (4 koleksi x 1.000 + settings 1)
+// + 1 untuk baris rate-limit pull itu (S12a). Dicadangkan
+// SEBELUM query jalan (atomik, seperti anggaran tulis); selisih
+// yang tidak terpakai dikembalikan sesudah query (refund).
+const READ_BUDGET_RESERVE_PER_PULL = 4 * MAX_PULL_ROWS + 1 + 1;
+// Tagihan anggaran TULIS per pull (S12a): satu pull menulis
+// paling banyak 4 baris D1 — baris rate-limit (1) + cadangan
+// anggaran tulis (1) + cadangan anggaran baca (1) + refund
+// anggaran baca (1). Tanpa tagihan ini, pull kosong (bersih
+// 1 baris baca) bisa diulang 36.000x/hari dan menulis 108.000
+// baris — satu akun membunuh kuota tulis (ditemukan saat
+// verifikasi Blue 6). Dengan tagihan ini, pull + push berbagi
+// anggaran 20.000: total tulis per akun/hari <= ~20.000.
+const PULL_WRITE_CHARGE = 4;
+// Rate limit hapus akun (S10a): hapus akun adalah tindakan
+// sekali seumur hidup akun — 3/jam/IP longgar untuk satu rumah
+// tangga/NAT yang menghapus beberapa akun berdekatan, dan
+// 1/jam/akun menahan percobaan ulang bila hapus gagal di tengah
+// (akun yang berhasil dihapus tidak bisa dihapus lagi: sesinya
+// sudah hilang). Batas per jam (bukan per menit) karena siklus
+// serang S10 diukur dalam menit; digabung cooldown 24 jam (S10c),
+// laju daur ulang maksimal 3/jam/IP itupun butuh identitas baru
+// tiap siklus (identitas yang sama diblokir cooldown).
+const RATE_DELETE_PER_HOUR_IP = 3;
+const RATE_DELETE_PER_HOUR_ACCOUNT = 1;
+const DELETE_RATE_WINDOW_MS = 60 * 60 * 1000;
+// Cooldown daftar ulang sesudah hapus akun (S10c): 24 jam.
+// DIPILIH: daftar ulang dalam masa cooldown DITOLAK dengan
+// pesan jelas (bukan "diizinkan tapi mewarisi anggaran").
+// Alasan: (1) penolakan menutup reset anggaran BACA juga
+// (anggaran baca per user_id ikut segar bila daftar ulang
+// diizinkan — celah S11 lewat daur ulang); (2) UX: jeda 24 jam
+// sesudah menghapus akun adalah perilaku yang sudah umum
+// (masa tenggang), dan pesannya menyebut kapan bisa kembali;
+// (3) privasi: tombstone tetap hanya hash + angka selama
+// cooldown, tidak ada data pribadi yang dipertahankan.
+// Warisan anggaran/stempel (S10b) tetap diterapkan sebagai
+// lapis kedua bila cooldown gagal ditegakkan.
+const RE_REGISTER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// Tombstone identitas dipertahankan 30 hari, lalu disapu malas
+// tiap pendaftaran akun baru (1 pernyataan best-effort).
+const DELETED_IDENTITY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+// Sapu tombstone malas (I22): tiap push menghapus paling banyak
+// 100 tombstone lama per koleksi yang disentuh push itu.
+// DIPILIH sapu malas (bukan cron terjadwal): tanpa perubahan
+// deploy (tanpa scheduled handler, tanpa trigger wrangler,
+// tanpa perluasan metadata deploy_sync.py), tanpa job yang bisa
+// gagal diam-diam, dan cap hanya penting saat pengguna mendorong
+// — koleksi yang tidak pernah didorong tidak butuh disapu.
+// Tombstone baru (<30 hari) tidak pernah disentuh.
+const TOMBSTONE_PRUNE_PER_PUSH = 100;
+const TOMBSTONE_PRUNE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 // Hapus riwayat dihonori paling sering sekali per 24 jam per
 // pengguna (S8a). Menghapus riwayat adalah tindakan sadar yang
 // jarang (seperti membersihkan riwayat browser); sekali sehari
@@ -247,9 +337,10 @@ function appUrl(env) {
 }
 
 // Rate limit D1 fail-open (pola proxy): D1 mati berarti request
-// diizinkan, bukan layanan mati.
+// diizinkan, bukan layanan mati. windowMs opsional (bawaan
+// 1 menit di modul rate limit; hapus akun memakai 1 jam, S10a).
 let warnedMissingDb = false;
-async function checkRateLimit(env, key, limit) {
+async function checkRateLimit(env, key, limit, windowMs) {
   if (!env.DB) {
     if (!warnedMissingDb) {
       warnedMissingDb = true;
@@ -258,7 +349,7 @@ async function checkRateLimit(env, key, limit) {
     return false;
   }
   try {
-    return await isRateLimited(env.DB, key, limit);
+    return await isRateLimited(env.DB, key, limit, Date.now(), windowMs);
   } catch (e) {
     console.warn(
       'rate limit: D1 gagal, request diizinkan:',
@@ -315,11 +406,15 @@ async function authUser(env, request) {
   if (!session) return null;
   if (session.expires_at <= Date.now()) return null;
   const user = await env.DB.prepare(
-    'SELECT id, display_name, provider FROM users WHERE id = ?',
+    'SELECT id, display_name, provider, provider_id FROM users WHERE id = ?',
   )
     .bind(session.user_id)
     .first();
   if (!user) return null;
+  // provider_id ikut dikembalikan untuk tombstone hapus akun
+  // (S10: hash identitas) — TIDAK PERNAH diekspos ke respons
+  // API (handler /api/auth/me hanya memetik display_name +
+  // provider).
   return { sessionId: session.id, ...user };
 }
 
@@ -571,6 +666,114 @@ async function fetchProfile(provider, accessToken) {
   };
 }
 
+// ------------------------------------------------------------------
+// Tombstone identitas terhapus (Blue 6, Red 6 S10)
+//
+// Anggaran tulis + stempel clear terikat `user_id`, sementara
+// identitas itu bisa didaur ulang gratis (hapus akun + daftar
+// lagi = UUID baru + anggaran penuh). Satu manusia + satu akun
+// Google menguras kuota tulis 100.000 dalam 6-10 menit.
+// Perbaikan berlapis:
+//   (a) rate limit ketat di /api/auth/delete (router);
+//   (b) anggaran + stempel diikat ke IDENTITAS provider yang
+//       stabil (hash provider+provider_id) lewat tombstone:
+//       daftar ulang mewarisi pemakaian + stempel lama;
+//   (c) cooldown daftar ulang 24 jam (daftar ulang dalam masa
+//       cooldown DITOLAK dengan pesan jelas).
+// PRIVASI: tombstone HANYA menyimpan hash identitas + angka
+// (waktu hapus, pemakaian anggaran, stempel clear) — tanpa nama,
+// email, atau data pengguna apa pun. Hapus akun tetap
+// benar-benar menghapus data pribadi; hash satu arah tidak bisa
+// dipakai memulihkan provider_id.
+// Fail-open: bila tabel 0006 belum termigrasi, baca/tulis
+// tombstone gagal diam-diam dan alur kembali ke perilaku Blue 5
+// (koordinator WAJIB menerapkan 0006 sebelum deploy).
+// ------------------------------------------------------------------
+
+/** Hash identitas stabil: SHA-256 dari "provider:provider_id". */
+async function identityHashFor(provider, providerId) {
+  return sha256Hex(`${provider}:${providerId}`);
+}
+
+/** Baca tombstone identitas; null bila tidak ada / tabel belum ada. */
+async function readDeletedIdentity(env, identityHash) {
+  if (!env.DB) return null;
+  try {
+    const row = await env.DB.prepare(
+      'SELECT deleted_at, budget_day, budget_rows, read_rows, history_cleared_at FROM sync_deleted_identities WHERE identity_hash = ?',
+    )
+      .bind(identityHash)
+      .first();
+    if (!row) return null;
+    return {
+      deletedAt: Number(row.deleted_at),
+      budgetDay: String(row.budget_day),
+      budgetRows: Number(row.budget_rows),
+      readRows: Number(row.read_rows),
+      historyClearedAt:
+        row.history_cleared_at === null || row.history_cleared_at === undefined
+          ? null
+          : Number(row.history_cleared_at),
+    };
+  } catch (e) {
+    console.warn(
+      'tombstone identitas: gagal baca (fail-open, daftar diizinkan):',
+      e instanceof Error ? e.message : 'unknown',
+    );
+    return null;
+  }
+}
+
+/**
+ * Wariskan anggaran + stempel dari tombstone ke akun baru
+ * (S10b), lalu konsumsi tombstone (hapus) supaya tidak dipakai
+ * dua kali. Pemakaian anggaran hanya diwariskan bila tombstone
+ * dari hari UTC yang SAMA — sesudah cooldown 24 jam hari selalu
+ * sudah berganti, jadi cabang ini hanya jalan bila cooldown
+ * gagal ditegakkan (pertahanan berlapis). Stempel clear selalu
+ * diwariskan (bila lebih tua dari 24 jam, gerbang S8a toh
+ * mengizinkan clear berikutnya). Best-effort: gagal restore =
+ * anggaran segar (fail-open; cooldown sudah bekerja utama).
+ */
+async function restoreFromTombstone(env, userId, identityHash, tombstone, now) {
+  try {
+    const day = new Date(now).toISOString().slice(0, 10);
+    const stmts = [];
+    if (tombstone.budgetDay === day && tombstone.budgetRows > 0) {
+      stmts.push(
+        env.DB.prepare(
+          'INSERT INTO sync_write_budget (user_id, day, rows_written) VALUES (?, ?, ?)',
+        ).bind(userId, day, tombstone.budgetRows),
+      );
+    }
+    if (tombstone.budgetDay === day && tombstone.readRows > 0) {
+      stmts.push(
+        env.DB.prepare(
+          'INSERT INTO sync_read_budget (user_id, day, rows_read) VALUES (?, ?, ?)',
+        ).bind(userId, day, tombstone.readRows),
+      );
+    }
+    if (tombstone.historyClearedAt !== null) {
+      stmts.push(
+        env.DB.prepare(
+          'INSERT INTO sync_user_meta (user_id, history_cleared_at) VALUES (?, ?)',
+        ).bind(userId, tombstone.historyClearedAt),
+      );
+    }
+    stmts.push(
+      env.DB.prepare(
+        'DELETE FROM sync_deleted_identities WHERE identity_hash = ?',
+      ).bind(identityHash),
+    );
+    await env.DB.batch(stmts);
+  } catch (e) {
+    console.warn(
+      'tombstone identitas: gagal wariskan (fail-open):',
+      e instanceof Error ? e.message : 'unknown',
+    );
+  }
+}
+
 async function handleCallback(request, env, url) {
   const base = appUrl(env);
   const fail = (reason) =>
@@ -629,6 +832,25 @@ async function handleCallback(request, env, url) {
     .bind(provider, profile.providerId)
     .first();
   if (!user) {
+    // S10b/c: identitas yang baru saja menghapus akun tidak bisa
+    // langsung daftar lagi (cooldown 24 jam), dan bila cooldown
+    // sudah lewat, anggaran + stempel lama diwariskan (bukan
+    // di-reset). Tombstone hanya hash + angka (tanpa data pribadi).
+    const identityHash = await identityHashFor(provider, profile.providerId);
+    try {
+      // Sapu malas tombstone >30 hari (1 pernyataan best-effort).
+      await env.DB.prepare(
+        'DELETE FROM sync_deleted_identities WHERE deleted_at < ?',
+      )
+        .bind(now - DELETED_IDENTITY_RETENTION_MS)
+        .run();
+    } catch {
+      // Abaikan: tabel mungkin belum termigrasi (fail-open).
+    }
+    const tombstone = await readDeletedIdentity(env, identityHash);
+    if (tombstone && now - tombstone.deletedAt < RE_REGISTER_COOLDOWN_MS) {
+      return fail('deleted-recently');
+    }
     const id = crypto.randomUUID();
     await env.DB.prepare(
       'INSERT INTO users (id, provider, provider_id, display_name, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -636,6 +858,9 @@ async function handleCallback(request, env, url) {
       .bind(id, provider, profile.providerId, displayName, now)
       .run();
     user = { id };
+    if (tombstone) {
+      await restoreFromTombstone(env, id, identityHash, tombstone, now);
+    }
   } else if (user.display_name !== displayName) {
     await env.DB.prepare('UPDATE users SET display_name = ? WHERE id = ?')
       .bind(displayName, user.id)
@@ -659,6 +884,81 @@ async function handlePull(env, url, user) {
   const sinceRaw = Number(url.searchParams.get('since') || 0);
   const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : 0;
   const db = env.DB;
+  const now = Date.now();
+  const day = new Date(now).toISOString().slice(0, 10);
+  // ---- S12a: pull DITAGIH ke anggaran TULIS (4 baris/pull).
+  // Tanpa ini, anggaran baca saja TIDAK membatasi jumlah pull:
+  // pull kosong menagih bersih 1 baris baca (cadangan 4.002
+  // dikembalikan 4.001) tapi menulis 3 baris D1 (rate-limit +
+  // reservasi baca + refund) — 36.000 pull kosong = 108.000
+  // tulis, SATU akun membunuh kuota tulis 100.000 (ditemukan
+  // saat verifikasi aritmetika Blue 6, BUKAN di Red 6).
+  // Tagihan 4 menutup SEMUA tulis yang disebabkan satu pull:
+  // baris rate-limit (1) + cadangan anggaran tulis ini (1) +
+  // cadangan anggaran baca (1) + refund (1, bila jalan).
+  // Pull yang kembali penuh (refund 0) kelebihan-tagih 1 baris
+  // — arah aman, dan hanya ~9 pull/hari yang kena. Pengguna
+  // normal (~5 pull/hari = 20 baris dari 20.000) tidak terasa.
+  // Cadangan gagal TIDAK di-refund: 4 baris tidak material,
+  // dan penyerang yang memicu kegagalan berulang menghabiskan
+  // anggarannya sendiri (pra-cek router memblokir sesudahnya).
+  try {
+    const res = await db
+      .prepare(
+        'INSERT INTO sync_write_budget (user_id, day, rows_written) VALUES (?, ?, ?) ON CONFLICT(user_id, day) DO UPDATE SET rows_written = sync_write_budget.rows_written + excluded.rows_written WHERE sync_write_budget.rows_written + excluded.rows_written <= ?',
+      )
+      .bind(user.id, day, PULL_WRITE_CHARGE, DAILY_WRITE_BUDGET)
+      .run();
+    if (res.meta?.changes !== 1) {
+      const retryAfter = secondsUntilMidnightUtc(now);
+      return jsonError(
+        429,
+        'DAILY_WRITE_BUDGET_EXCEEDED',
+        'Batas sinkronisasi harian tercapai. Coba lagi besok.',
+        { 'Retry-After': String(retryAfter) },
+      );
+    }
+  } catch (e) {
+    console.warn(
+      'anggaran tulis: gagal cadang pull, pull diizinkan:',
+      e instanceof Error ? e.message : 'unknown',
+    );
+  }
+  // ---- S11b: anggaran BACA pull harian per akun (atomik, §4.3).
+  // Cadangan SEBELUM query jalan (satu upsert berkondisi, seperti
+  // anggaran tulis S8b): pull yang melewati anggaran ditolak 429
+  // SEBELUM memindai apa pun, jadi tidak ada TOCTOU anggaran
+  // (pull bersamaan tidak bisa sama-sama lolos sesudah anggaran
+  // habis). Cadangan = maksimum baris satu pull + 1 untuk baris
+  // rate-limit pull ini (S12a); selisih yang tidak terpakai
+  // dikembalikan sesudah query (refund best-effort — gagal
+  // refund hanya kelebihan-tagih, arah aman). Fail-open bila
+  // tabel 0006 belum ada (koordinator WAJIB menerapkan 0006
+  // sebelum deploy; tanpa tabelnya S11 kembali terbuka).
+  let reserved = false;
+  try {
+    const res = await db
+      .prepare(
+        'INSERT INTO sync_read_budget (user_id, day, rows_read) VALUES (?, ?, ?) ON CONFLICT(user_id, day) DO UPDATE SET rows_read = sync_read_budget.rows_read + excluded.rows_read WHERE sync_read_budget.rows_read + excluded.rows_read <= ?',
+      )
+      .bind(user.id, day, READ_BUDGET_RESERVE_PER_PULL, DAILY_READ_BUDGET)
+      .run();
+    if (res.meta?.changes !== 1) {
+      const retryAfter = secondsUntilMidnightUtc(now);
+      return jsonError(
+        429,
+        'DAILY_READ_BUDGET_EXCEEDED',
+        'Batas tarik sinkronisasi harian tercapai. Coba lagi besok.',
+        { 'Retry-After': String(retryAfter) },
+      );
+    }
+    reserved = true;
+  } catch (e) {
+    console.warn(
+      'anggaran baca: gagal cadang, pull diizinkan:',
+      e instanceof Error ? e.message : 'unknown',
+    );
+  }
   const [playlists, items, likes, history, settings] = await Promise.all([
     db
       .prepare(
@@ -667,8 +967,19 @@ async function handlePull(env, url, user) {
       .bind(user.id, since, MAX_PULL_ROWS)
       .all(),
     db
+      // S11a: filter i.user_id LANGSUNG (kolom + indeks
+      // idx_items_user dari 0004) sebagai ganti p.user_id.
+      // Bentuk lama memakai JOIN + sort yang memindai SEMUA
+      // item pengguna (LIMIT baru sesudah sort): 100.000 item
+      // = 100.000 baris dipindai per pull, kuota baca 5 juta
+      // habis dalam 49 pull. Bentuk baru memakai indeks
+      // (user_id, updated_at) yang terurut, LIMIT-bounded di
+      // 1.000 tanpa temp b-tree; JOIN ke playlist hanya lookup
+      // PK untuk client_id (terverifikasi EXPLAIN QUERY PLAN
+      // di SQLite lokal pada 2 skala, lihat
+      // docs/blue6-red6-fixes.md §2).
       .prepare(
-        'SELECT p.client_id AS playlist_client_id, i.video_id, i.posisi, i.title, i.artist, i.updated_at, i.deleted_at FROM sync_playlist_items i JOIN sync_playlists p ON p.id = i.playlist_id WHERE p.user_id = ? AND i.updated_at > ? ORDER BY i.updated_at ASC LIMIT ?',
+        'SELECT p.client_id AS playlist_client_id, i.video_id, i.posisi, i.title, i.artist, i.updated_at, i.deleted_at FROM sync_playlist_items i JOIN sync_playlists p ON p.id = i.playlist_id WHERE i.user_id = ? AND i.updated_at > ? ORDER BY i.updated_at ASC LIMIT ?',
       )
       .bind(user.id, since, MAX_PULL_ROWS)
       .all(),
@@ -689,6 +1000,32 @@ async function handlePull(env, url, user) {
       .bind(user.id)
       .first(),
   ]);
+  // S11b: kembalikan selisih cadangan yang tidak terpakai.
+  // Tagihan akhir = baris dikembalikan + 1 (baris rate-limit).
+  if (reserved) {
+    const returned =
+      (playlists.results?.length || 0) +
+      (items.results?.length || 0) +
+      (likes.results?.length || 0) +
+      (history.results?.length || 0) +
+      (settings ? 1 : 0);
+    const refund = READ_BUDGET_RESERVE_PER_PULL - (returned + 1);
+    if (refund > 0) {
+      try {
+        await db
+          .prepare(
+            'UPDATE sync_read_budget SET rows_read = MAX(0, rows_read - ?) WHERE user_id = ? AND day = ?',
+          )
+          .bind(refund, user.id, day)
+          .run();
+      } catch (e) {
+        console.warn(
+          'anggaran baca: gagal refund (kelebihan-tagih, arah aman):',
+          e instanceof Error ? e.message : 'unknown',
+        );
+      }
+    }
+  }
   return jsonOk({
     serverTime: Date.now(),
     playlists: (playlists.results || []).map((r) => ({
@@ -929,11 +1266,54 @@ async function readItemCounters(db, userId, playlistIds) {
   return out;
 }
 
-/** Simpan nilai penghitung hasil rekonsiliasi (nilai absolut, bukan delta). */
-async function storeCount(db, userId, collection, playlistId, n, now) {
+/**
+ * Simpan nilai penghitung hasil rekonsiliasi. Optimistic
+ * concurrency (I21): COUNT + store adalah dua pernyataan, dan
+ * bump push bersamaan yang mendarat di antaranya membuat nilai
+ * COUNT basi — menimpanya begitu saja MENURUNKAN penghitung di
+ * bawah jumlah nyata dan melonggarkan cap (~100 baris per
+ * kejadian, terbukti Red 6 di SQLite).
+ *   - Bila baris dibaca sebelumnya (expected terisi): simpan
+ *     HANYA bila nilai tersimpan belum bergerak sejak dibaca
+ *     (WHERE n = ? AND updated_at = ?). Bila CAS gagal (0 baris
+ *     berubah), jangan timpa: satu pernyataan MAX atomik
+ *     menyimpan max(nilai tersimpan, nilai hitung) — arah
+ *     melenceng AMAN (penghitung terlalu tinggi hanya menolak
+ *     penambahan sah, tidak pernah mengizinkan pelampauan batas).
+ *     DIPILIH MAX + satu percobaan ulang implisit ini (bukan
+ *     baca-ulang + hitung-ulang): COUNT ulang sesudah CAS gagal
+ *     membuka lagi jendela race yang sama tanpa batas, sementara
+ *     MAX satu pernyataan bersifat atomik dan langsung benar
+ *     (nilai tersimpan sudah mencakup bump yang menyela; bila
+ *     COUNT lebih besar — mis. baris dibuat tanpa bump — MAX
+ *     memakai COUNT).
+ *   - Bila baris belum ada saat dibaca (expected null): INSERT
+ *     biasa; bila baris tercipta di antaranya (bump push lain),
+ *     ON CONFLICT memakai MAX yang sama (bump dipertahankan).
+ * Koreksi drift ke bawah tetap jalan (CAS sukses menulis nilai
+ * COUNT persis, mis. 5.000 -> 100) — hanya penimpaan nilai BASI
+ * yang dicegah.
+ */
+async function storeCount(db, userId, collection, playlistId, n, now, expected = null) {
+  if (expected) {
+    const res = await db
+      .prepare(
+        'INSERT INTO sync_counts (user_id, collection, playlist_id, n, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, collection, playlist_id) DO UPDATE SET n = excluded.n, updated_at = excluded.updated_at WHERE sync_counts.n = ? AND sync_counts.updated_at = ?',
+      )
+      .bind(userId, collection, playlistId, n, now, expected.n, expected.updatedAt)
+      .run();
+    if (res.meta?.changes === 1) return;
+    await db
+      .prepare(
+        'UPDATE sync_counts SET n = MAX(n, ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
+      )
+      .bind(n, now, userId, collection, playlistId)
+      .run();
+    return;
+  }
   await db
     .prepare(
-      'INSERT INTO sync_counts (user_id, collection, playlist_id, n, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, collection, playlist_id) DO UPDATE SET n = excluded.n, updated_at = excluded.updated_at',
+      'INSERT INTO sync_counts (user_id, collection, playlist_id, n, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, collection, playlist_id) DO UPDATE SET n = MAX(sync_counts.n, excluded.n), updated_at = excluded.updated_at',
     )
     .bind(userId, collection, playlistId, n, now)
     .run();
@@ -949,8 +1329,11 @@ async function storeCount(db, userId, collection, playlistId, n, now) {
  * sesudah race (butuh headroom, yang tidak kembali sesudah cap
  * tercapai kecuali lewat clear), tua hanya 1x/hari/koleksi dan hanya
  * bila sudah dekat batas. Lihat aritmetika di blue5-red5-fixes.md.
+ * `row` adalah baris penghitung yang dibaca pemanggil (atau
+ * undefined bila belum ada) — diteruskan ke storeCount sebagai
+ * ekspektasi CAS (I21).
  */
-async function reconcileCount(db, userId, collection, playlistId, cap, now) {
+async function reconcileCount(db, userId, collection, playlistId, cap, now, row) {
   let n;
   if (collection === 'items') {
     n = await countItemsForPlaylist(db, playlistId, userId);
@@ -961,7 +1344,7 @@ async function reconcileCount(db, userId, collection, playlistId, cap, now) {
   } else {
     n = await countUserRows(db, 'sync_history', userId);
   }
-  await storeCount(db, userId, collection, playlistId, n, now);
+  await storeCount(db, userId, collection, playlistId, n, now, row || null);
   return n;
 }
 
@@ -985,7 +1368,7 @@ async function resolveCount(
   now,
 ) {
   if (!row) {
-    return reconcileCount(db, userId, collection, playlistId, cap, now);
+    return reconcileCount(db, userId, collection, playlistId, cap, now, undefined);
   }
   const stale = row.n < 0;
   const overCap = row.n > cap + COUNTER_RECONCILE_OVER_CAP_SLACK;
@@ -993,7 +1376,7 @@ async function resolveCount(
     now - row.updatedAt > COUNTER_RECONCILE_MAX_AGE_MS &&
     row.n > cap - COUNTER_RECONCILE_NEAR_CAP;
   if (stale || overCap || oldNearCap) {
-    return reconcileCount(db, userId, collection, playlistId, cap, now);
+    return reconcileCount(db, userId, collection, playlistId, cap, now, row);
   }
   return row.n;
 }
@@ -1053,26 +1436,265 @@ function secondsUntilMidnightUtc(nowMs) {
   return Math.max(1, Math.ceil((nextMidnight - nowMs) / 1000));
 }
 
-async function handlePush(env, request, user) {
+// ------------------------------------------------------------------
+// Helper push Blue 6 (S12a pra-cek anggaran, I23 refund, I22 sapu)
+// ------------------------------------------------------------------
+
+/**
+ * Baca + validasi body push. Dipanggil router SEBELUM rate limit
+ * (S12a) supaya pra-cek anggaran memakai tagihan persis push ini:
+ * tanpa ini, push yang pasti ditolak anggaran tetap menulis baris
+ * rate-limit (43.200 baris/hari/akun di luar anggaran 20.000).
+ * Mengembalikan { body } atau { error } (Response 400/413).
+ */
+async function parsePushBody(request) {
   const declaredLen = Number(request.headers.get('Content-Length') || 0);
   if (declaredLen > MAX_BODY_BYTES) {
-    return jsonError(413, 'BODY_TOO_BIG', 'Body request melewati 1 MB');
+    return { error: jsonError(413, 'BODY_TOO_BIG', 'Body request melewati 1 MB') };
   }
   const read = request.body
     ? await readCapped(request.body, MAX_BODY_BYTES)
     : { tooBig: false, bytes: new Uint8Array(0) };
   if (read.tooBig) {
-    return jsonError(413, 'BODY_TOO_BIG', 'Body request melewati 1 MB');
+    return { error: jsonError(413, 'BODY_TOO_BIG', 'Body request melewati 1 MB') };
   }
   let body;
   try {
     body = JSON.parse(new TextDecoder().decode(read.bytes));
   } catch {
-    return jsonError(400, 'BAD_JSON', 'Body bukan JSON yang valid');
+    return { error: jsonError(400, 'BAD_JSON', 'Body bukan JSON yang valid') };
   }
   const invalid = validatePushBody(body);
-  if (invalid) return jsonError(400, 'INVALID_BODY', invalid);
+  if (invalid) return { error: jsonError(400, 'INVALID_BODY', invalid) };
+  return { body };
+}
 
+/**
+ * Tagihan anggaran tulis satu push, dari ISI BODY (lihat S8b).
+ * clearBillable: true bila DELETE hapus-riwayat ditagih 1.000
+ * (router memakai batas atas — clear diminta; handlePush memakai
+ * nilai persis — clear dihonori). Selalu ditambah 1 untuk baris
+ * rate-limit push ini (S12a). Tagihan maks per push 1.911
+ * (700 + 1 + 1.000 + 2x(3+100) + 3 + 1).
+ */
+function computePushCharge(body, clearBillable) {
+  const playlistsIn = body.playlists || [];
+  const itemsIn = body.playlistItems || [];
+  const likesIn = body.likes || [];
+  const historyIn = body.history || [];
+  const deletedPlaylistsIn = body.deletedPlaylists || [];
+  const deletedItemsIn = body.deletedPlaylistItems || [];
+  const deletedLikesIn = body.deletedLikes || [];
+  const nonEmptyScalar =
+    (playlistsIn.length > 0 ? 1 : 0) +
+    (likesIn.length > 0 ? 1 : 0) +
+    (historyIn.length > 0 ? 1 : 0);
+  const distinctItemPlaylists = new Set(
+    itemsIn.map((i) => i.playlistClientId),
+  ).size;
+  return (
+    playlistsIn.length +
+    itemsIn.length +
+    likesIn.length +
+    historyIn.length +
+    deletedPlaylistsIn.length +
+    deletedItemsIn.length +
+    deletedLikesIn.length +
+    (body.settings ? 1 : 0) +
+    (clearBillable ? MAX_HISTORY_PER_USER : 0) +
+    2 * (nonEmptyScalar + distinctItemPlaylists) +
+    3 +
+    1
+  );
+}
+
+/**
+ * Pra-cek anggaran tulis (S12a): true bila push bertagihan
+ * `charge` PASTI ditolak anggaran (dipakai router SEBELUM
+ * menulis baris rate-limit). Fail-open: galat D1 / tabel belum
+ * ada berarti "lanjut" — reservasi atomik di handlePush tetap
+ * menjadi penegak sesungguhnya.
+ */
+async function writeBudgetExhausted(env, userId, charge) {
+  if (!env.DB) return false;
+  try {
+    const day = new Date(Date.now()).toISOString().slice(0, 10);
+    const row = await env.DB.prepare(
+      'SELECT rows_written FROM sync_write_budget WHERE user_id = ? AND day = ?',
+    )
+      .bind(userId, day)
+      .first();
+    return (row ? Number(row.rows_written) : 0) + charge > DAILY_WRITE_BUDGET;
+  } catch {
+    return false;
+  }
+}
+
+/** Pra-cek anggaran baca (S11b+S12a): true bila pull PASTI ditolak. */
+async function readBudgetExhausted(env, userId) {
+  if (!env.DB) return false;
+  try {
+    const day = new Date(Date.now()).toISOString().slice(0, 10);
+    const row = await env.DB.prepare(
+      'SELECT rows_read FROM sync_read_budget WHERE user_id = ? AND day = ?',
+    )
+      .bind(userId, day)
+      .first();
+    return (
+      (row ? Number(row.rows_read) : 0) + READ_BUDGET_RESERVE_PER_PULL >
+      DAILY_READ_BUDGET
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Kembalikan reservasi anggaran tulis (I23b): tepat sebesar
+ * reservasi push itu (tidak bisa menggandakan anggaran —
+ * dipanggil sekali per push yang gagal, tanpa retry, dan
+ * dijaga lantai 0). Best-effort: gagal refund hanya membuat
+ * pengguna kehilangan anggaran push itu (arah aman).
+ */
+async function refundWriteBudget(db, userId, day, amount) {
+  if (!amount || amount <= 0) return;
+  try {
+    await db
+      .prepare(
+        'UPDATE sync_write_budget SET rows_written = MAX(0, rows_written - ?) WHERE user_id = ? AND day = ?',
+      )
+      .bind(amount, userId, day)
+      .run();
+  } catch (e) {
+    console.warn(
+      'anggaran tulis: gagal refund (anggaran push hangus):',
+      e instanceof Error ? e.message : 'unknown',
+    );
+  }
+}
+
+/** Kegagalan penghitung yang jujur (I23a): refund + 500 yang jelas. */
+async function failCountsUnavailable(db, userId, day, reservedCharge) {
+  await refundWriteBudget(db, userId, day, reservedCharge);
+  return jsonError(
+    500,
+    'SYNC_TEMPORARILY_UNAVAILABLE',
+    'Sinkronisasi gagal sesaat. Coba lagi.',
+  );
+}
+
+/**
+ * Sapu tombstone malas (I22): hapus paling banyak 100 tombstone
+ * berumur >30 hari per koleksi yang disentuh push ini, lalu
+ * kurangi penghitung koleksi itu sejumlah yang terhapus (supaya
+ * cap kembali longgar — tombstone dihitung di sync_counts).
+ * Hanya koleksi yang disentuh yang disapu: sapu memakai 1 SELECT
+ * per koleksi, dan koleksi yang tidak didorong tidak butuh
+ * dilonggarkan cap-nya. Best-effort total: gagal sapu tidak
+ * menggagalkan push (tombstone lama hanya menunda kelonggaran
+ * cap, bukan merusak data). Tulis sapu TIDAK ditagih ke anggaran
+ * push: jumlahnya dibatasi tombstone yang sudah ada (tiap
+ * tombstone menelan anggaran saat dibuat), dan penghapusan
+ * massal lewat hapus akun sudah merupakan jalur yang lebih cepat
+ * — sapu tidak membuka kelas serang baru.
+ */
+async function pruneOldTombstones(db, userId, now, collections) {
+  const cutoff = now - TOMBSTONE_PRUNE_AGE_MS;
+  try {
+    if (collections.includes('playlists')) {
+      const rows = await db
+        .prepare(
+          'SELECT id FROM sync_playlists WHERE user_id = ? AND deleted_at < ? LIMIT ?',
+        )
+        .bind(userId, cutoff, TOMBSTONE_PRUNE_PER_PUSH)
+        .all();
+      const ids = (rows.results || []).map((r) => r.id);
+      if (ids.length > 0) {
+        const marks = ids.map(() => '?').join(', ');
+        await db
+          .prepare(
+            `DELETE FROM sync_playlists WHERE user_id = ? AND id IN (${marks})`,
+          )
+          .bind(userId, ...ids)
+          .run();
+        await db
+          .prepare(
+            'UPDATE sync_counts SET n = MAX(0, n - ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
+          )
+          .bind(ids.length, now, userId, 'playlists', '')
+          .run();
+      }
+    }
+    if (collections.includes('likes')) {
+      const rows = await db
+        .prepare(
+          'SELECT video_id FROM sync_likes WHERE user_id = ? AND deleted_at < ? LIMIT ?',
+        )
+        .bind(userId, cutoff, TOMBSTONE_PRUNE_PER_PUSH)
+        .all();
+      const ids = (rows.results || []).map((r) => r.video_id);
+      if (ids.length > 0) {
+        const marks = ids.map(() => '?').join(', ');
+        await db
+          .prepare(
+            `DELETE FROM sync_likes WHERE user_id = ? AND video_id IN (${marks})`,
+          )
+          .bind(userId, ...ids)
+          .run();
+        await db
+          .prepare(
+            'UPDATE sync_counts SET n = MAX(0, n - ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
+          )
+          .bind(ids.length, now, userId, 'likes', '')
+          .run();
+      }
+    }
+    if (collections.includes('items')) {
+      const rows = await db
+        .prepare(
+          'SELECT playlist_id, video_id FROM sync_playlist_items WHERE user_id = ? AND deleted_at < ? LIMIT ?',
+        )
+        .bind(userId, cutoff, TOMBSTONE_PRUNE_PER_PUSH)
+        .all();
+      const found = rows.results || [];
+      if (found.length > 0) {
+        const marks = found.map(() => '(?, ?)').join(', ');
+        const binds = found.flatMap((r) => [r.playlist_id, r.video_id]);
+        await db
+          .prepare(
+            `DELETE FROM sync_playlist_items WHERE user_id = ? AND (playlist_id, video_id) IN (${marks})`,
+          )
+          .bind(userId, ...binds)
+          .run();
+        const perPlaylist = new Map();
+        for (const r of found) {
+          perPlaylist.set(
+            r.playlist_id,
+            (perPlaylist.get(r.playlist_id) || 0) + 1,
+          );
+        }
+        for (const [playlistId, count] of perPlaylist) {
+          await db
+            .prepare(
+              'UPDATE sync_counts SET n = MAX(0, n - ?), updated_at = ? WHERE user_id = ? AND collection = ? AND playlist_id = ?',
+            )
+            .bind(count, now, userId, 'items', playlistId)
+            .run();
+        }
+      }
+    }
+  } catch (e) {
+    // Best-effort: sapu gagal (mis. tabel 0006 belum ada / D1
+    // sesaat) tidak menggagalkan push; penghitung yang tidak
+    // dikurangi hanya kelebihan-hitung (arah aman).
+    console.warn(
+      'sapu tombstone: gagal (best-effort):',
+      e instanceof Error ? e.message : 'unknown',
+    );
+  }
+}
+
+async function handlePush(env, user, body) {
   const db = env.DB;
   // Satu stempel server untuk seluruh push (protokol S8:
   // updated_at dari server, bukan jam perangkat).
@@ -1138,35 +1760,22 @@ async function handlePush(env, request, user) {
   // pembukuan menutup tulis yang BUKAN entri: per koleksi yang
   // disentuh paling banyak 1 increment penghitung + 1 simpan
   // rekonsiliasi (2x jumlah koleksi), + 3 untuk sentinel clear,
-  // stempel meta, dan upsert cadangan anggaran itu sendiri.
+  // stempel meta, dan upsert cadangan anggaran itu sendiri,
+  // + 1 untuk baris rate-limit push ini (S12a).
   // Dengan tunjangan ini tagihan TIDAK PERNAH kurang dari tulis
-  // sebenarnya yang ditimbulkan push (maks 1.909/push).
+  // sebenarnya yang ditimbulkan push (maks 1.911/push).
   // Cadangan bersifat atomik (satu upsert berkondisi): push
   // bersamaan tidak bisa sama-sama lolos sesudah anggaran habis.
-  const nonEmptyScalar =
-    (playlistsIn.length > 0 ? 1 : 0) +
-    (likesIn.length > 0 ? 1 : 0) +
-    (historyIn.length > 0 ? 1 : 0);
-  const distinctItemPlaylists = new Set(
-    itemsIn.map((i) => i.playlistClientId),
-  ).size;
-  const charge =
-    playlistsIn.length +
-    itemsIn.length +
-    likesIn.length +
-    historyIn.length +
-    deletedPlaylistsIn.length +
-    deletedItemsIn.length +
-    deletedLikesIn.length +
-    (body.settings ? 1 : 0) +
-    (clearHonored ? MAX_HISTORY_PER_USER : 0) +
-    2 * (nonEmptyScalar + distinctItemPlaylists) +
-    3;
-  // Tagihan selalu >= 3 (tunjangan pembukuan), jadi cadangan
-  // selalu jalan — termasuk push kosong, supaya push kosong pun
-  // tidak bisa dipakai membakar kuota baca tanpa batas.
+  const charge = computePushCharge(body, clearHonored);
+  // Tagihan selalu >= 4 (tunjangan pembukuan + baris rate-limit),
+  // jadi cadangan selalu jalan — termasuk push kosong, supaya
+  // push kosong pun tidak bisa dipakai membakar kuota baca tanpa
+  // batas.
+  const day = new Date(now).toISOString().slice(0, 10);
+  // Reservasi yang berhasil (0 bila fail-open): dipakai refund
+  // I23b bila push gagal sesudah titik ini.
+  let reservedCharge = 0;
   try {
-    const day = new Date(now).toISOString().slice(0, 10);
     const res = await db
       .prepare(
         'INSERT INTO sync_write_budget (user_id, day, rows_written) VALUES (?, ?, ?) ON CONFLICT(user_id, day) DO UPDATE SET rows_written = sync_write_budget.rows_written + excluded.rows_written WHERE sync_write_budget.rows_written + excluded.rows_written <= ?',
@@ -1182,11 +1791,29 @@ async function handlePush(env, request, user) {
         { 'Retry-After': String(retryAfter) },
       );
     }
+    reservedCharge = charge;
   } catch (e) {
     console.warn(
       'anggaran tulis: gagal cadang, push diizinkan:',
       e instanceof Error ? e.message : 'unknown',
     );
+  }
+
+  // ---- I22: sapu tombstone malas (SEBELUM fase cap, supaya cap
+  // memakai penghitung yang sudah dikurangi). Hanya koleksi yang
+  // disentuh push ini (lihat pruneOldTombstones).
+  const touchedCollections = [];
+  if (playlistsIn.length > 0 || deletedPlaylistsIn.length > 0) {
+    touchedCollections.push('playlists');
+  }
+  if (likesIn.length > 0 || deletedLikesIn.length > 0) {
+    touchedCollections.push('likes');
+  }
+  if (itemsIn.length > 0 || deletedItemsIn.length > 0) {
+    touchedCollections.push('items');
+  }
+  if (touchedCollections.length > 0) {
+    await pruneOldTombstones(db, user.id, now, touchedCollections);
   }
 
   // ---- S7 + S9: tegakkan batas TOTAL per pengguna (§4.3)
@@ -1268,15 +1895,22 @@ async function handlePush(env, request, user) {
       e instanceof Error ? e.message : 'unknown',
     );
     countersOk = false;
-    [playlistCount, likesCount, historyCount] = await Promise.all([
-      playlistsIn.length > 0
-        ? countUserRows(db, 'sync_playlists', user.id)
-        : 0,
-      likesIn.length > 0 ? countUserRows(db, 'sync_likes', user.id) : 0,
-      historyIn.length > 0
-        ? countUserRows(db, 'sync_history', user.id)
-        : 0,
-    ]);
+    try {
+      [playlistCount, likesCount, historyCount] = await Promise.all([
+        playlistsIn.length > 0
+          ? countUserRows(db, 'sync_playlists', user.id)
+          : 0,
+        likesIn.length > 0 ? countUserRows(db, 'sync_likes', user.id) : 0,
+        historyIn.length > 0
+          ? countUserRows(db, 'sync_history', user.id)
+          : 0,
+      ]);
+    } catch (e2) {
+      // I23a: COUNT juga gagal (D1 mati sesaat) — tolak dengan
+      // 500 yang JELAS + kembalikan anggaran (bukan 500 generik
+      // sesudah anggaran dipotong).
+      return failCountsUnavailable(db, user.id, day, reservedCharge);
+    }
   }
   if (playlistsIn.length > 0) {
     const result = await capNewEntries({
@@ -1411,23 +2045,46 @@ async function handlePush(env, request, user) {
     ];
     let itemCounts;
     if (countersOk) {
-      const rows = await readItemCounters(db, user.id, touchedIds);
-      const resolved = await Promise.all(
-        touchedIds.map((pid) =>
-          resolveCount(
-            db,
-            user.id,
-            'items',
-            pid,
-            MAX_ITEMS_PER_PLAYLIST,
-            rows.get(pid),
-            now,
+      // I23a: blok penghitung ITEM dibungkus try/catch yang sama
+      // dengan blok skalar — galat D1 sesaat di sini dulu
+      // menggagalkan SELURUH push dengan 500 (fail-closed),
+      // padahal galat yang sama di jalur skalar hanya fail-open
+      // ke COUNT. Bila COUNT juga gagal, tolak dengan 500 yang
+      // JELAS + kembalikan anggaran (bukan diam-diam).
+      try {
+        const rows = await readItemCounters(db, user.id, touchedIds);
+        const resolved = await Promise.all(
+          touchedIds.map((pid) =>
+            resolveCount(
+              db,
+              user.id,
+              'items',
+              pid,
+              MAX_ITEMS_PER_PLAYLIST,
+              rows.get(pid),
+              now,
+            ),
           ),
-        ),
-      );
-      itemCounts = new Map(touchedIds.map((pid, i) => [pid, resolved[i]]));
+        );
+        itemCounts = new Map(touchedIds.map((pid, i) => [pid, resolved[i]]));
+      } catch (e) {
+        console.warn(
+          'penghitung item: gagal baca, fallback ke COUNT:',
+          e instanceof Error ? e.message : 'unknown',
+        );
+        countersOk = false;
+        try {
+          itemCounts = await countItemsPerPlaylist(db, user.id, touchedIds);
+        } catch (e2) {
+          return failCountsUnavailable(db, user.id, day, reservedCharge);
+        }
+      }
     } else {
-      itemCounts = await countItemsPerPlaylist(db, user.id, touchedIds);
+      try {
+        itemCounts = await countItemsPerPlaylist(db, user.id, touchedIds);
+      } catch (e) {
+        return failCountsUnavailable(db, user.id, day, reservedCharge);
+      }
     }
     const byPlaylist = new Map();
     for (const item of ownedItems) {
@@ -1673,7 +2330,36 @@ async function handlePush(env, request, user) {
   }
 
   if (stmts.length > 0) {
-    await db.batch(stmts);
+    try {
+      await db.batch(stmts);
+    } catch (e) {
+      // I23b: anggaran TIDAK hangus bila batch gagal — kembalikan
+      // TEPAT sebesar reservasi push ini (sekali, tanpa retry,
+      // dijaga lantai 0 di refundWriteBudget). DIPILIH refund
+      // (bukan "pindahkan pemotongan ke sesudah batch sukses"):
+      // reservasi HARUS sebelum batch supaya push bersamaan tidak
+      // bisa sama-sama lolos sesudah anggaran habis (TOCTOU S8b);
+      // memindahkannya ke belakang membuka lagi race itu.
+      // Catatan: db.batch bukan transaksi atomik (I16) — bila
+      // batch gagal DI TENGAH, sebagian pernyataan sudah
+      // diterapkan sementara anggaran dikembalikan penuh. Itu
+      // diterima: kegagalan mid-batch adalah galat D1
+      // (transien/kuota), bukan sesuatu yang bisa dipicu
+      // penyerang per pernyataan (validasi body + guard-WHERE
+      // membuat pernyataan gagal validasi tidak pernah masuk
+      // batch), dan "gratis" yang didapat dibatasi satu push
+      // per kegagalan.
+      console.warn(
+        'push: batch gagal, anggaran dikembalikan:',
+        e instanceof Error ? e.message : 'unknown',
+      );
+      await refundWriteBudget(db, user.id, day, reservedCharge);
+      return jsonError(
+        500,
+        'SYNC_TEMPORARILY_UNAVAILABLE',
+        'Sinkronisasi gagal sesaat. Coba lagi.',
+      );
+    }
   }
   return jsonOk({
     serverTime: now,
@@ -1798,10 +2484,90 @@ export default {
         }
         const user = await authUser(env, request);
         if (!user) return jsonError(401, 'UNAUTHORIZED', 'Belum masuk', cors);
+        // S10a: rate limit KETAT — hapus akun adalah tindakan
+        // langka (sekali seumur hidup akun). Tanpa ini, siklus
+        // hapus + daftar lagi bisa diulang menit demi menit.
+        const deleteIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+        if (
+          (await checkRateLimit(
+            env,
+            `delete-ip:${deleteIp}`,
+            RATE_DELETE_PER_HOUR_IP,
+            DELETE_RATE_WINDOW_MS,
+          )) ||
+          (await checkRateLimit(
+            env,
+            `delete-acct:${user.id}`,
+            RATE_DELETE_PER_HOUR_ACCOUNT,
+            DELETE_RATE_WINDOW_MS,
+          ))
+        ) {
+          const r = jsonError(
+            429,
+            'RATE_LIMITED',
+            'Terlalu banyak percobaan hapus akun. Coba lagi nanti.',
+            cors,
+          );
+          r.headers.set('Retry-After', '3600');
+          return r;
+        }
         if (env.DB) {
+          const db = env.DB;
+          // S10b/c: tulis tombstone identitas SEBELUM menghapus
+          // data — HANYA hash identitas + angka (waktu hapus,
+          // pemakaian anggaran hari ini, stempel clear), tanpa
+          // nama/email/data pengguna apa pun. Best-effort:
+          // gagal tulis (tabel 0006 belum ada) tidak
+          // menggagalkan hapus (fail-open; S10 aktif sesudah
+          // koordinator menerapkan 0006).
+          try {
+            const identityHash = await identityHashFor(
+              user.provider,
+              user.provider_id,
+            );
+            const now = Date.now();
+            const day = new Date(now).toISOString().slice(0, 10);
+            const [budgetRow, readRow, metaRow] = await Promise.all([
+              db
+                .prepare(
+                  'SELECT rows_written FROM sync_write_budget WHERE user_id = ? AND day = ?',
+                )
+                .bind(user.id, day)
+                .first(),
+              db
+                .prepare(
+                  'SELECT rows_read FROM sync_read_budget WHERE user_id = ? AND day = ?',
+                )
+                .bind(user.id, day)
+                .first(),
+              db
+                .prepare(
+                  'SELECT history_cleared_at FROM sync_user_meta WHERE user_id = ?',
+                )
+                .bind(user.id)
+                .first(),
+            ]);
+            await db
+              .prepare(
+                'INSERT INTO sync_deleted_identities (identity_hash, deleted_at, budget_day, budget_rows, read_rows, history_cleared_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(identity_hash) DO UPDATE SET deleted_at = excluded.deleted_at, budget_day = excluded.budget_day, budget_rows = excluded.budget_rows, read_rows = excluded.read_rows, history_cleared_at = excluded.history_cleared_at',
+              )
+              .bind(
+                identityHash,
+                now,
+                day,
+                budgetRow ? Number(budgetRow.rows_written) : 0,
+                readRow ? Number(readRow.rows_read) : 0,
+                metaRow ? Number(metaRow.history_cleared_at) : null,
+              )
+              .run();
+          } catch (e) {
+            console.warn(
+              'tombstone identitas: gagal tulis (hapus tetap jalan):',
+              e instanceof Error ? e.message : 'unknown',
+            );
+          }
           // Hapus eksplisit berurutan (tidak mengandalkan
           // ON DELETE CASCADE — penegakan FK D1 tidak dijamin).
-          const db = env.DB;
           await db.batch([
             db
               .prepare(
@@ -1817,6 +2583,11 @@ export default {
             db.prepare('DELETE FROM sync_counts WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM sync_write_budget WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM sync_user_meta WHERE user_id = ?').bind(user.id),
+            // Blue 6: hapus juga anggaran baca (migrasi 0006).
+            // Tombstone identitas (hash + angka) SENGAJA tidak
+            // dihapus di sini — ia ditulis di atas, sebelum
+            // batch ini, dan dikonsumsi saat daftar ulang.
+            db.prepare('DELETE FROM sync_read_budget WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM users WHERE id = ?').bind(user.id),
           ]);
@@ -1833,16 +2604,54 @@ export default {
         }
         const user = await authUser(env, request);
         if (!user) return jsonError(401, 'UNAUTHORIZED', 'Belum masuk', cors);
-        if (
-          await checkRateLimit(env, `sync:${user.id}`, RATE_SYNC_PER_MIN)
-        ) {
-          const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak sinkronisasi', cors);
-          r.headers.set('Retry-After', '60');
-          return r;
-        }
         if (url.pathname === '/api/sync/pull') {
           if (request.method !== 'GET') {
             return jsonError(405, 'METHOD_NOT_ALLOWED', 'Metode tidak diizinkan', cors);
+          }
+          // S11b+S12a: pra-cek anggaran baca SEBELUM menulis
+          // baris rate-limit — pull yang pasti ditolak anggaran
+          // tidak membakar baris rate-limit (dan tidak
+          // memindai apa pun). Reservasi atomik di handlePull
+          // tetap menjadi penegak sesungguhnya (pra-cek hanya
+          // optimasi; race di antara keduanya ditutup reservasi).
+          if (await readBudgetExhausted(env, user.id)) {
+            const r = jsonError(
+              429,
+              'DAILY_READ_BUDGET_EXCEEDED',
+              'Batas tarik sinkronisasi harian tercapai. Coba lagi besok.',
+              cors,
+            );
+            r.headers.set(
+              'Retry-After',
+              String(secondsUntilMidnightUtc(Date.now())),
+            );
+            return r;
+          }
+          // S12a: pra-cek anggaran TULIS juga (pull menagih 4
+          // baris tulis — lihat PULL_WRITE_CHARGE). Dicek
+          // sesudah anggaran baca supaya kode 429 pull yang
+          // kehabisan anggaran BACA tetap spesifik.
+          if (
+            await writeBudgetExhausted(env, user.id, PULL_WRITE_CHARGE)
+          ) {
+            const r = jsonError(
+              429,
+              'DAILY_WRITE_BUDGET_EXCEEDED',
+              'Batas sinkronisasi harian tercapai. Coba lagi besok.',
+              cors,
+            );
+            r.headers.set(
+              'Retry-After',
+              String(secondsUntilMidnightUtc(Date.now())),
+            );
+            return r;
+          }
+          if (
+            await checkRateLimit(env, `sync:${user.id}`, RATE_SYNC_PER_MIN)
+          ) {
+            const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak sinkronisasi', cors);
+            r.headers.set('Retry-After', '60');
+            return r;
           }
           const res = await handlePull(env, url, user);
           const headers = new Headers(res.headers);
@@ -1855,7 +2664,58 @@ export default {
         if (!isAllowedOrigin(env, request)) {
           return jsonError(403, 'ORIGIN_NOT_ALLOWED', 'Origin tidak diizinkan', cors);
         }
-        const res = await handlePush(env, request, user);
+        // S12a: baca + validasi body SEBELUM rate limit, supaya
+        // pra-cek anggaran memakai tagihan PERSIS push ini.
+        // (Sebelumnya body dibaca di handlePush, sesudah baris
+        // rate-limit ditulis — push yang pasti ditolak anggaran
+        // tetap membakar 1 baris rate-limit tiap percobaan.)
+        const parsed = await parsePushBody(request);
+        if (parsed.error) {
+          const headers = new Headers(parsed.error.headers);
+          for (const [k, v] of Object.entries(cors)) headers.set(k, v);
+          return new Response(parsed.error.body, {
+            status: parsed.error.status,
+            headers,
+          });
+        }
+        // Pra-cek memakai batas ATAS tagihan (clear ditagih
+        // penuh bila diminta): bila batas atas muat, tagihan
+        // persis pasti muat. Sudut sempit: anggaran tersisa
+        // <1.000 + clear diminta tapi diabaikan — push ditolak
+        // pra-cek walau tagihan persisnya muat (pengguna
+        // kehilangan sisa <1.000 anggaran hari itu; diterima,
+        // karena hanya terjadi di ambang anggaran + clear
+        // yang diabaikan gerbang 24 jam).
+        const clearRequested =
+          parsed.body.historyClearedBefore !== undefined &&
+          parsed.body.historyClearedBefore !== null;
+        if (
+          await writeBudgetExhausted(
+            env,
+            user.id,
+            computePushCharge(parsed.body, clearRequested),
+          )
+        ) {
+          const r = jsonError(
+            429,
+            'DAILY_WRITE_BUDGET_EXCEEDED',
+            'Batas sinkronisasi harian tercapai. Coba lagi besok.',
+            cors,
+          );
+          r.headers.set(
+            'Retry-After',
+            String(secondsUntilMidnightUtc(Date.now())),
+          );
+          return r;
+        }
+        if (
+          await checkRateLimit(env, `sync:${user.id}`, RATE_SYNC_PER_MIN)
+        ) {
+          const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak sinkronisasi', cors);
+          r.headers.set('Retry-After', '60');
+          return r;
+        }
+        const res = await handlePush(env, user, parsed.body);
         const headers = new Headers(res.headers);
         for (const [k, v] of Object.entries(cors)) headers.set(k, v);
         return new Response(res.body, { status: res.status, headers });

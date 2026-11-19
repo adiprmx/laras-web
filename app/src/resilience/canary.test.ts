@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CANARY_CHECK_INTERVAL_MS,
+  CANARY_HEALTH_FRESH_MS,
+  canaryHealthSignal,
   computeCanaryStatus,
   createCanaryChecker,
+  loadCanaryRecord,
   parseCanaryRecord,
   shouldRunCanary,
+  CANARY_RECORD_KEY,
+  type CanaryRecord,
 } from './canary';
 import { createMemoryStorage } from './configStore';
 import { ResolveError } from '../extractor/resolve';
@@ -229,5 +234,135 @@ describe('createCanaryChecker', () => {
     await checker.runCheck();
     expect(delay).toHaveBeenCalledTimes(4);
     expect(delay).toHaveBeenCalledWith(1000);
+  });
+});
+
+describe('canaryHealthSignal (hotfix resolve: sinyal untuk pemutar)', () => {
+  const NOW = 10_000_000;
+
+  function record(
+    overrides: Partial<CanaryRecord> = {},
+  ): CanaryRecord {
+    return {
+      checkedAt: NOW,
+      succeeded: 5,
+      failed: 0,
+      networkFailures: 0,
+      dominantCause: null,
+      status: 'ok',
+      streak: 0,
+      streakCause: null,
+      ...overrides,
+    };
+  }
+
+  it('recent-fail: broken baru-baru ini karena YouTube menolak', () => {
+    expect(
+      canaryHealthSignal(
+        record({
+          status: 'broken',
+          succeeded: 1,
+          failed: 4,
+          dominantCause: 'refused',
+        }),
+        NOW,
+      ),
+    ).toBe('recent-fail');
+  });
+
+  it('recent-fail: degraded baru-baru ini karena YouTube menolak', () => {
+    expect(
+      canaryHealthSignal(
+        record({
+          status: 'degraded',
+          succeeded: 4,
+          failed: 1,
+          dominantCause: 'refused',
+        }),
+        NOW,
+      ),
+    ).toBe('recent-fail');
+  });
+
+  it('recent-pass: ok baru-baru ini', () => {
+    expect(canaryHealthSignal(record(), NOW)).toBe('recent-pass');
+  });
+
+  it('unknown: belum pernah cek', () => {
+    expect(canaryHealthSignal(null, NOW)).toBe('unknown');
+  });
+
+  it('unknown: gagal tapi sudah basi (> 1 jam)', () => {
+    expect(
+      canaryHealthSignal(
+        record({
+          checkedAt: NOW - CANARY_HEALTH_FRESH_MS,
+          status: 'broken',
+          succeeded: 0,
+          failed: 5,
+          dominantCause: 'refused',
+        }),
+        NOW,
+      ),
+    ).toBe('unknown');
+  });
+
+  it('recent-fail: gagal 59 menit lalu masih segar', () => {
+    expect(
+      canaryHealthSignal(
+        record({
+          checkedAt: NOW - CANARY_HEALTH_FRESH_MS + 60_000,
+          status: 'broken',
+          succeeded: 0,
+          failed: 5,
+          dominantCause: 'refused',
+        }),
+        NOW,
+      ),
+    ).toBe('recent-fail');
+  });
+
+  it('unknown: gagal baru-baru ini tapi BUKAN karena penolakan', () => {
+    expect(
+      canaryHealthSignal(
+        record({
+          status: 'degraded',
+          succeeded: 4,
+          failed: 1,
+          dominantCause: 'no-format',
+        }),
+        NOW,
+      ),
+    ).toBe('unknown');
+  });
+});
+
+describe('loadCanaryRecord', () => {
+  it('membaca rekaman tersimpan', async () => {
+    const stored: CanaryRecord = {
+      checkedAt: 5_000_000,
+      succeeded: 2,
+      failed: 3,
+      networkFailures: 0,
+      dominantCause: 'refused',
+      status: 'broken',
+      streak: 1,
+      streakCause: 'refused',
+    };
+    const storage = createMemoryStorage({
+      [CANARY_RECORD_KEY]: JSON.stringify(stored),
+    });
+    expect(await loadCanaryRecord(storage)).toEqual(stored);
+  });
+
+  it('null bila tidak ada rekaman atau storage gagal', async () => {
+    expect(await loadCanaryRecord(createMemoryStorage())).toBeNull();
+    const broken: Parameters<typeof loadCanaryRecord>[0] = {
+      get: async () => {
+        throw new Error('DB mati');
+      },
+      set: async () => undefined,
+    };
+    expect(await loadCanaryRecord(broken)).toBeNull();
   });
 });

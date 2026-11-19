@@ -30,6 +30,16 @@ melewatinya ditolak 429 + `Retry-After`), dan hapus riwayat
 dihonori paling sering sekali per 24 jam (clear yang terlalu
 sering diabaikan + dilaporkan `historyClearIgnored`).
 Detail + aritmetika kuota: `docs/blue5-red5-fixes.md`.
+Sejak Blue 6: anggaran BACA pull harian per akun 40.000 baris
+(pull yang melewatinya ditolak 429 `DAILY_READ_BUDGET_EXCEEDED`
++ `Retry-After`); hapus akun dibatasi 3/jam per IP + 1/jam per
+akun, dan daftar ulang dengan identitas yang sama ditolak
+selama 24 jam sesudah hapus (redirect
+`?auth=error&reason=deleted-recently`, lalu mewarisi anggaran
++ stempel clear lama); tiap push menyapu paling banyak 100
+tombstone berumur >30 hari per koleksi yang disentuh supaya
+cap kembali longgar (tanpa cron — tidak ada perubahan deploy).
+Detail + aritmetika kuota: `docs/blue6-red6-fixes.md`.
 
 ## Checklist deploy (koordinator)
 
@@ -42,6 +52,7 @@ Detail + aritmetika kuota: `docs/blue5-red5-fixes.md`.
    wrangler d1 execute laras-web-sync --file=workers/sync/0003_item_meta.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0004_oauth_states_item_owner.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0005_sync_quotas.sql --remote
+   wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0006_blue6_quotas.sql --remote
    ```
    Migrasi 0003 WAJIB sebelum deploy Worker ini — SQL push/pull
    memakai kolom `title`/`artist` dari 0003. Migrasi 0004 WAJIB
@@ -53,6 +64,12 @@ Detail + aritmetika kuota: `docs/blue5-red5-fixes.md`.
    `sync_user_meta` dari 0005 (tanpa tabelnya, Worker fail-open
    ke perilaku Blue 4: COUNT per push + tanpa anggaran tulis,
    sehingga S8/S9 kembali terbuka sampai 0005 diterapkan).
+   Migrasi 0006 WAJIB sebelum deploy Worker pasca-Blue 6 — SQL
+   kuota memakai tabel `sync_read_budget` dan
+   `sync_deleted_identities` dari 0006 (tanpa tabelnya, Worker
+   fail-open ke perilaku Blue 5: tanpa anggaran baca, tanpa
+   tombstone identitas/cooldown daftar-ulang, sehingga S10/S11
+   kembali terbuka sampai 0006 diterapkan).
 2. **Aplikasi OAuth (langkah owner — BELUM DIBUAT saat P7 ditulis).**
    Buat aplikasi OAuth Google + GitHub, daftarkan redirect URI:
    `https://laras-sync.hiroohengkerr.workers.dev/api/auth/callback`

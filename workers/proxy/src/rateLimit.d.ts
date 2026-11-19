@@ -12,12 +12,20 @@ export interface D1DatabaseLike {
 }
 
 export declare const SWEEP_PROBABILITY: number;
-export declare function windowStartFor(nowMs: number): number;
+// Blue 6 (S10a/S12b): jendela terpanjang di sistem (1 jam,
+// untuk rate limit hapus akun); retensi sapu memakai nilai
+// yang sama (SWEEP_RETENTION_MS di .js, tidak diekspor).
+export declare const MAX_WINDOW_MS: number;
+export declare function windowStartFor(
+  nowMs: number,
+  windowMs?: number,
+): number;
 export declare function isRateLimited(
   db: D1DatabaseLike,
   key: string,
   limit: number,
   nowMs?: number,
+  windowMs?: number,
 ): Promise<boolean>;
 export declare function sweepExpiredWindows(
   db: D1DatabaseLike,

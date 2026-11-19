@@ -70,6 +70,17 @@ describe('windowStartFor', () => {
     expect(windowStartFor(1794784800000 + 45000)).toBe(1794784800000);
     expect(windowStartFor(1794784800000 + 60000)).toBe(1794784800000 + 60000);
   });
+
+  // Blue 6 (S10a): jendela per jam untuk rate limit hapus akun.
+  // 1794783600000 = 2026-11-18 02:00:00 UTC (batas jam persis;
+  // 1794784800000 yang dipakai tes menit adalah 02:20:00).
+  it('membulatkan ke awal jam bila windowMs = 1 jam', () => {
+    const hour = 3600000;
+    const base = 1794783600000;
+    expect(windowStartFor(base, hour)).toBe(base);
+    expect(windowStartFor(base + 3599000, hour)).toBe(base);
+    expect(windowStartFor(base + 3600000, hour)).toBe(base + 3600000);
+  });
 });
 
 describe('isRateLimited (D1)', () => {
@@ -124,6 +135,45 @@ describe('isRateLimited (D1)', () => {
       isRateLimited(failing, 'innertube:203.0.113.7', 60),
     ).rejects.toThrow('D1 mati');
   });
+
+  // Blue 6 (S12b): request yang SUDAH dibatasi tidak menulis
+  // baris lagi — 70 percobaan dengan batas 60 berhenti di
+  // hitungan 61 (bukan 70). Sebelumnya tiap percobaan menulis
+  // (43.200 baris/hari/akun di luar anggaran).
+  it('S12b: request yang sudah dibatasi tidak menulis baris lagi', async () => {
+    const db = new FakeD1();
+    const now = 1794784800000;
+    let limited = 0;
+    for (let i = 0; i < 70; i++) {
+      if (await isRateLimited(db, 'sync:user-1', 60, now)) limited++;
+    }
+    expect(limited).toBe(10);
+    expect(db.rows.get(`sync:user-1|${windowStartFor(now)}`)).toBe(61);
+  });
+
+  // Blue 6 (S10a): jendela per jam — batas 1/jam untuk hapus
+  // akun per akun; percobaan ke-2 dalam jam yang sama ditolak
+  // tanpa menulis, jam berikutnya diizinkan lagi.
+  it('S10a: jendela per jam (batas 1) menolak percobaan ke-2 tanpa menulis', async () => {
+    const db = new FakeD1();
+    const now = 1794784800000;
+    const hour = 3600000;
+    expect(
+      await isRateLimited(db, 'delete-acct:user-1', 1, now, hour),
+    ).toBe(false);
+    expect(
+      await isRateLimited(db, 'delete-acct:user-1', 1, now + 1000, hour),
+    ).toBe(true);
+    expect(
+      await isRateLimited(db, 'delete-acct:user-1', 1, now + 2000, hour),
+    ).toBe(true);
+    expect(db.rows.get(`delete-acct:user-1|${windowStartFor(now, hour)}`)).toBe(
+      2,
+    );
+    expect(
+      await isRateLimited(db, 'delete-acct:user-1', 1, now + hour, hour),
+    ).toBe(false);
+  });
 });
 
 describe('sweepExpiredWindows', () => {
@@ -135,7 +185,10 @@ describe('sweepExpiredWindows', () => {
     // menghapus baris lama sebelum asersi (flaky 1%).
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.99);
     try {
-      await isRateLimited(db, 'innertube:203.0.113.7', 60, now - 120000);
+      // Blue 6 (S12b): retensi sapu kini 1 jam (jendela
+      // terpanjang di sistem — hapus akun per jam), jadi baris
+      // "lama" harus berumur 2 jam (bukan 2 menit).
+      await isRateLimited(db, 'innertube:203.0.113.7', 60, now - 2 * 3600000);
       await isRateLimited(db, 'innertube:203.0.113.7', 60, now);
     } finally {
       randomSpy.mockRestore();
@@ -146,6 +199,24 @@ describe('sweepExpiredWindows', () => {
     expect([...db.rows.keys()][0]).toBe(
       `innertube:203.0.113.7|${windowStartFor(now)}`,
     );
+  });
+
+  // Blue 6 (S12b): baris berumur 2 menit DITAHAN (retensi 1 jam)
+  // — sapu proxy tidak boleh menghapus baris jendela per jam
+  // (hapus akun) yang masih berjalan.
+  it('menahan baris berumur 2 menit (retensi 1 jam)', async () => {
+    const db = new FakeD1();
+    const now = 1794784800000;
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.99);
+    try {
+      await isRateLimited(db, 'delete-acct:user-1', 1, now - 120000, 3600000);
+      await isRateLimited(db, 'innertube:203.0.113.7', 60, now);
+    } finally {
+      randomSpy.mockRestore();
+    }
+    expect(db.rows.size).toBe(2);
+    await sweepExpiredWindows(db, now);
+    expect(db.rows.size).toBe(2);
   });
 
   it('sapu gagal tidak mengubah vonis rate limit', async () => {

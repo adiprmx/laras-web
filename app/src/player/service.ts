@@ -25,6 +25,19 @@ import {
   failureMessage,
 } from '../resilience/errors';
 import {
+  canaryHealthSignal,
+  loadCanaryRecord,
+  type CanaryHealthSignal,
+} from '../resilience/canary';
+import {
+  advanceLadder,
+  BACKGROUND_RETRY_BACKOFF_MS,
+  isLadderDue,
+  isLoginRequiredOnly,
+  startLadder,
+  type RetryLadderState,
+} from '../resilience/retryLadder';
+import {
   causeFromFailureCause,
   kindFromFailureCause,
   recordFailureSnapshot,
@@ -92,6 +105,12 @@ export interface PlayerDebugState {
   playbackRate: number;
   position: number;
   duration: number;
+  /** Tangga retry latar yang sedang berjalan (null bila tidak ada). */
+  retryLadder: {
+    videoId: string;
+    step: number;
+    nextAttemptAt: number;
+  } | null;
 }
 
 declare global {
@@ -136,6 +155,22 @@ export class PlayerService {
   private persistChain: Promise<void> = Promise.resolve();
   /** Faktor volume fade-out timer tidur saat ini (1 = tanpa fade). */
   private fadeFactorCurrent = 1;
+  /**
+   * Tangga retry latar yang sedang berjalan (hotfix resolve):
+   * percobaan ulang LOGIN_REQUIRED di +60 dtk dan +5 mnt sesudah
+   * tangga cepat P6 habis. Hanya di memori (tidak dipersist):
+   * reload halaman menghentikan tangga, pengguna menekan putar
+   * untuk memulai lagi.
+   */
+  private backgroundRetry: (RetryLadderState & {
+    trackId: string;
+    token: number;
+  }) | null = null;
+  private backgroundRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True saat satu percobaan latar sedang berjalan. */
+  private backgroundRetryRunning = false;
+  /** Jeda tangga latar (injeksi tes; produksi memakai konstanta). */
+  private ladderBackoffMs: readonly number[];
   private historySession: {
     trackId: string;
     accumulatedMs: number;
@@ -143,8 +178,13 @@ export class PlayerService {
     upsertDone: Promise<void>;
   } | null = null;
 
-  constructor(port: AudioPlayerPort = new HtmlAudioPort()) {
+  constructor(
+    port: AudioPlayerPort = new HtmlAudioPort(),
+    opts: { ladderBackoffMs?: readonly number[] } = {},
+  ) {
     this.port = port;
+    this.ladderBackoffMs =
+      opts.ladderBackoffMs ?? BACKGROUND_RETRY_BACKOFF_MS;
   }
 
   /** Inisialisasi sekali: pulihkan antrean, pasang listener, watchdog. */
@@ -199,7 +239,13 @@ export class PlayerService {
     if (document.visibilityState === 'hidden') this.persistNow();
     // Tab kembali terlihat: cek timer tidur (setInterval
     // di-throttle saat tab di latar, tenggat bisa terlewat).
-    if (document.visibilityState === 'visible') this.checkSleepTimer();
+    if (document.visibilityState === 'visible') {
+      this.checkSleepTimer();
+      // Tangga retry latar juga dicek di sini: timer setTimeout
+      // di-throttle di tab latar (~1/menit), tapi tenggat
+      // berbasis stempel waktu tetap bisa dicek saat tab kembali.
+      void this.checkBackgroundRetry();
+    }
   };
 
   private onBeforeUnload = (): void => {
@@ -221,6 +267,13 @@ export class PlayerService {
       playbackRate: this.port.snapshot().playbackRate,
       position: s.position,
       duration: s.duration,
+      retryLadder: this.backgroundRetry
+        ? {
+            videoId: this.backgroundRetry.videoId,
+            step: this.backgroundRetry.step,
+            nextAttemptAt: this.backgroundRetry.nextAttemptAt,
+          }
+        : null,
     };
   }
 
@@ -281,6 +334,9 @@ export class PlayerService {
   }
 
   pause(): void {
+    // Pengguna mengambil alih (jeda): tangga retry latar berhenti,
+    // supaya lagu tidak mulai sendiri sesudah pengguna menjeda.
+    this.cancelBackgroundRetry();
     this.port.pause();
     // Event 'pause' juga memperbarui state; setel eksplisit supaya
     // UI merespons seketika tanpa menunggu event.
@@ -635,8 +691,15 @@ export class PlayerService {
     return this.ensureResolver();
   }
 
-  /** Resolve dengan batas waktu keseluruhan + single-flight. */
-  private resolveWithTimeout(track: Track): Promise<ResolvedTrack> {
+  /**
+   * Resolve dengan batas waktu keseluruhan + single-flight.
+   * `opts.maxRounds` membatasi putaran cepat P6 (kanari dan
+   * percobaan latar memakai 1; tanpa opsi, default 3 putaran).
+   */
+  private resolveWithTimeout(
+    track: Track,
+    opts: { maxRounds?: number } = {},
+  ): Promise<ResolvedTrack> {
     if (track.source.kind !== 'stream') {
       return Promise.reject(
         new ResolveError('bukan lagu streaming', 'Bukan lagu streaming.'),
@@ -665,6 +728,9 @@ export class PlayerService {
           resolver.resolve(
             { videoId, title: track.title },
             {
+              ...(opts.maxRounds !== undefined
+                ? { maxRounds: opts.maxRounds }
+                : {}),
               // Retry lintas waktu (P6): selama menunggu putaran
               // berikut, UI tetap tenang ("mencari jalur lain"),
               // bukan error.
@@ -709,6 +775,9 @@ export class PlayerService {
     opts: { autoplay: boolean; startPosition: number },
   ): Promise<void> {
     const token = ++this.playToken;
+    // Ganti lagu (apa pun pemicunya: skip, pilih lagu, coba lagi,
+    // hapus dari antrean): tangga retry lagu lama berhenti.
+    this.cancelBackgroundRetry();
     this.stallTracker.reset();
     this.reResolveCount = 0;
     this.preResolvedUrl = null;
@@ -790,7 +859,24 @@ export class PlayerService {
     this.currentKind = 'stream';
     let resolved: ResolvedTrack;
     try {
-      resolved = await this.resolveWithTimeout(track);
+      // Sinyal kanari (hotfix): kanari gagal BARU-BARU INI karena
+      // YouTube menolak berarti jendela buruk sedang berjalan —
+      // lewati putaran cepat yang hampir pasti gagal (maxRounds 1)
+      // dan tampilkan status jujur sejak awal, bukan sesudah
+      // 20 detik putaran yang sia-sia. Sinyal lolos/basi/tidak
+      // ada berarti resolve normal (tangga cepat P6 tetap jalan).
+      const canarySignal = await this.readCanarySignal();
+      if (token !== this.playToken) return;
+      const skipFastRounds = canarySignal === 'recent-fail';
+      if (skipFastRounds) {
+        usePlayerStore.getState().setPlayerState({
+          notice: strings.retryLimitingAuto,
+        });
+      }
+      resolved = await this.resolveWithTimeout(
+        track,
+        skipFastRounds ? { maxRounds: 1 } : undefined,
+      );
     } catch (error) {
       if (token !== this.playToken) return;
       this.onResolveFailed(error);
@@ -1023,6 +1109,29 @@ export class PlayerService {
     // Log bertahan melewati reload (best-effort).
     void persistPlayerLog();
     this.recordResolveSnapshot(classified.cause, classified.isTimeout);
+    // Tangga latar (hotfix): LOGIN_REQUIRED MURNI berarti jendela
+    // buruk yang bisa berbalik dalam hitungan menit — jangan
+    // langsung pindah lagu; coba lagi di latar (+60 dtk, +5 mnt)
+    // sementara lagu tetap di antrean. Galat lain (termasuk
+    // UNPLAYABLE, yang bisa berarti lagu yang benar-benar tidak
+    // ada) memakai perilaku lama di bawah. Pengecualian: bila
+    // pengguna SUDAH menjeda saat resolve gagal (jeda manual atau
+    // timer tidur selama tangga cepat), tangga TIDAK mulai —
+    // lagu tidak boleh mulai sendiri menit-menit sesudah pengguna
+    // menjeda; perilaku lama (failCurrentTrack) yang berlaku.
+    if (
+      isLoginRequiredOnly(attempts) &&
+      usePlayerStore.getState().status !== 'paused'
+    ) {
+      const track = selectCurrentTrack(usePlayerStore.getState());
+      if (
+        track &&
+        track.source.kind === 'stream' &&
+        this.startBackgroundRetry(track, track.source.videoId)
+      ) {
+        return;
+      }
+    }
     void this.failCurrentTrack(failureMessage(classified));
   }
 
@@ -1073,6 +1182,190 @@ export class PlayerService {
       playerHash: this.resolver?.playerHash ?? null,
     };
     recordFailureSnapshot(snapshot);
+  }
+
+  // ---------- Tangga retry latar (hotfix resolve) ----------
+
+  /** Baca sinyal kesehatan kanari terakhir (best-effort). */
+  private async readCanarySignal(): Promise<CanaryHealthSignal> {
+    try {
+      const record = await loadCanaryRecord();
+      return canaryHealthSignal(record, Date.now());
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /**
+   * Mulai tangga retry latar untuk lagu saat ini sesudah tangga
+   * cepat P6 gagal LOGIN_REQUIRED murni. Status tetap 'loading'
+   * + notice jujur ("YouTube sedang membatasi, mencoba lagi
+   * otomatis."); lagu tetap di antrean; pengguna bisa skip kapan
+   * saja (skip memanggil loadTrack yang membatalkan tangga).
+   * Mengembalikan false bila tangga tidak bisa dimulai (daftar
+   * jeda kosong — hanya dipakai tes untuk menonaktifkan tangga).
+   */
+  private startBackgroundRetry(track: Track, videoId: string): boolean {
+    const ladder = startLadder(videoId, Date.now(), this.ladderBackoffMs);
+    if (!ladder) return false;
+    this.cancelBackgroundRetry();
+    this.backgroundRetry = {
+      ...ladder,
+      trackId: track.id,
+      token: this.playToken,
+    };
+    logPlayer('mencoba lagi di latar (tangga 60 dtk, 5 mnt)');
+    usePlayerStore.getState().setPlayerState({
+      status: 'loading',
+      notice: strings.retryLimitingAuto,
+      errorMessage: null,
+    });
+    this.armBackgroundRetryTimer();
+    return true;
+  }
+
+  /** Batalkan tangga latar (skip / ganti lagu / jeda / wipe). */
+  private cancelBackgroundRetry(): void {
+    if (this.backgroundRetryTimer) {
+      clearTimeout(this.backgroundRetryTimer);
+      this.backgroundRetryTimer = null;
+    }
+    this.backgroundRetry = null;
+  }
+
+  /**
+   * Pasang timer setTimeout untuk tenggat berikut. Timer HANYA
+   * pemicu cepat: tenggat juga dicek watchdog tiap detik dan
+   * saat tab kembali terlihat, jadi throttle timer di tab latar
+   * tidak menghentikan tangga.
+   */
+  private armBackgroundRetryTimer(): void {
+    if (this.backgroundRetryTimer) {
+      clearTimeout(this.backgroundRetryTimer);
+    }
+    const retry = this.backgroundRetry;
+    if (!retry) return;
+    const waitMs = Math.max(0, retry.nextAttemptAt - Date.now());
+    this.backgroundRetryTimer = setTimeout(() => {
+      this.backgroundRetryTimer = null;
+      void this.checkBackgroundRetry();
+    }, waitMs);
+  }
+
+  /**
+   * Cek tenggat tangga latar (watchdog tiap detik, timer, dan
+   * visibilitychange). Idempotent dan dijaga dari tumpang
+   * tindih: beberapa pemicu boleh memanggil bersamaan, hanya
+   * satu percobaan yang jalan.
+   */
+  private async checkBackgroundRetry(): Promise<void> {
+    const retry = this.backgroundRetry;
+    if (!retry || this.backgroundRetryRunning) return;
+    if (retry.token !== this.playToken) {
+      this.cancelBackgroundRetry();
+      return;
+    }
+    if (!isLadderDue(retry, Date.now())) return;
+    const track = selectCurrentTrack(usePlayerStore.getState());
+    if (!track || track.id !== retry.trackId) {
+      this.cancelBackgroundRetry();
+      return;
+    }
+    await this.runBackgroundRetryAttempt(retry, track);
+  }
+
+  /**
+   * Satu percobaan latar: satu putaran resolve (maxRounds 1,
+   * maks 3 request) untuk lagu yang sama. Lolos berarti putar
+   * seperti biasa; masih LOGIN_REQUIRED berarti maju ke langkah
+   * berikut atau habiskan tangga; galat lain berarti berhenti
+   * dengan perilaku lama.
+   */
+  private async runBackgroundRetryAttempt(
+    retry: RetryLadderState & { trackId: string; token: number },
+    track: Track,
+  ): Promise<void> {
+    this.backgroundRetryRunning = true;
+    try {
+      const resolved = await this.resolveWithTimeout(track, {
+        maxRounds: 1,
+      });
+      // Batal di tengah percobaan (skip/jeda/ganti lagu):
+      // jangan sentuh pemutar.
+      if (
+        retry.token !== this.playToken ||
+        this.backgroundRetry?.token !== retry.token
+      ) {
+        return;
+      }
+      this.cancelBackgroundRetry();
+      this.port.load(resolved.url, 'stream');
+      usePlayerStore.getState().setPlayerState({ audioPath: 'direct' });
+      this.beginPlayback(retry.token, {
+        autoplay: true,
+        startPosition: 0,
+      });
+    } catch (error) {
+      if (
+        retry.token !== this.playToken ||
+        this.backgroundRetry?.token !== retry.token
+      ) {
+        return;
+      }
+      const attempts =
+        error instanceof ResolveError ? error.attempts : [];
+      if (isLoginRequiredOnly(attempts)) {
+        const next = advanceLadder(
+          retry,
+          Date.now(),
+          this.ladderBackoffMs,
+        );
+        if (next) {
+          this.backgroundRetry = {
+            ...next,
+            trackId: track.id,
+            token: retry.token,
+          };
+          logPlayer(`mencoba lagi di latar (langkah ${next.step + 1})`);
+          this.armBackgroundRetryTimer();
+          return;
+        }
+        this.exhaustBackgroundRetry();
+        return;
+      }
+      // Bukan LOGIN_REQUIRED lagi (internet putus, proxy mati,
+      // format tidak ada): berhenti, perilaku lama yang berlaku.
+      this.cancelBackgroundRetry();
+      const classified = classifyPlaybackFailure({
+        online: navigator.onLine,
+        error,
+      });
+      void this.failCurrentTrack(failureMessage(classified));
+    } finally {
+      this.backgroundRetryRunning = false;
+    }
+  }
+
+  /**
+   * Tangga habis: berhenti DI LAGU INI dengan pesan akhir yang
+   * jujur ("YouTube masih membatasi. Coba lagi nanti.") — TIDAK
+   * pindah otomatis ke lagu berikut. Selama jendela buruk semua
+   * lagu gagal; pindah otomatis hanya membakar antrean dan
+   * menyembunyikan pesan akhir. Pengguna bisa menekan "Coba
+   * lagi" atau skip sendiri.
+   */
+  private exhaustBackgroundRetry(): void {
+    this.cancelBackgroundRetry();
+    logPlayer('tangga retry habis, YouTube masih membatasi');
+    void persistPlayerLog();
+    this.failures.recordFailure();
+    usePlayerStore.getState().setPlayerState({
+      status: 'error',
+      errorMessage: strings.retryExhausted,
+      notice: null,
+    });
+    this.mediaSession.setPlaybackState('paused');
+    this.persistNow();
   }
 
   // ---------- Pemulihan ----------
@@ -1142,6 +1435,7 @@ export class PlayerService {
   }
 
   private stopPlayback(): void {
+    this.cancelBackgroundRetry();
     this.port.pause();
     this.currentKind = null;
     this.playingDownloadedVideoId = null;
@@ -1177,6 +1471,10 @@ export class PlayerService {
     // Timer tidur dicek dulu, tanpa peduli status putar: tenggat
     // menit berjalan walau lagu dijeda.
     this.checkSleepTimer();
+    // Tangga retry latar dicek di sini juga: tenggat berbasis
+    // stempel waktu, jadi tetap jalan walau timer setTimeout
+    // di-throttle saat tab di latar.
+    await this.checkBackgroundRetry();
     const state = usePlayerStore.getState();
     const track = selectCurrentTrack(state);
     if (!track) return;
@@ -1461,6 +1759,7 @@ export class PlayerService {
   }
 
   dispose(): void {
+    this.cancelBackgroundRetry();
     if (this.watchdog) clearInterval(this.watchdog);
     if (this.persistTimer) clearTimeout(this.persistTimer);
     for (const fn of this.detachPort) fn();

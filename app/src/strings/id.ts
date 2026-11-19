@@ -205,6 +205,10 @@ export const strings = {
   storageOf: (done: string, total: string) => `${done} dari ${total}`,
   // Ketahanan (P6)
   retryLookingForAnotherWay: 'Mencari jalur lain untuk lagu ini.',
+  // Tangga retry latar (hotfix resolve): status jujur saat YouTube
+  // menolak + pesan akhir sesudah tangga habis (tanpa janji).
+  retryLimitingAuto: 'YouTube sedang membatasi, mencoba lagi otomatis.',
+  retryExhausted: 'YouTube masih membatasi. Coba lagi nanti.',
   // Banner status (P6)
   statusInfoTitle: 'Pengaturan lagu memakai cadangan',
   statusInfoBody: 'App belum bisa mengambil pengaturan terbaru. Lagu tetap bisa diputar.',
@@ -325,6 +329,9 @@ export const strings = {
   settingsAccountDeleteDone: 'Akun dihapus.',
   settingsAccountUnavailable:
     'Sinkronisasi belum bisa dihubungi. Coba lagi nanti.',
+  // Blue 6 (S10c): daftar ulang dalam 24 jam sesudah hapus akun.
+  settingsAccountDeletedRecently:
+    'Akun ini baru saja dihapus. Kamu bisa masuk lagi besok.',
   // Salinan data + impor Spotify (P8)
   settingsBackupSection: 'Salinan data',
   settingsBackupBody:

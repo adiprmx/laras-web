@@ -86,6 +86,9 @@ function AccountSection() {
   const deleteAccount = useSyncStore((s) => s.deleteAccount);
 
   const [authError, setAuthError] = useState(false);
+  // Blue 6 (S10c): daftar ulang ditolak karena akun baru saja
+  // dihapus (cooldown 24 jam) — pesan khusus, bukan galat umum.
+  const [authDeletedRecently, setAuthDeletedRecently] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteDone, setDeleteDone] = useState(false);
   const [deleteFailed, setDeleteFailed] = useState(false);
@@ -99,6 +102,7 @@ function AccountSection() {
     handledQuery.current = true;
     const params = new URLSearchParams(window.location.search);
     const auth = params.get('auth');
+    const reason = params.get('reason');
     if (auth === 'ok' || auth === 'error') {
       params.delete('auth');
       params.delete('reason');
@@ -110,6 +114,7 @@ function AccountSection() {
       );
     }
     if (auth === 'error') {
+      if (reason === 'deleted-recently') setAuthDeletedRecently(true);
       setAuthError(true);
       void refreshAuth();
       return;
@@ -175,7 +180,9 @@ function AccountSection() {
               data-testid="settings-account-error"
               className="mt-3 text-sm text-red-300"
             >
-              {strings.settingsAccountUnavailable}
+              {authDeletedRecently
+                ? strings.settingsAccountDeletedRecently
+                : strings.settingsAccountUnavailable}
             </p>
           ) : null}
           {deleteDone ? (

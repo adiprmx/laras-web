@@ -81,8 +81,27 @@ vonis live-nya lolos.
   error". Butuh token baru dari owner.
 - **GitHub Actions runner**: LOGIN_REQUIRED (diketahui dari CI
   00:58, semua client).
-- **Vercel / Netlify / Render / Fly.io / Deno Deploy**: BELUM
-  DIUJI — butuh pembuatan akun (keputusan owner). Tidak ada klaim.
+- **Vercel**: TERUJI 19 Nov 2026 (16:44–16:49 WIB) — DITOLAK JUGA.
+  Fungsi `laras-proxy-vercel` (akun adiprmx-2915, Hobby gratis,
+  `https://laras-proxy-vercel-adiprmx.vercel.app/api/innertube/player`,
+  byte-only forward cermin proxy CF) mengembalikan LOGIN_REQUIRED
+  7/7 (WEB_REMIX + ANDROID_VR, 3x per klien, 0 format audio) pada
+  jendela yang sama saat egress Cloudflare juga ditolak; probe
+  koordinator 16:49 WIB mengonfirmasi (15,3 dtk, LOGIN_REQUIRED).
+  Fungsi sendiri SEHAT (HTTP 200 + JSON InnerTube utuh) — YouTube
+  yang menolak IP egress-nya. Pola menguat: YouTube menolak IP pusat
+  data secara luas di jendela buruk (CF, Vercel/AWS, GHA runner).
+  Failover CF → Vercel TIDAK dibangun (tidak menolong saat
+  dibutuhkan). Fungsi tetap live ($0) untuk uji ulang. Bukti lengkap:
+  `docs/vercel-egress.md`. Jebakan: Deployment Protection SSO aktif
+  default untuk proyek baru via API (dimatikan via PATCH hanya untuk
+  proyek ini); egress VM → Vercel lambat + flapping (15–23 dtk).
+- **Netlify / Render / Fly.io / Deno Deploy**: BELUM DIUJI —
+  Deno Deploy dievaluasi (riset saja, `docs/vercel-egress.md`):
+  plausibel tapi BELUM TERBUKTI (jaringan edge sendiri, 35+ region);
+  butuh akun owner via GitHub + verifikasi laporan "Deno joining
+  Cloudflare" (Okt 2026) dan outbound allowlist tier gratis untuk
+  youtube.com. Netlify/Render/Fly.io belum dievaluasi.
 - **Firebase Functions (proyek adip-promo, sudah ada)**: BELUM
   TERUJI — percobaan 18 Nov 2026 dibatasi waktu: CLI `firebase`
   tidak terinstal di VM; instalasi via npm/npx terblokir gelombang

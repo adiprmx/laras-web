@@ -30,6 +30,22 @@ export const CANARY_GAP_MS = 1000;
 /** Kunci hasil kanari di app_meta. */
 export const CANARY_RECORD_KEY = 'p6.canary.last';
 
+/**
+ * Jendela kesegaran sinyal kesehatan kanari untuk pemutar
+ * (hotfix resolve): 1 jam.
+ *
+ * Alasan: jendela buruk LOGIN_REQUIRED terukur 10+ menit; sinyal
+ * gagal yang berumur di bawah 1 jam masih bukti kuat jendela
+ * buruk sedang berjalan (atau baru saja berjalan), sehingga
+ * pemutar boleh melewati putaran cepat yang hampir pasti gagal.
+ * Sesudah 1 jam sinyal kedaluwarsa — jendela buruk sudah lewat
+ * atau memang bukan jendela buruk — supaya putaran cepat tidak
+ * dilewati selamanya gara-gara satu kegagalan lama. Kanari hanya
+ * jalan sekali sehari, jadi sinyal basi adalah keadaan normal
+ * di sebagian besar sesi; 'unknown' berarti perilaku normal.
+ */
+export const CANARY_HEALTH_FRESH_MS = 60 * 60 * 1000;
+
 export type CanaryStatus = 'ok' | 'degraded' | 'broken';
 
 export interface CanaryRecord {
@@ -53,6 +69,51 @@ export function computeCanaryStatus(
   if (failed >= 3 || streak >= 3) return 'broken';
   if (failed >= 1) return 'degraded';
   return 'ok';
+}
+
+/**
+ * Sinyal kesehatan kanari untuk pemutar (hotfix resolve):
+ * - 'recent-fail': cek terakhir gagal BARU-BARU INI karena
+ *   YouTube menolak (dominantCause 'refused') — pemutar boleh
+ *   menampilkan status "membatasi" lebih awal dan melewati
+ *   putaran cepat yang hampir pasti gagal.
+ * - 'recent-pass': cek terakhir lolos baru-baru ini — resolve
+ *   normal.
+ * - 'unknown': belum pernah cek, hasil sudah basi (> 1 jam),
+ *   atau gagal karena penyebab BUKAN penolakan (mis. satu lagu
+ *   kanari tidak punya format) — perilaku normal.
+ *
+ * Syarat 'refused' penting: kanari degraded karena satu lagu
+ * tidak tersedia bukanlah sinyal jendela buruk, jadi tidak
+ * boleh membuat pemutar melewati putaran cepat.
+ */
+export type CanaryHealthSignal = 'recent-fail' | 'recent-pass' | 'unknown';
+
+export function canaryHealthSignal(
+  record: CanaryRecord | null,
+  nowMs: number,
+): CanaryHealthSignal {
+  if (!record) return 'unknown';
+  if (nowMs - record.checkedAt >= CANARY_HEALTH_FRESH_MS) return 'unknown';
+  if (record.status === 'ok') return 'recent-pass';
+  if (record.dominantCause === 'refused') return 'recent-fail';
+  return 'unknown';
+}
+
+/**
+ * Baca rekaman kanari terakhir dari storage (dipakai checker +
+ * pemutar; pemutar tidak boleh mengimpor store ketahanan karena
+ * store itu mengimpor service pemutar — siklus impor).
+ * Gagal baca berarti tidak ada sinyal (null), bukan galat.
+ */
+export async function loadCanaryRecord(
+  storage: KeyValueStorage = createAppMetaStorage(),
+): Promise<CanaryRecord | null> {
+  try {
+    return parseCanaryRecord(await storage.get(CANARY_RECORD_KEY));
+  } catch {
+    return null;
+  }
 }
 
 /** Apakah cek kanari sudah jatuh tempo. */
@@ -131,11 +192,7 @@ export function createCanaryChecker(deps: CanaryCheckerDeps) {
   const online = deps.online ?? (() => navigator.onLine);
 
   async function loadRecord(): Promise<CanaryRecord | null> {
-    try {
-      return parseCanaryRecord(await storage.get(CANARY_RECORD_KEY));
-    } catch {
-      return null;
-    }
+    return loadCanaryRecord(storage);
   }
 
   async function saveRecord(record: CanaryRecord): Promise<void> {
