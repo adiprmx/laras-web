@@ -1,0 +1,27 @@
+# Blueprint Render untuk proxy InnerTube Laras (egress ketiga).
+#
+# Layanan ini dibuat via REST API Render (jalur utama, lihat
+# README.md di direktori ini), file ini mendokumentasikan
+# definisi layanan yang sama dalam format Blueprint, dan bisa
+# dipakai bila koordinator memilih jalur Blueprint.
+#
+# Repo: https://github.com/adiprmx/laras-web, branch main.
+# (Repo/branch tidak ditulis sebagai field di sini: Blueprint
+# terikat ke repo tempat file ini berada.)
+#
+# Catatan: buildCommand "true" adalah no-op yang disengaja.
+# server.js tanpa dependensi, jadi tidak ada `npm install`:
+# build tidak bisa gagal karena registry dan cold start hanya
+# waktu boot Node. package.json hanya dipakai Render untuk
+# deteksi runtime Node + pin versi (engines node 24.x).
+services:
+  - type: web
+    name: laras-proxy-render
+    env: node
+    plan: free
+    region: oregon
+    rootDir: workers/render-proxy
+    buildCommand: "true"
+    startCommand: node server.js
+    autoDeploy: true
+    healthCheckPath: /healthz

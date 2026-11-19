@@ -1,0 +1,1 @@
+{"description":"Proxy InnerTube player Laras via Render (egress ketiga). Tanpa dependensi.","engines":{"node":"24.x"},"main":"server.js","name":"laras-proxy-render","private":true,"scripts":{"start":"node server.js"},"version":"1.0.0"}
