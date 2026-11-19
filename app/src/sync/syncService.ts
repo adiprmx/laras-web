@@ -37,6 +37,10 @@ import { useEqualizerStore } from '../store/equalizer';
 import { SYNC_PUSH_BATCH_SIZE } from './config';
 import { getDeviceId } from './deviceId';
 import {
+  currentSyncEpoch,
+  isSyncEpochCurrent,
+} from './syncEpoch';
+import {
   getSettingsMarkers,
   setSettingsAppliedAt,
 } from './settingsMarkers';
@@ -79,21 +83,34 @@ function chunk<T>(arr: T[], size: number): T[][] {
 export async function applyPull(
   library: LibraryService,
   pull: PullData,
+  epoch: number = currentSyncEpoch(),
 ): Promise<void> {
+  // R18: berhenti tanpa menulis apa pun bila generasi berubah
+  // (wipe dimulai di tengah putaran). Cek diletakkan TEPAT
+  // sebelum tiap penulisan, bukan di awal iterasi: baca (await)
+  // di antara cek dan tulis memberi jendela bagi wipe untuk
+  // menghapus database di tengah jalan, dan tulis berikutnya
+  // akan mendarat di database segar.
+  const stale = () => !isSyncEpochCurrent(epoch);
   // 1) Playlist dulu (item butuh playlist-nya ada).
   for (const p of pull.playlists) {
     const local = await library.playlistByClientId(p.clientId);
     if (p.deletedAt !== null) {
-      if (local) await library.deletePlaylist(local.id, { quiet: true });
+      if (local) {
+        if (stale()) return;
+        await library.deletePlaylist(local.id, { quiet: true });
+      }
       continue;
     }
     if (local) {
+      if (stale()) return;
       await library.applyRemotePlaylist(local.id, {
         name: p.nama,
         description: p.deskripsi,
         updatedAt: p.updatedAt,
       });
     } else {
+      if (stale()) return;
       await library.createPlaylistFromRemote({
         clientId: p.clientId,
         name: p.nama,
@@ -107,31 +124,39 @@ export async function applyPull(
     const playlist = await library.playlistByClientId(item.playlistClientId);
     if (!playlist) continue; // Playlist-nya belum ada / sudah dihapus.
     if (item.deletedAt !== null) {
+      if (stale()) return;
       await library.removeSongFromPlaylist(playlist.id, item.videoId, {
         quiet: true,
       });
       continue;
     }
+    if (stale()) return;
     await library.ensureRemoteSong(item.videoId, item.title, item.artist);
+    if (stale()) return;
     await library.insertPlaylistItemAt(playlist.id, item.videoId, item.posisi);
   }
   // 3) Suka.
   for (const like of pull.likes) {
     if (like.deletedAt !== null) {
       try {
+        if (stale()) return;
         await library.setLiked(like.videoId, false, { quiet: true });
       } catch {
         // Lagu tidak ada di lokal: tidak ada yang perlu dibatalkan.
       }
       continue;
     }
+    if (stale()) return;
     await library.ensureRemoteSong(like.videoId, like.title, like.artist);
+    if (stale()) return;
     await library.setLiked(like.videoId, true, { quiet: true });
   }
   // 4) Riwayat (dedup per lagu+waktu).
   for (const h of pull.history) {
+    if (stale()) return;
     await library.ensureRemoteSong(h.videoId, h.title, h.artist);
     if (await library.hasPlayEvent(h.videoId, h.playedAt)) continue;
+    if (stale()) return;
     await library.recordPlay({
       songId: h.videoId,
       timestamp: h.playedAt,
@@ -144,9 +169,11 @@ export async function applyPull(
     if (pull.settings.updatedAt > appliedAt) {
       const payload = parseSettingsPayload(pull.settings.settingsJson);
       if (payload) {
+        if (stale()) return;
         await getPlayerService().applySyncedEqSettings(payload.eq);
         const lyrics = await getLyricsService();
         await lyrics.setEnabled(payload.lyricsEnabled, { quiet: true });
+        if (stale()) return;
         await setSettingsAppliedAt(pull.settings.updatedAt);
       }
     }
@@ -303,13 +330,22 @@ export async function collectPushBody(
 export async function syncNow(
   deps: SyncDeps = defaultSyncDeps,
 ): Promise<{ serverTime: number; pushed: number }> {
+  // R18: tangkap generasi di awal; bila wipe dimulai di tengah
+  // putaran, berhenti sebelum dorong dan sebelum penanda sukses
+  // (keduanya menulis ke database — dorong menulis clientId,
+  // penanda menulis meta — dan tidak boleh mendarat di database
+  // segar sesudah wipe).
+  const epoch = currentSyncEpoch();
   const library = await getLibraryService();
   const deviceId = await getDeviceId();
 
   // 1) Tarik.
   const since = Number((await library.getMeta(SYNC_LAST_PULL_KEY)) ?? 0);
   const pull = await deps.pull(Number.isFinite(since) ? since : 0);
-  await applyPull(library, pull);
+  await applyPull(library, pull, epoch);
+  if (!isSyncEpochCurrent(epoch)) {
+    return { serverTime: pull.serverTime, pushed: 0 };
+  }
 
   // 2) Dorong (batch 100 per koleksi).
   const body = await collectPushBody(library, deviceId);
@@ -336,6 +372,10 @@ export async function syncNow(
   let serverTime = pull.serverTime;
   let pushed = 0;
   for (let i = 0; i < rounds; i++) {
+    // R18: wipe di tengah dorong — berhenti, jangan lanjut ronde.
+    if (!isSyncEpochCurrent(epoch)) {
+      return { serverTime, pushed };
+    }
     const roundBody: PushBody = {
       deviceId,
       playlists: chunks.playlists[i],
@@ -359,6 +399,12 @@ export async function syncNow(
   }
 
   // 3) Penanda sukses (hanya bila SEMUA dorong berhasil).
+  // R18: cek sekali lagi — penanda menulis meta ke database,
+  // dan penanda basi di database segar akan membuat tarik
+  // pertama sesudah masuk lagi melewatkan perubahan server.
+  if (!isSyncEpochCurrent(epoch)) {
+    return { serverTime, pushed };
+  }
   await library.deleteTombstones(tombstones.map((t) => t.key));
   await library.setMeta(SYNC_LAST_PULL_KEY, String(serverTime));
   if (body.history) {

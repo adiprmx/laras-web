@@ -23,11 +23,19 @@
  * pengguna sedang masuk. Tanpa logout, sesi server tetap hidup
  * dan sync otomatis 20 detik sesudah reload mengembalikan
  * seluruh data dari server — wipe jadi tidak ada artinya.
+ *
+ * PENTING (Blue 4, Red 4 R18): wipeAllData menaikkan generasi
+ * sinkronisasi sebagai BARIS PERTAMA (sinkron, sebelum await
+ * apa pun) supaya putaran sync yang sedang berjalan berhenti
+ * menulis sebelum database dihapus. Tanpa ini, applyPull yang
+ * sudah diotorisasi sebelum logout bisa menulis ke database
+ * segar sesudah deleteDatabase().
  */
 import { deleteDatabase } from '../data/database';
 import { resetLibraryService } from '../data/library';
 import { getDownloadManager } from '../downloads/downloadManager';
 import { getPlayerService } from '../player/service';
+import { invalidateSyncEpoch } from '../sync/syncEpoch';
 
 /** Hasil penghapusan (untuk log + tes; UI tidak menampilkannya). */
 export interface WipeResult {
@@ -98,6 +106,10 @@ const defaultDeps: WipeDeps = {
 export async function wipeAllData(
   deps: Partial<WipeDeps> = {},
 ): Promise<WipeResult> {
+  // R18: batalkan putaran sync yang sedang berjalan DULU,
+  // sinkron, sebelum await apa pun — applyPull memeriksa
+  // generasi sebelum tiap penulisan dan berhenti bila berubah.
+  invalidateSyncEpoch();
   const d: WipeDeps = { ...defaultDeps, ...deps };
   const result: WipeResult = {
     dbDeleted: false,

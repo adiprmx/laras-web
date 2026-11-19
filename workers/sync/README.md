@@ -16,6 +16,16 @@ spike S8 yang sudah terbukti (`docs/spikes/s8-s10-data.md`).
 | GET | `/api/sync/pull?since=<ms>` | tarik perubahan sejak `since` |
 | POST | `/api/sync/push` | dorong perubahan (body maks 1 MB, 100 entri/koleksi) |
 
+Batas total per pengguna (arsitektur §4.3, ditegakkan server
+saat push sejak Blue 4): maks 100 playlist, 1.000 item per
+playlist, 10.000 suka, 1.000 riwayat. Kelebihan dilewati per
+koleksi dan dilaporkan di respons push (`skippedOverLimit` +
+`limits`); update entri lama dan penghapusan tidak pernah
+dibatasi. Tombstone memakai UPDATE (bukan INSERT) sehingga
+tidak pernah menambah baris. Tidak ada migrasi baru untuk ini:
+semua COUNT tercakup indeks 0001 (terverifikasi EXPLAIN QUERY
+PLAN di SQLite lokal — semua memakai covering index).
+
 ## Checklist deploy (koordinator)
 
 1. **Migrasi D1** (urutan penting, database `laras-web-sync`):
@@ -64,7 +74,9 @@ spike S8 yang sudah terbukti (`docs/spikes/s8-s10-data.md`).
   request diizinkan (layanan tetap jalan, bukan mati total).
 - State OAuth sekali pakai: hash state disimpan di D1 saat login
   (tabel `oauth_states`, TTL 10 menit) dan dihapus saat callback
-  memakainya. State yang sudah dipakai atau tidak dikenal ditolak.
+  memakainya — satu DELETE berkondisi atomik (`meta.changes`),
+  jadi dua callback bersamaan dengan state yang sama tidak bisa
+  sama-sama lolos. State yang sudah dipakai atau tidak dikenal ditolak.
 - `ALLOWED_ORIGINS` produksi hanya domain app (tanpa localhost).
   Dev lokal: `wrangler dev --env dev` (localhost hanya di
   `[env.dev.vars]` di `wrangler.toml`).

@@ -111,6 +111,22 @@ export interface PushBody {
 export interface PushData {
   serverTime: number;
   applied: number;
+  /** Entri yang ditolak karena bukan milik pendorong (R11). */
+  skippedNotOwned?: number;
+  /** Entri yang dilewati karena melewati batas total per pengguna (S7). */
+  skippedOverLimit?: {
+    playlists: number;
+    playlistItems: number;
+    likes: number;
+    history: number;
+  };
+  /** Batas total server (arsitektur §4.3). */
+  limits?: {
+    playlists: number;
+    itemsPerPlaylist: number;
+    likes: number;
+    history: number;
+  };
 }
 
 interface Envelope<T> {

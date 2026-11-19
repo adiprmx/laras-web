@@ -19,6 +19,13 @@ import { strings } from '../../strings/id';
 import { fetchLogout } from '../../sync/syncClient';
 import { useSyncStore } from '../../sync/syncStore';
 
+/**
+ * Batas tunggu refreshAuth saat status akun masih `unknown`
+ * (R17): sesudah ini, status dianggap tidak bisa dipastikan
+ * dan pengguna diberi peringatan, bukan dibiarkan menunggu.
+ */
+export const WIPE_REFRESH_TIMEOUT_MS = 10_000;
+
 export default function WipeFlow({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState<1 | 2>(1);
   const [exporting, setExporting] = useState(false);
@@ -26,7 +33,9 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
   const [wiping, setWiping] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutFailed, setLogoutFailed] = useState(false);
+  const [statusUnknown, setStatusUnknown] = useState(false);
   const syncStatus = useSyncStore((s) => s.status);
+  const refreshAuth = useSyncStore((s) => s.refreshAuth);
 
   const handleSaveFirst = async () => {
     if (exporting) return;
@@ -63,11 +72,37 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
 
   const handleWipe = async () => {
     if (wiping || loggingOut) return;
+    // R17: status `unknown` berarti sesi belum terkonfirmasi
+    // (refreshAuth belum selesai, atau gagal karena jaringan).
+    // Jangan hapus diam-diam: tunggu refreshAuth dulu (maks
+    // 10 detik), lalu putuskan dari status akhirnya.
+    let status = syncStatus;
+    if (status === 'unknown') {
+      setLoggingOut(true);
+      try {
+        await Promise.race([
+          refreshAuth(),
+          new Promise((resolve) =>
+            setTimeout(resolve, WIPE_REFRESH_TIMEOUT_MS),
+          ),
+        ]);
+      } finally {
+        setLoggingOut(false);
+      }
+      status = useSyncStore.getState().status;
+      if (status === 'unknown') {
+        // Tetap tidak diketahui (offline/gagal): perlakukan
+        // seperti jalur logout-gagal R15 — beri tahu pengguna
+        // datanya bisa kembali, tawarkan coba lagi / tetap hapus.
+        setStatusUnknown(true);
+        return;
+      }
+    }
     // R15: bila sedang masuk, akhiri sesi server DULU (logout)
     // sebelum menghapus data lokal. Tanpa ini, cookie sesi
     // HttpOnly bertahan dan sync otomatis 20 detik sesudah
     // reload mengembalikan seluruh data dari server.
-    if (syncStatus === 'signed-in') {
+    if (status === 'signed-in') {
       setLoggingOut(true);
       try {
         await fetchLogout();
@@ -83,6 +118,10 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
     }
     await doWipe();
   };
+
+  // Kedua jalur peringatan (logout gagal / status tak diketahui)
+  // memakai tombol yang sama: coba keluar lagi / tetap hapus.
+  const showWarning = logoutFailed || statusUnknown;
 
   return (
     <div
@@ -159,7 +198,7 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
             <p className="mt-2 text-sm leading-relaxed text-zinc-400">
               {strings.backupWipeBody2}
             </p>
-            {syncStatus === 'signed-in' && !logoutFailed ? (
+            {syncStatus === 'signed-in' && !showWarning ? (
               <p
                 data-testid="wipe-sync-note"
                 className="mt-2 text-sm leading-relaxed text-zinc-300"
@@ -167,12 +206,14 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
                 {strings.backupWipeSyncNote}
               </p>
             ) : null}
-            {logoutFailed ? (
+            {showWarning ? (
               <p
                 data-testid="wipe-logout-failed"
                 className="mt-2 text-sm leading-relaxed text-amber-200"
               >
-                {strings.backupWipeLogoutFailed}
+                {statusUnknown
+                  ? strings.backupWipeUnknownStatus
+                  : strings.backupWipeLogoutFailed}
               </p>
             ) : null}
             <div className="mt-5 flex flex-wrap justify-end gap-2">
@@ -185,7 +226,7 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
               >
                 {strings.cancel}
               </button>
-              {logoutFailed ? (
+              {showWarning ? (
                 <>
                   <button
                     type="button"

@@ -4,7 +4,7 @@
  * jaringan diganti stub SyncDeps (tanpa fetch sungguhan).
  */
 import 'fake-indexeddb/auto';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   LARAS_DB_NAME,
   deleteDatabase,
@@ -19,6 +19,10 @@ import { resetLyricsService } from '../lyrics/lyricsService';
 import { DEFAULT_EQ_SETTINGS, EQ_PRESET_GAINS } from '../player/equalizer';
 import { useEqualizerStore } from '../store/equalizer';
 import { getDeviceId } from './deviceId';
+import {
+  currentSyncEpoch,
+  invalidateSyncEpoch,
+} from './syncEpoch';
 import {
   getSettingsMarkers,
   setSettingsAppliedAt,
@@ -296,6 +300,88 @@ describe('syncService', () => {
       const views = await library.songsByIds(['vid-1']);
       expect(views).toHaveLength(0);
     });
+
+    it('S7: tarik playlist ke-101 ditolak saat lokal sudah 100 playlist', async () => {
+      for (let i = 0; i < 100; i++) {
+        await library.createPlaylist(`Lokal ${i}`);
+      }
+      await applyPull(library, {
+        ...emptyPull(),
+        playlists: [
+          {
+            clientId: 'dev-x:lebih',
+            nama: 'Kelebihan',
+            deskripsi: null,
+            updatedAt: 9000,
+            deletedAt: null,
+          },
+        ],
+      });
+      expect(await library.playlistByClientId('dev-x:lebih')).toBeNull();
+      expect((await library.allPlaylists()).length).toBe(100);
+    });
+
+    it('S7: tarik playlist ke-100 diterima saat lokal 99', async () => {
+      for (let i = 0; i < 99; i++) {
+        await library.createPlaylist(`Lokal ${i}`);
+      }
+      await applyPull(library, {
+        ...emptyPull(),
+        playlists: [
+          {
+            clientId: 'dev-x:100',
+            nama: 'Ke-100',
+            deskripsi: null,
+            updatedAt: 9000,
+            deletedAt: null,
+          },
+        ],
+      });
+      expect(await library.playlistByClientId('dev-x:100')).not.toBeNull();
+      expect((await library.allPlaylists()).length).toBe(100);
+    });
+
+    it('R18: applyPull berhenti menulis bila generasi berubah di tengah jalan', async () => {
+      // Library stub: baca playlist kedua menggantung supaya tes
+      // bisa membatalkan (wipe) di tengah applyPull.
+      const created: string[] = [];
+      const gate: { release: (() => void) | null } = { release: null };
+      let readCount = 0;
+      const stubLibrary = {
+        playlistByClientId: async () => {
+          readCount += 1;
+          if (readCount === 2) {
+            await new Promise<void>((resolve) => {
+              gate.release = resolve;
+            });
+          }
+          return null;
+        },
+        createPlaylistFromRemote: async (opts: { clientId: string }) => {
+          created.push(opts.clientId);
+          return created.length;
+        },
+      } as unknown as LibraryService;
+      const pull: PullData = {
+        ...emptyPull(),
+        playlists: [1, 2, 3].map((n) => ({
+          clientId: `dev-x:${n}`,
+          nama: `Playlist ${n}`,
+          deskripsi: null,
+          updatedAt: 9000,
+          deletedAt: null,
+        })),
+      };
+      const running = applyPull(stubLibrary, pull, currentSyncEpoch());
+      await vi.waitFor(() => expect(gate.release).not.toBeNull());
+      // Wipe dimulai saat baca kedua masih menggantung.
+      invalidateSyncEpoch();
+      gate.release?.();
+      await running;
+      // Hanya playlist pertama yang sempat dibuat; cek generasi
+      // sesudah baca kedua membatalkan sisanya.
+      expect(created).toEqual(['dev-x:1']);
+    });
   });
 
   describe('collectPushBody', () => {
@@ -509,5 +595,41 @@ describe('syncService', () => {
       expect(pushed[0].likes).toHaveLength(100);
       expect(pushed[1].likes).toHaveLength(20);
     }, 15000);
+
+    it('R18: syncNow yang dibatalkan wipe tidak mendorong dan tidak menulis penanda', async () => {
+      const id = await library.createPlaylist('Lokal');
+      await seedSong(library, 'vid-1', 'Lagu Satu');
+      await library.addSongToPlaylist(id, 'vid-1');
+      const pushed: PushBody[] = [];
+      const deps = {
+        pull: async () => {
+          // Wipe dimulai saat tarik sedang berjalan.
+          invalidateSyncEpoch();
+          return {
+            ...emptyPull(20_000),
+            playlists: [
+              {
+                clientId: 'dev-x:7',
+                nama: 'Dari Server',
+                deskripsi: null,
+                updatedAt: 9000,
+                deletedAt: null,
+              },
+            ],
+          };
+        },
+        push: async (body: PushBody) => {
+          pushed.push(body);
+          return { serverTime: 21_000, applied: 1 };
+        },
+      };
+      const result = await syncNow(deps);
+      expect(result.pushed).toBe(0);
+      expect(pushed).toHaveLength(0);
+      // Tarik tidak diterapkan (generasi sudah berubah).
+      expect(await library.playlistByClientId('dev-x:7')).toBeNull();
+      // Penanda sukses tidak ditulis ke database.
+      expect(await library.getMeta(SYNC_LAST_PULL_KEY)).toBeNull();
+    });
   });
 });

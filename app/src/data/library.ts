@@ -81,6 +81,14 @@ export const MEANINGFUL_PLAY_MS = 30000;
 /** Batas lagu per playlist (arsitektur §5.4). */
 export const MAX_PLAYLIST_SONGS = 1000;
 
+/**
+ * Batas playlist sinkron per pengguna (arsitektur §4.3, S7):
+ * tarik dari server tidak pernah membuat playlist ke-101 di
+ * perangkat ini. Sama dengan batas server; pembuatan lokal
+ * manual tidak dibatasi angka ini.
+ */
+export const MAX_SYNC_PLAYLISTS = 100;
+
 /** Batas ukuran satu kolom lirik (port R3-L1 APK). */
 export const MAX_LYRICS_BYTES = 256 * 1024;
 
@@ -3007,14 +3015,19 @@ export class LibraryService {
 
   /**
    * Buat playlist dari data server (clientId sudah ditentukan
-   * server). Mengembalikan id lokal baru.
+   * server). Mengembalikan id lokal baru, atau null bila
+   * perangkat sudah punya 100 playlist (batas sinkron §4.3,
+   * S7 lapis kedua — pull dari server yang membengkak tidak
+   * boleh membengkakkan IndexedDB tanpa batas).
    */
   async createPlaylistFromRemote(opts: {
     clientId: string;
     name: string;
     description: string | null;
     updatedAt: number;
-  }): Promise<number> {
+  }): Promise<number | null> {
+    const count = await this.db.playlists.count();
+    if (count >= MAX_SYNC_PLAYLISTS) return null;
     const id = await this.db.playlists.add({
       name: opts.name,
       description: opts.description,

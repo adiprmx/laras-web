@@ -41,7 +41,13 @@
 // Batas yang ditegakkan:
 //   body push maks 1 MB, maks 100 entri per koleksi per push,
 //   settings_json maks 4 KB (CHECK di D1 + cek eksplisit),
-//   tarik maks 1000 baris per koleksi, rate limit D1 (fail-open).
+//   tarik maks 1000 baris per koleksi, rate limit D1 (fail-open),
+//   batas TOTAL per pengguna (arsitektur §4.3, S7): maks 100
+//   playlist, 1.000 item per playlist, 10.000 suka, 1.000
+//   riwayat — dihitung COUNT sebelum upsert, kelebihan
+//   dilewati per koleksi dan dilaporkan di respons push.
+//   Tombstone memakai UPDATE (bukan INSERT) sehingga tidak
+//   pernah menambah baris dan tidak pernah ditolak batas.
 // Tanpa log isi: Worker tidak mencatat body, token, atau data
 // pengguna; hanya metrik agregat di console (jumlah request
 // per endpoint per jam) bila dibutuhkan.
@@ -61,6 +67,13 @@ const MAX_PUSH_ENTRIES = 100;
 const MAX_PULL_ROWS = 1000;
 const MAX_SETTINGS_BYTES = 4096;
 const MAX_META_CHARS = 500;
+// Batas TOTAL per pengguna (arsitektur §4.3, S7): tanpa ini
+// satu akun bisa membakar kuota tulis D1 bersama (100.000
+// baris/hari) dalam <5 menit lewat push 700 baris x 30/mnt.
+const MAX_PLAYLISTS_PER_USER = 100;
+const MAX_ITEMS_PER_PLAYLIST = 1000;
+const MAX_LIKES_PER_USER = 10000;
+const MAX_HISTORY_PER_USER = 1000;
 const RATE_AUTH_PER_MIN = 10;
 const RATE_SYNC_PER_MIN = 30;
 const RATE_ME_PER_MIN = 60;
@@ -362,9 +375,14 @@ async function storeOAuthState(env, state, provider) {
 
 /**
  * Pakai satu state: true bila state dikenal, provider cocok,
- * belum kedaluwarsa, dan belum pernah dipakai (baris dihapus
- * saat dipakai). State tak dikenal/kedaluwarsa/sudah dipakai
- * mengembalikan false. Galat D1 (mis. tabel belum termigrasi
+ * belum kedaluwarsa, dan belum pernah dipakai. Konsumsi ATOMIK
+ * (I19): satu DELETE berkondisi — dua callback bersamaan dengan
+ * state yang sama tidak bisa sama-sama lolos, karena hanya
+ * DELETE pertama yang mengubah 1 baris (`meta.changes === 1`).
+ * State tak dikenal/kedaluwarsa/salah provider/sudah dipakai
+ * mengubah 0 baris dan mengembalikan false. Baris kedaluwarsa
+ * tidak ikut terhapus di sini; sapu login (storeOAuthState)
+ * yang membersihkannya. Galat D1 (mis. tabel belum termigrasi
  * atau D1 mati sesaat) fail-open ke true supaya login tidak
  * mati total — rate limit callback tetap melindungi kuota.
  * Koordinator WAJIB menerapkan migrasi 0004 sebelum deploy
@@ -374,25 +392,15 @@ async function consumeOAuthState(env, state, provider) {
   if (!env.DB) return false;
   const hash = await sha256Hex(state);
   try {
-    const row = await env.DB.prepare(
-      'SELECT provider, expires_at FROM oauth_states WHERE state_hash = ?',
+    const res = await env.DB.prepare(
+      'DELETE FROM oauth_states WHERE state_hash = ? AND provider = ? AND expires_at > ?',
     )
-      .bind(hash)
-      .first();
-    if (!row) return false;
-    if (row.provider !== provider || row.expires_at <= Date.now()) {
-      await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ?')
-        .bind(hash)
-        .run();
-      return false;
-    }
-    await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ?')
-      .bind(hash)
+      .bind(hash, provider, Date.now())
       .run();
-    return true;
+    return res.meta?.changes === 1;
   } catch (e) {
     console.warn(
-      'oauth state: gagal baca (fail-open, login dilanjutkan):',
+      'oauth state: gagal pakai (fail-open, login dilanjutkan):',
       e instanceof Error ? e.message : 'unknown',
     );
     return true;
@@ -775,6 +783,82 @@ function validatePushBody(body) {
   return null;
 }
 
+// ------------------------------------------------------------------
+// Batas total per pengguna (S7, arsitektur §4.3)
+//
+// COUNT adalah baca D1 (kuota baca 5 juta baris/hari, jauh di
+// atas tulis) dan semuanya tercakup indeks yang sudah ada di
+// 0001 (idx_playlists_user_updated, idx_likes_user_updated,
+// idx_history_user_played, idx_items_playlist) — tidak butuh
+// migrasi baru. Satu COUNT per koleksi per push; query kunci
+// yang sudah ada hanya jalan bila headroom tidak cukup untuk
+// seluruh entri push (kasus umum tidak kena query tambahan).
+// ------------------------------------------------------------------
+
+/**
+ * Jumlah baris milik pengguna di satu tabel, TERMASUK
+ * tombstone: tombstone tetap baris yang memakan kuota, dan
+ * menghitungnya menutup putaran hapus-buat-ulang yang
+ * membakar kuota tulis tanpa henti.
+ */
+async function countUserRows(db, table, userId) {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE user_id = ?`)
+    .bind(userId)
+    .first();
+  return row ? Number(row.n) : 0;
+}
+
+/** Jumlah item per playlist untuk playlist-playlist yang disentuh push. */
+async function countItemsPerPlaylist(db, playlistIds) {
+  const out = new Map();
+  if (playlistIds.length === 0) return out;
+  const marks = playlistIds.map(() => '?').join(', ');
+  const rows = await db
+    .prepare(
+      `SELECT playlist_id, COUNT(*) AS n FROM sync_playlist_items WHERE playlist_id IN (${marks}) GROUP BY playlist_id`,
+    )
+    .bind(...playlistIds)
+    .all();
+  for (const r of rows.results || []) {
+    out.set(r.playlist_id, Number(r.n));
+  }
+  return out;
+}
+
+/**
+ * Saring entri push ke yang muat dalam batas total. Bila
+ * headroom cukup untuk semua entri (kasus umum), tidak ada
+ * query tambahan. Bila tidak cukup, ambil kunci yang sudah ada
+ * supaya UPDATE entri lama tidak dihitung sebagai penambahan:
+ * hanya entri BARU yang memakan headroom. Duplikat kunci dalam
+ * satu push dihitung sekali (yang kedua adalah update).
+ * Mengembalikan { kept, skipped }.
+ */
+async function capNewEntries({ count, cap, entries, keyOf, fetchKeys }) {
+  const headroom = cap - count;
+  if (headroom >= entries.length) return { kept: entries, skipped: 0 };
+  const existing = new Set(await fetchKeys());
+  const kept = [];
+  let room = headroom;
+  let skipped = 0;
+  for (const e of entries) {
+    const key = keyOf(e);
+    if (existing.has(key)) {
+      kept.push(e); // Update entri lama: bukan penambahan.
+      continue;
+    }
+    if (room > 0) {
+      room -= 1;
+      existing.add(key);
+      kept.push(e);
+    } else {
+      skipped += 1;
+    }
+  }
+  return { kept, skipped };
+}
+
 async function handlePush(env, request, user) {
   const declaredLen = Number(request.headers.get('Content-Length') || 0);
   if (declaredLen > MAX_BODY_BYTES) {
@@ -801,6 +885,121 @@ async function handlePush(env, request, user) {
   const now = Date.now();
   const deviceId = body.deviceId;
   const stmts = [];
+  // S7: tegakkan batas TOTAL per pengguna (§4.3) SEBELUM
+  // membangun pernyataan upsert. Kelebihan DILEWATI per
+  // koleksi dan dilaporkan di respons (bukan gagal diam-diam,
+  // bukan gagal total — sisa push yang sah tetap diterapkan).
+  // Tombstone tidak pernah ditolak batas: tombstone memakai
+  // UPDATE yang hanya menyentuh baris yang sudah ada (lihat
+  // bawah), jadi tidak bisa menambah baris.
+  const skippedOverLimit = {
+    playlists: 0,
+    playlistItems: 0,
+    likes: 0,
+    history: 0,
+  };
+  const playlistsIn = body.playlists || [];
+  const itemsIn = body.playlistItems || [];
+  const likesIn = body.likes || [];
+  const historyIn = body.history || [];
+  const [playlistCount, likesCount, historyCount, itemCounts] =
+    await Promise.all([
+      playlistsIn.length > 0
+        ? countUserRows(db, 'sync_playlists', user.id)
+        : 0,
+      likesIn.length > 0 ? countUserRows(db, 'sync_likes', user.id) : 0,
+      historyIn.length > 0
+        ? countUserRows(db, 'sync_history', user.id)
+        : 0,
+      itemsIn.length > 0
+        ? countItemsPerPlaylist(db, [
+            ...new Set(itemsIn.map((i) => i.playlistClientId)),
+          ])
+        : new Map(),
+    ]);
+  if (playlistsIn.length > 0) {
+    const { kept, skipped } = await capNewEntries({
+      count: playlistCount,
+      cap: MAX_PLAYLISTS_PER_USER,
+      entries: playlistsIn,
+      keyOf: (p) => p.clientId,
+      fetchKeys: async () => {
+        const rows = await db
+          .prepare('SELECT client_id FROM sync_playlists WHERE user_id = ?')
+          .bind(user.id)
+          .all();
+        return (rows.results || []).map((r) => r.client_id);
+      },
+    });
+    body.playlists = kept;
+    skippedOverLimit.playlists = skipped;
+  }
+  if (itemsIn.length > 0) {
+    // Batas 1.000 item berlaku PER playlist, bukan total.
+    const byPlaylist = new Map();
+    for (const item of itemsIn) {
+      const list = byPlaylist.get(item.playlistClientId) || [];
+      list.push(item);
+      byPlaylist.set(item.playlistClientId, list);
+    }
+    const keptItems = [];
+    for (const [playlistId, entries] of byPlaylist) {
+      const { kept, skipped } = await capNewEntries({
+        count: itemCounts.get(playlistId) || 0,
+        cap: MAX_ITEMS_PER_PLAYLIST,
+        entries,
+        keyOf: (i) => i.videoId,
+        fetchKeys: async () => {
+          const rows = await db
+            .prepare(
+              'SELECT video_id FROM sync_playlist_items WHERE playlist_id = ?',
+            )
+            .bind(playlistId)
+            .all();
+          return (rows.results || []).map((r) => r.video_id);
+        },
+      });
+      keptItems.push(...kept);
+      skippedOverLimit.playlistItems += skipped;
+    }
+    body.playlistItems = keptItems;
+  }
+  if (likesIn.length > 0) {
+    const { kept, skipped } = await capNewEntries({
+      count: likesCount,
+      cap: MAX_LIKES_PER_USER,
+      entries: likesIn,
+      keyOf: (l) => l.videoId,
+      fetchKeys: async () => {
+        const rows = await db
+          .prepare('SELECT video_id FROM sync_likes WHERE user_id = ?')
+          .bind(user.id)
+          .all();
+        return (rows.results || []).map((r) => r.video_id);
+      },
+    });
+    body.likes = kept;
+    skippedOverLimit.likes = skipped;
+  }
+  if (historyIn.length > 0) {
+    const { kept, skipped } = await capNewEntries({
+      count: historyCount,
+      cap: MAX_HISTORY_PER_USER,
+      entries: historyIn,
+      keyOf: (h) => `${h.videoId}|${h.playedAt}`,
+      fetchKeys: async () => {
+        const rows = await db
+          .prepare(
+            'SELECT video_id, played_at FROM sync_history WHERE user_id = ?',
+          )
+          .bind(user.id)
+          .all();
+        return (rows.results || []).map((r) => `${r.video_id}|${r.played_at}`);
+      },
+    });
+    body.history = kept;
+    skippedOverLimit.history = skipped;
+  }
   // R11: verifikasi kepemilikan playlist untuk item. Playlist
   // yang sudah ada di D1 harus milik pendorong; playlist baru
   // (belum ada di D1) diizinkan hanya bila ikut dibuat di push
@@ -838,13 +1037,19 @@ async function handlePush(env, request, user) {
         .bind(p.clientId, user.id, p.clientId, p.nama, p.deskripsi ?? null, deviceId, now),
     );
   }
+  // S7: tombstone memakai UPDATE (bukan INSERT ... ON
+  // CONFLICT): tombstone untuk baris yang tidak ada adalah
+  // no-op, bukan baris baru — penghapusan tidak pernah
+  // menambah baris, tidak pernah ditolak batas total, dan
+  // tidak bisa dipakai membuat baris tombstone tanpa batas.
+  // Semantik LWW + kepemilikan R11 dipertahankan di WHERE.
   for (const d of body.deletedPlaylists || []) {
     stmts.push(
       db
         .prepare(
-          'INSERT INTO sync_playlists (id, user_id, client_id, nama, deskripsi, device_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at WHERE (excluded.updated_at > sync_playlists.updated_at OR (excluded.updated_at = sync_playlists.updated_at AND excluded.device_id > sync_playlists.device_id)) AND sync_playlists.user_id = excluded.user_id',
+          'UPDATE sync_playlists SET device_id = ?, updated_at = ?, deleted_at = ? WHERE id = ? AND user_id = ? AND (updated_at < ? OR (updated_at = ? AND device_id < ?))',
         )
-        .bind(d.clientId, user.id, d.clientId, '', null, deviceId, now, now),
+        .bind(deviceId, now, now, d.clientId, user.id, now, now, deviceId),
     );
   }
   for (const item of body.playlistItems || []) {
@@ -868,9 +1073,9 @@ async function handlePush(env, request, user) {
     stmts.push(
       db
         .prepare(
-          'INSERT INTO sync_playlist_items (playlist_id, video_id, posisi, added_at, device_id, updated_at, deleted_at, user_id) VALUES (?, ?, 0, ?, ?, ?, ?, ?) ON CONFLICT(playlist_id, video_id) DO UPDATE SET device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at, user_id = excluded.user_id WHERE excluded.updated_at > sync_playlist_items.updated_at OR (excluded.updated_at = sync_playlist_items.updated_at AND excluded.device_id > sync_playlist_items.device_id)',
+          'UPDATE sync_playlist_items SET device_id = ?, updated_at = ?, deleted_at = ? WHERE playlist_id = ? AND video_id = ? AND user_id = ? AND (updated_at < ? OR (updated_at = ? AND device_id < ?))',
         )
-        .bind(d.playlistClientId, d.videoId, now, deviceId, now, now, user.id),
+        .bind(deviceId, now, now, d.playlistClientId, d.videoId, user.id, now, now, deviceId),
     );
   }
   for (const like of body.likes || []) {
@@ -886,9 +1091,9 @@ async function handlePush(env, request, user) {
     stmts.push(
       db
         .prepare(
-          'INSERT INTO sync_likes (user_id, video_id, liked_at, device_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, video_id) DO UPDATE SET device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at WHERE excluded.updated_at > sync_likes.updated_at OR (excluded.updated_at = sync_likes.updated_at AND excluded.device_id > sync_likes.device_id)',
+          'UPDATE sync_likes SET device_id = ?, updated_at = ?, deleted_at = ? WHERE user_id = ? AND video_id = ? AND (updated_at < ? OR (updated_at = ? AND device_id < ?))',
         )
-        .bind(user.id, d.videoId, now, deviceId, now, now),
+        .bind(deviceId, now, now, user.id, d.videoId, now, now, deviceId),
     );
   }
   for (const h of body.history || []) {
@@ -920,7 +1125,21 @@ async function handlePush(env, request, user) {
   if (stmts.length > 0) {
     await db.batch(stmts);
   }
-  return jsonOk({ serverTime: now, applied: stmts.length, skippedNotOwned });
+  return jsonOk({
+    serverTime: now,
+    applied: stmts.length,
+    skippedNotOwned,
+    // S7: kelebihan di atas batas total, per koleksi, + nilai
+    // batasnya — klien bisa menampilkan pesan yang jelas
+    // tanpa menebak angka dari server.
+    skippedOverLimit,
+    limits: {
+      playlists: MAX_PLAYLISTS_PER_USER,
+      itemsPerPlaylist: MAX_ITEMS_PER_PLAYLIST,
+      likes: MAX_LIKES_PER_USER,
+      history: MAX_HISTORY_PER_USER,
+    },
+  });
 }
 
 // ------------------------------------------------------------------

@@ -91,6 +91,9 @@ class FakeD1 {
     string,
     { provider: string; expires_at: number; created_at: number }
   >();
+  // Baris yang diubah pernyataan run() terakhir (meniru
+  // meta.changes D1; dipakai I19 untuk konsumsi state atomik).
+  lastChanges = 0;
 
   prepare(query: string) {
     const sql = query;
@@ -101,9 +104,9 @@ class FakeD1 {
         return stmt;
       },
       // Arrow function supaya `this` tetap FakeD1 (bukan stmt).
-      run: async (): Promise<{ success: boolean }> => {
+      run: async (): Promise<{ success: boolean; meta: { changes: number } }> => {
         this.runSql(sql, values);
-        return { success: true };
+        return { success: true, meta: { changes: this.lastChanges } };
       },
       first: async <T,>(): Promise<T | null> => {
         return this.firstSql(sql, values) as T | null;
@@ -130,6 +133,7 @@ class FakeD1 {
   }
 
   runSql(sql: string, v: unknown[]): void {
+    this.lastChanges = 0;
     // Rate limit (proxy rateLimit.js).
     if (sql.startsWith('INSERT INTO rate_limits')) {
       const k = `${String(v[0])}|${Number(v[1])}`;
@@ -155,6 +159,27 @@ class FakeD1 {
       const cutoff = Number(v[0]);
       for (const [k, s] of [...this.oauthStates]) {
         if (s.expires_at < cutoff) this.oauthStates.delete(k);
+      }
+      return;
+    }
+    // I19: DELETE berkondisi atomik — hanya hapus bila provider
+    // cocok DAN belum kedaluwarsa; lastChanges 1 = berhasil
+    // dipakai, 0 = tidak dikenal/kedaluwarsa/sudah dipakai.
+    // Cabang ini WAJIB sebelum cabang state_hash polos di bawah
+    // (awalan SQL-nya sama).
+    if (
+      sql.startsWith(
+        'DELETE FROM oauth_states WHERE state_hash = ? AND provider = ?',
+      )
+    ) {
+      const s = this.oauthStates.get(String(v[0]));
+      if (
+        s &&
+        s.provider === String(v[1]) &&
+        s.expires_at > Number(v[2])
+      ) {
+        this.oauthStates.delete(String(v[0]));
+        this.lastChanges = 1;
       }
       return;
     }
@@ -211,18 +236,17 @@ class FakeD1 {
       return;
     }
     if (sql.startsWith('INSERT INTO sync_playlists')) {
-      const tombstone = !sql.includes('?, NULL)');
       const id = String(v[0]);
       const existing = this.playlists.get(id);
       const row: PlaylistRow = {
         id,
         user_id: String(v[1]),
         client_id: String(v[2]),
-        nama: tombstone ? (existing?.nama ?? '') : String(v[3]),
-        deskripsi: tombstone ? (existing?.deskripsi ?? null) : (v[4] as string | null),
+        nama: String(v[3]),
+        deskripsi: v[4] as string | null,
         device_id: String(v[5]),
         updated_at: Number(v[6]),
-        deleted_at: tombstone ? Number(v[7]) : null,
+        deleted_at: null,
       };
       if (
         !existing ||
@@ -234,67 +258,86 @@ class FakeD1 {
       }
       return;
     }
+    // S7: tombstone playlist memakai UPDATE — hanya menyentuh
+    // baris yang sudah ada dan milik pendorong (LWW); tombstone
+    // untuk baris yang tidak ada adalah no-op, bukan baris baru.
+    if (sql.startsWith('UPDATE sync_playlists SET')) {
+      const existing = this.playlists.get(String(v[3]));
+      if (
+        existing &&
+        existing.user_id === String(v[4]) &&
+        this.wins(Number(v[1]), String(v[0]), existing)
+      ) {
+        existing.device_id = String(v[0]);
+        existing.updated_at = Number(v[1]);
+        existing.deleted_at = Number(v[2]);
+        this.lastChanges = 1;
+      }
+      return;
+    }
     if (sql.startsWith('INSERT INTO sync_playlist_items')) {
-      const tombstone = sql.includes('VALUES (?, ?, 0,');
       const key = `${String(v[0])}|${String(v[1])}`;
       const existing = this.items.get(key);
-      const row: ItemRow = tombstone
-        ? {
-            playlist_id: String(v[0]),
-            video_id: String(v[1]),
-            posisi: existing?.posisi ?? 0,
-            added_at: Number(v[2]),
-            device_id: String(v[3]),
-            updated_at: Number(v[4]),
-            deleted_at: Number(v[5]),
-            title: existing?.title ?? null,
-            artist: existing?.artist ?? null,
-            user_id: String(v[6]),
-          }
-        : {
-            playlist_id: String(v[0]),
-            video_id: String(v[1]),
-            posisi: Number(v[2]),
-            added_at: Number(v[3]),
-            device_id: String(v[4]),
-            updated_at: Number(v[5]),
-            deleted_at: null,
-            title: v[6] as string | null,
-            artist: v[7] as string | null,
-            user_id: String(v[8]),
-          };
+      const row: ItemRow = {
+        playlist_id: String(v[0]),
+        video_id: String(v[1]),
+        posisi: Number(v[2]),
+        added_at: Number(v[3]),
+        device_id: String(v[4]),
+        updated_at: Number(v[5]),
+        deleted_at: null,
+        title: v[6] as string | null,
+        artist: v[7] as string | null,
+        user_id: String(v[8]),
+      };
       if (!existing || this.wins(row.updated_at, row.device_id, existing)) {
         this.items.set(key, row);
       }
       return;
     }
+    // S7: tombstone item memakai UPDATE (no-op bila baris tidak ada).
+    if (sql.startsWith('UPDATE sync_playlist_items SET')) {
+      const existing = this.items.get(
+        `${String(v[3])}|${String(v[4])}`,
+      );
+      if (
+        existing &&
+        existing.user_id === String(v[5]) &&
+        this.wins(Number(v[1]), String(v[0]), existing)
+      ) {
+        existing.device_id = String(v[0]);
+        existing.updated_at = Number(v[1]);
+        existing.deleted_at = Number(v[2]);
+        this.lastChanges = 1;
+      }
+      return;
+    }
     if (sql.startsWith('INSERT INTO sync_likes')) {
-      const tombstone = sql.includes('VALUES (?, ?, ?, ?, ?, ?)');
       const key = `${String(v[0])}|${String(v[1])}`;
       const existing = this.likes.get(key);
-      const row: LikeRow = tombstone
-        ? {
-            user_id: String(v[0]),
-            video_id: String(v[1]),
-            liked_at: existing?.liked_at ?? Number(v[2]),
-            device_id: String(v[3]),
-            updated_at: Number(v[4]),
-            deleted_at: Number(v[5]),
-            title: existing?.title ?? null,
-            artist: existing?.artist ?? null,
-          }
-        : {
-            user_id: String(v[0]),
-            video_id: String(v[1]),
-            liked_at: Number(v[2]),
-            device_id: String(v[3]),
-            updated_at: Number(v[4]),
-            deleted_at: null,
-            title: v[5] as string | null,
-            artist: v[6] as string | null,
-          };
+      const row: LikeRow = {
+        user_id: String(v[0]),
+        video_id: String(v[1]),
+        liked_at: Number(v[2]),
+        device_id: String(v[3]),
+        updated_at: Number(v[4]),
+        deleted_at: null,
+        title: v[5] as string | null,
+        artist: v[6] as string | null,
+      };
       if (!existing || this.wins(row.updated_at, row.device_id, existing)) {
         this.likes.set(key, row);
+      }
+      return;
+    }
+    // S7: tombstone suka memakai UPDATE (no-op bila baris tidak ada).
+    if (sql.startsWith('UPDATE sync_likes SET')) {
+      const existing = this.likes.get(`${String(v[3])}|${String(v[4])}`);
+      if (existing && this.wins(Number(v[1]), String(v[0]), existing)) {
+        existing.device_id = String(v[0]);
+        existing.updated_at = Number(v[1]);
+        existing.deleted_at = Number(v[2]);
+        this.lastChanges = 1;
       }
       return;
     }
@@ -384,6 +427,23 @@ class FakeD1 {
       const count = this.rateLimits.get(`${String(v[0])}|${Number(v[1])}`);
       return count === undefined ? null : { count };
     }
+    // S7: COUNT total baris milik pengguna (termasuk tombstone).
+    if (sql.startsWith('SELECT COUNT(*) AS n FROM ')) {
+      const userId = String(v[0]);
+      let n = 0;
+      if (sql.includes('FROM sync_playlists')) {
+        n = [...this.playlists.values()].filter(
+          (p) => p.user_id === userId,
+        ).length;
+      } else if (sql.includes('FROM sync_likes')) {
+        n = [...this.likes.values()].filter((l) => l.user_id === userId).length;
+      } else if (sql.includes('FROM sync_history')) {
+        n = [...this.history.values()].filter(
+          (h) => h.user_id === userId,
+        ).length;
+      }
+      return { n };
+    }
     if (sql.startsWith('SELECT provider, expires_at FROM oauth_states')) {
       const s = this.oauthStates.get(String(v[0]));
       return s
@@ -435,6 +495,58 @@ class FakeD1 {
   }
 
   allSql(sql: string, v: unknown[]): unknown[] {
+    // S7: jumlah item per playlist (GROUP BY atas playlist yang disentuh).
+    if (
+      sql.startsWith(
+        'SELECT playlist_id, COUNT(*) AS n FROM sync_playlist_items',
+      )
+    ) {
+      const wanted = new Set(v.map((x) => String(x)));
+      const counts = new Map<string, number>();
+      for (const item of this.items.values()) {
+        if (wanted.has(item.playlist_id)) {
+          counts.set(
+            item.playlist_id,
+            (counts.get(item.playlist_id) ?? 0) + 1,
+          );
+        }
+      }
+      return [...counts.entries()].map(([playlist_id, n]) => ({
+        playlist_id,
+        n,
+      }));
+    }
+    // S7: kunci yang sudah ada (membedakan update vs penambahan).
+    if (
+      sql.startsWith('SELECT client_id FROM sync_playlists WHERE user_id = ?')
+    ) {
+      return [...this.playlists.values()]
+        .filter((p) => p.user_id === String(v[0]))
+        .map((p) => ({ client_id: p.client_id }));
+    }
+    if (sql.startsWith('SELECT video_id FROM sync_likes WHERE user_id = ?')) {
+      return [...this.likes.values()]
+        .filter((l) => l.user_id === String(v[0]))
+        .map((l) => ({ video_id: l.video_id }));
+    }
+    if (
+      sql.startsWith(
+        'SELECT video_id, played_at FROM sync_history WHERE user_id = ?',
+      )
+    ) {
+      return [...this.history.values()]
+        .filter((h) => h.user_id === String(v[0]))
+        .map((h) => ({ video_id: h.video_id, played_at: h.played_at }));
+    }
+    if (
+      sql.startsWith(
+        'SELECT video_id FROM sync_playlist_items WHERE playlist_id = ?',
+      )
+    ) {
+      return [...this.items.values()]
+        .filter((item) => item.playlist_id === String(v[0]))
+        .map((item) => ({ video_id: item.video_id }));
+    }
     const userId = String(v[0]);
     const since = Number(v[1]);
     const limit = Number(v[2]);
@@ -556,6 +668,25 @@ async function seedSession(
     created_at: Date.now(),
   });
   return { cookie: `laras_session=${token}`, userId };
+}
+
+/** Seed satu baris playlist langsung di D1 palsu (untuk tes batas S7). */
+function seedPlaylist(
+  db: FakeD1,
+  userId: string,
+  clientId: string,
+  nama: string,
+): void {
+  db.playlists.set(clientId, {
+    id: clientId,
+    user_id: userId,
+    client_id: clientId,
+    nama,
+    deskripsi: null,
+    device_id: 'dev-seed',
+    updated_at: 1000,
+    deleted_at: null,
+  });
 }
 
 function call(
@@ -888,6 +1019,73 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
             'laras_oauth_state=0123456789abcdef0123456789abcdef.google',
         },
       },
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toContain('auth=error&reason=state');
+    expect(db.users.size).toBe(0);
+  });
+
+  // ---- Blue 4 (Red 4 I19): konsumsi state atomik ----
+
+  it('I19: dua callback PARALEL dengan state yang sama — hanya satu yang lanjut', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { stateValue, state } = await loginState(env, '203.0.113.5');
+    const doCallback = () =>
+      call(env, `/api/auth/callback?code=code-abc&state=${state}`, {
+        headers: { Cookie: `laras_oauth_state=${stateValue}` },
+      });
+    // Dengan SELECT-lalu-DELETE (kode lama), keduanya lolos
+    // SELECT sebelum salah satu DELETE; dengan DELETE
+    // berkondisi atomik, hanya satu yang mengubah 1 baris.
+    const [a, b] = await Promise.all([doCallback(), doCallback()]);
+    const locations = [
+      a.headers.get('Location') ?? '',
+      b.headers.get('Location') ?? '',
+    ].sort();
+    expect(locations).toEqual([
+      `${APP_ORIGIN}/settings?auth=error&reason=state`,
+      `${APP_ORIGIN}/settings?auth=ok`,
+    ]);
+    expect(db.users.size).toBe(1);
+    expect(db.sessions.size).toBe(1);
+  });
+
+  it('I19: state kedaluwarsa ditolak (reason=state)', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const state = '0123456789abcdef0123456789abcdef';
+    db.oauthStates.set(await sha256Hex(state), {
+      provider: 'google',
+      expires_at: Date.now() - 1000,
+      created_at: Date.now() - 700_000,
+    });
+    const res = await call(
+      env,
+      `/api/auth/callback?code=code-abc&state=${state}`,
+      { headers: { Cookie: `laras_oauth_state=${state}.google` } },
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toContain('auth=error&reason=state');
+    expect(db.users.size).toBe(0);
+  });
+
+  it('I19: provider salah ditolak (reason=state)', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const state = 'fedcba9876543210fedcba9876543210';
+    db.oauthStates.set(await sha256Hex(state), {
+      provider: 'github',
+      expires_at: Date.now() + 600_000,
+      created_at: Date.now(),
+    });
+    const res = await call(
+      env,
+      `/api/auth/callback?code=code-abc&state=${state}`,
+      { headers: { Cookie: `laras_oauth_state=${state}.google` } },
     );
     expect(res.status).toBe(302);
     expect(res.headers.get('Location')).toContain('auth=error&reason=state');
@@ -1420,5 +1618,301 @@ describe('Worker sync: /api/sync/pull + /api/sync/push', () => {
     };
     expect(body.data.skippedNotOwned).toBe(0);
     expect(db.items.size).toBe(1);
+  });
+
+  // ------------------------------------------------------------
+  // S7 (Blue 4, Red 4): batas TOTAL per pengguna (arsitektur §4.3)
+  // ------------------------------------------------------------
+
+  it('S7: pengguna dengan 100 playlist yang mendorong ke-101 ditolak + batas dilaporkan', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 100; i++) {
+      seedPlaylist(db, userId, `dev-1:${i}`, `Playlist ${i}`);
+    }
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:101', nama: 'Kelebihan', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: {
+        applied: number;
+        skippedOverLimit: { playlists: number };
+        limits: {
+          playlists: number;
+          itemsPerPlaylist: number;
+          likes: number;
+          history: number;
+        };
+      };
+    };
+    expect(body.data.skippedOverLimit.playlists).toBe(1);
+    expect(body.data.applied).toBe(0);
+    expect(body.data.limits).toEqual({
+      playlists: 100,
+      itemsPerPlaylist: 1000,
+      likes: 10000,
+      history: 1000,
+    });
+    expect(db.playlists.size).toBe(100);
+    expect(db.playlists.has('dev-1:101')).toBe(false);
+  });
+
+  it('S7: update playlist lama tetap jalan saat sudah di batas 100', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 100; i++) {
+      seedPlaylist(db, userId, `dev-1:${i}`, `Playlist ${i}`);
+    }
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:5', nama: 'Nama Baru', deskripsi: null }],
+    });
+    const body = (await res.json()) as {
+      data: { applied: number; skippedOverLimit: { playlists: number } };
+    };
+    expect(body.data.skippedOverLimit.playlists).toBe(0);
+    expect(body.data.applied).toBe(1);
+    expect(db.playlists.get('dev-1:5')?.nama).toBe('Nama Baru');
+    expect(db.playlists.size).toBe(100);
+  });
+
+  it('S7: penghapusan playlist tetap jalan saat sudah di batas 100', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 100; i++) {
+      seedPlaylist(db, userId, `dev-1:${i}`, `Playlist ${i}`);
+    }
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      deletedPlaylists: [{ clientId: 'dev-1:7' }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { skippedOverLimit: { playlists: number } };
+    };
+    expect(body.data.skippedOverLimit.playlists).toBe(0);
+    expect(db.playlists.get('dev-1:7')?.deleted_at).not.toBeNull();
+    // Tombstone tetap dihitung sebagai baris (menutup putaran
+    // hapus-buat-ulang): playlist baru tetap ditolak.
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+    });
+    const body2 = (await res2.json()) as {
+      data: { skippedOverLimit: { playlists: number } };
+    };
+    expect(body2.data.skippedOverLimit.playlists).toBe(1);
+  });
+
+  it('S7: tombstone untuk playlist yang tidak ada tidak membuat baris', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie } = await seedSession(db);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      deletedPlaylists: [{ clientId: 'dev-1:hantu' }],
+      deletedLikes: [{ videoId: 'vid-hantu' }],
+    });
+    expect(res.status).toBe(200);
+    expect(db.playlists.size).toBe(0);
+    expect(db.likes.size).toBe(0);
+  });
+
+  it('S7: push suka berulang tidak melewati total 10.000', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 9950; i++) {
+      db.likes.set(`${userId}|vid-${i}`, {
+        user_id: userId,
+        video_id: `vid-${i}`,
+        liked_at: 1000 + i,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+    }
+    const newLikes = (from: number, n: number) =>
+      Array.from({ length: n }, (_, k) => ({
+        videoId: `vid-baru-${from + k}`,
+        likedAt: 5000,
+        title: null,
+        artist: null,
+      }));
+    const res1 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: newLikes(0, 100),
+    });
+    const body1 = (await res1.json()) as {
+      data: { skippedOverLimit: { likes: number } };
+    };
+    // Headroom 50: 50 masuk, 50 dilewati.
+    expect(body1.data.skippedOverLimit.likes).toBe(50);
+    expect(db.likes.size).toBe(10000);
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: newLikes(100, 100),
+    });
+    const body2 = (await res2.json()) as {
+      data: { skippedOverLimit: { likes: number } };
+    };
+    expect(body2.data.skippedOverLimit.likes).toBe(100);
+    expect(db.likes.size).toBe(10000);
+    // Update suka lama (videoId sudah ada) tetap jalan di batas.
+    const res3 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 9999, title: 'Baru', artist: null }],
+    });
+    const body3 = (await res3.json()) as {
+      data: { applied: number; skippedOverLimit: { likes: number } };
+    };
+    expect(body3.data.skippedOverLimit.likes).toBe(0);
+    expect(body3.data.applied).toBe(1);
+    expect(db.likes.get(`${userId}|vid-0`)?.title).toBe('Baru');
+  });
+
+  it('S7: item ke-1.001 di satu playlist ditolak, playlist lain tidak kena', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    seedPlaylist(db, userId, 'dev-1:penuh', 'Penuh');
+    seedPlaylist(db, userId, 'dev-1:kosong', 'Kosong');
+    for (let i = 0; i < 1000; i++) {
+      db.items.set(`dev-1:penuh|vid-${i}`, {
+        playlist_id: 'dev-1:penuh',
+        video_id: `vid-${i}`,
+        posisi: i,
+        added_at: 1000,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+        user_id: userId,
+      });
+    }
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:penuh',
+          videoId: 'vid-lebih',
+          posisi: 1000,
+          title: null,
+          artist: null,
+        },
+        {
+          playlistClientId: 'dev-1:kosong',
+          videoId: 'vid-ok',
+          posisi: 0,
+          title: null,
+          artist: null,
+        },
+      ],
+    });
+    const body = (await res.json()) as {
+      data: { applied: number; skippedOverLimit: { playlistItems: number } };
+    };
+    expect(body.data.skippedOverLimit.playlistItems).toBe(1);
+    expect(body.data.applied).toBe(1);
+    expect(db.items.has('dev-1:penuh|vid-lebih')).toBe(false);
+    expect(db.items.has('dev-1:kosong|vid-ok')).toBe(true);
+    // Update item lama di playlist penuh tetap jalan.
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:penuh',
+          videoId: 'vid-0',
+          posisi: 999,
+          title: 'Pindah',
+          artist: null,
+        },
+      ],
+    });
+    const body2 = (await res2.json()) as {
+      data: { applied: number; skippedOverLimit: { playlistItems: number } };
+    };
+    expect(body2.data.skippedOverLimit.playlistItems).toBe(0);
+    expect(body2.data.applied).toBe(1);
+  });
+
+  it('S7: riwayat ke-1.001 ditolak; update entri lama jalan', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 1000; i++) {
+      db.history.set(`${userId}|vid-${i}|${1000 + i}`, {
+        user_id: userId,
+        video_id: `vid-${i}`,
+        played_at: 1000 + i,
+        seconds_played: 30,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        title: null,
+        artist: null,
+      });
+    }
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      history: [
+        {
+          videoId: 'vid-baru',
+          playedAt: 99999,
+          secondsPlayed: 10,
+          title: null,
+          artist: null,
+        },
+      ],
+    });
+    const body = (await res.json()) as {
+      data: { skippedOverLimit: { history: number } };
+    };
+    expect(body.data.skippedOverLimit.history).toBe(1);
+    expect(db.history.size).toBe(1000);
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      history: [
+        {
+          videoId: 'vid-0',
+          playedAt: 1000,
+          secondsPlayed: 90,
+          title: null,
+          artist: null,
+        },
+      ],
+    });
+    const body2 = (await res2.json()) as {
+      data: { applied: number; skippedOverLimit: { history: number } };
+    };
+    expect(body2.data.skippedOverLimit.history).toBe(0);
+    expect(body2.data.applied).toBe(1);
+    expect(db.history.get(`${userId}|vid-0|1000`)?.seconds_played).toBe(90);
+  });
+
+  it('S7: batas berlaku per pengguna (B tidak kena batas A)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const a = await seedSession(db, { userId: 'user-a' });
+    const b = await seedSession(db, { userId: 'user-b' });
+    for (let i = 0; i < 100; i++) {
+      seedPlaylist(db, a.userId, `dev-a:${i}`, `A ${i}`);
+    }
+    const res = await push(env, b.cookie, {
+      deviceId: 'dev-b',
+      playlists: [{ clientId: 'dev-b:1', nama: 'Punya B', deskripsi: null }],
+    });
+    const body = (await res.json()) as {
+      data: { applied: number; skippedOverLimit: { playlists: number } };
+    };
+    expect(body.data.skippedOverLimit.playlists).toBe(0);
+    expect(body.data.applied).toBe(1);
   });
 });

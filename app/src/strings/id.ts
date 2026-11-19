@@ -390,6 +390,8 @@ export const strings = {
     'Kamu sedang masuk. Akunmu akan dikeluarkan dulu supaya datamu tidak kembali sendiri lewat sinkronisasi.',
   backupWipeLogoutFailed:
     'Tidak bisa keluar dari akun, mungkin internetmu sedang putus. Bila tetap menghapus, datamu bisa kembali sendiri lewat sinkronisasi karena kamu masih masuk.',
+  backupWipeUnknownStatus:
+    'Tidak bisa memastikan kamu sedang masuk atau tidak, mungkin internetmu sedang putus. Bila tetap menghapus, datamu bisa kembali sendiri lewat sinkronisasi.',
   backupWipeRetryLogout: 'Coba keluar lagi',
   backupWipeAnyway: 'Tetap hapus',
   backupWipeConfirm: 'Ya, hapus semuanya',
