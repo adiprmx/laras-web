@@ -94,6 +94,59 @@ class FakeD1 {
   // Baris yang diubah pernyataan run() terakhir (meniru
   // meta.changes D1; dipakai I19 untuk konsumsi state atomik).
   lastChanges = 0;
+  // Blue 5 (migrasi 0005): penghitung batas, anggaran tulis
+  // harian, stempel hapus riwayat.
+  counts = new Map<string, { n: number; updated_at: number }>();
+  writeBudget = new Map<string, number>();
+  userMeta = new Map<string, number>();
+  // Bila true, baca sync_counts melempar (meniru tabel 0005
+  // belum termigrasi) — untuk tes jalur fallback S9.
+  throwOnCounts = false;
+  // Model meteran baca D1 (Red 5 S9): baris yang DIPINDAI.
+  // - first(): 1 baris (lookup); COUNT(*): + jumlah baris cocok.
+  // - all(): jumlah baris dikembalikan, DITAMBAH seek IN yang
+  //   tidak cocok (cabang probe/penghitung menambah selisihnya),
+  //   jadi probe dihitung per kunci yang dicek (<= entri body).
+  // - subquery guard (INSERT...SELECT): 1 per pernyataan.
+  // Upsert biasa tidak dihitung sebagai baca (konsisten dengan
+  // model Red 5; laporan menunjukkan batas tetap aman walau
+  // probe konflik upsert ikut dihitung).
+  rowsRead = 0;
+  // Jumlah query COUNT(*) yang jalan (untuk tes S9).
+  countQueries = 0;
+
+  resetReadCount(): void {
+    this.rowsRead = 0;
+    this.countQueries = 0;
+  }
+
+  /** Kunci map penghitung: userId|collection|playlistId. */
+  static countKey(userId: string, collection: string, playlistId: string): string {
+    return `${userId}|${collection}|${playlistId}`;
+  }
+
+  /**
+   * Evaluasi guard-WHERE R19 (6 bind terakhir: userId, collection,
+   * playlistId, delta, k, cap). SQL tanpa subquery penghitung
+   * (upsert biasa) selalu lolos.
+   */
+  guardPasses(sql: string, v: unknown[]): boolean {
+    if (!sql.includes('FROM sync_counts')) return true;
+    this.rowsRead += 1; // subquery penghitung
+    const [userId, collection, playlistId, delta, k, cap] = v.slice(-6) as [
+      string,
+      string,
+      string,
+      number,
+      number,
+      number,
+    ];
+    const n =
+      this.counts.get(
+        FakeD1.countKey(userId, collection, playlistId),
+      )?.n ?? 0;
+    return n - Number(delta) + Number(k) < Number(cap);
+  }
 
   prepare(query: string) {
     const sql = query;
@@ -109,10 +162,13 @@ class FakeD1 {
         return { success: true, meta: { changes: this.lastChanges } };
       },
       first: async <T,>(): Promise<T | null> => {
+        this.rowsRead += 1; // lookup (COUNT menambah sisanya)
         return this.firstSql(sql, values) as T | null;
       },
       all: async <T,>(): Promise<{ results: T[] }> => {
-        return { results: this.allSql(sql, values) as T[] };
+        const results = this.allSql(sql, values) as T[];
+        this.rowsRead += results.length;
+        return { results };
       },
     };
     return stmt;
@@ -187,6 +243,52 @@ class FakeD1 {
       this.oauthStates.delete(String(v[0]));
       return;
     }
+    // S8b: cadangan anggaran atomik — upsert berkondisi: gagal
+    // (changes 0) bila pemakaian + tagihan melewati anggaran.
+    if (sql.startsWith('INSERT INTO sync_write_budget')) {
+      const key = `${String(v[0])}|${String(v[1])}`;
+      const charge = Number(v[2]);
+      const budget = Number(v[3]);
+      const used = this.writeBudget.get(key) ?? 0;
+      if (used + charge <= budget) {
+        this.writeBudget.set(key, used + charge);
+        this.lastChanges = 1;
+      } else {
+        this.lastChanges = 0;
+      }
+      return;
+    }
+    // S9: penghitung — tiga bentuk DO UPDATE: increment
+    // (n = n + delta), nilai absolut (rekonsiliasi), sentinel -1.
+    if (sql.startsWith('INSERT INTO sync_counts')) {
+      const key = FakeD1.countKey(
+        String(v[0]),
+        String(v[1]),
+        String(v[2]),
+      );
+      if (sql.includes('sync_counts.n + excluded.n')) {
+        const cur = this.counts.get(key);
+        this.counts.set(key, {
+          n: (cur?.n ?? 0) + Number(v[3]),
+          updated_at: Number(v[4]),
+        });
+      } else if (sql.includes('SET n = -1')) {
+        this.counts.set(key, { n: -1, updated_at: Number(v[3]) });
+      } else {
+        this.counts.set(key, {
+          n: Number(v[3]),
+          updated_at: Number(v[4]),
+        });
+      }
+      this.lastChanges = 1;
+      return;
+    }
+    // S8a: stempel hapus riwayat terakhir.
+    if (sql.startsWith('INSERT INTO sync_user_meta')) {
+      this.userMeta.set(String(v[0]), Number(v[1]));
+      this.lastChanges = 1;
+      return;
+    }
     if (sql.startsWith('INSERT INTO sessions')) {
       this.sessions.set(String(v[0]), {
         id: String(v[0]),
@@ -236,6 +338,8 @@ class FakeD1 {
       return;
     }
     if (sql.startsWith('INSERT INTO sync_playlists')) {
+      // R19: INSERT terjaga diblokir bila guard-WHERE gagal.
+      if (!this.guardPasses(sql, v)) return;
       const id = String(v[0]);
       const existing = this.playlists.get(id);
       const row: PlaylistRow = {
@@ -276,6 +380,8 @@ class FakeD1 {
       return;
     }
     if (sql.startsWith('INSERT INTO sync_playlist_items')) {
+      // R19: INSERT terjaga diblokir bila guard-WHERE gagal.
+      if (!this.guardPasses(sql, v)) return;
       const key = `${String(v[0])}|${String(v[1])}`;
       const existing = this.items.get(key);
       const row: ItemRow = {
@@ -313,6 +419,8 @@ class FakeD1 {
       return;
     }
     if (sql.startsWith('INSERT INTO sync_likes')) {
+      // R19: INSERT terjaga diblokir bila guard-WHERE gagal.
+      if (!this.guardPasses(sql, v)) return;
       const key = `${String(v[0])}|${String(v[1])}`;
       const existing = this.likes.get(key);
       const row: LikeRow = {
@@ -342,6 +450,8 @@ class FakeD1 {
       return;
     }
     if (sql.startsWith('INSERT INTO sync_history')) {
+      // R19: INSERT terjaga diblokir bila guard-WHERE gagal.
+      if (!this.guardPasses(sql, v)) return;
       const key = `${String(v[0])}|${String(v[1])}|${Number(v[2])}`;
       const existing = this.history.get(key);
       const row: HistoryRow = {
@@ -419,6 +529,25 @@ class FakeD1 {
       this.settings.delete(String(v[0]));
       return;
     }
+    // Blue 5: hapus akun juga menghapus kuota pengguna (0005).
+    if (sql.startsWith('DELETE FROM sync_counts WHERE user_id = ?')) {
+      const prefix = `${String(v[0])}|`;
+      for (const k of [...this.counts.keys()]) {
+        if (k.startsWith(prefix)) this.counts.delete(k);
+      }
+      return;
+    }
+    if (sql.startsWith('DELETE FROM sync_write_budget WHERE user_id = ?')) {
+      const prefix = `${String(v[0])}|`;
+      for (const k of [...this.writeBudget.keys()]) {
+        if (k.startsWith(prefix)) this.writeBudget.delete(k);
+      }
+      return;
+    }
+    if (sql.startsWith('DELETE FROM sync_user_meta WHERE user_id = ?')) {
+      this.userMeta.delete(String(v[0]));
+      return;
+    }
     throw new Error(`pernyataan tak dikenal: ${sql}`);
   }
 
@@ -428,21 +557,42 @@ class FakeD1 {
       return count === undefined ? null : { count };
     }
     // S7: COUNT total baris milik pengguna (termasuk tombstone).
+    // S9: COUNT memindai seluruh baris yang cocok (model meteran
+    // baca D1) — dipakai hanya rekonsiliasi + fallback.
     if (sql.startsWith('SELECT COUNT(*) AS n FROM ')) {
-      const userId = String(v[0]);
+      this.countQueries += 1;
       let n = 0;
-      if (sql.includes('FROM sync_playlists')) {
-        n = [...this.playlists.values()].filter(
-          (p) => p.user_id === userId,
+      if (sql.includes('FROM sync_playlist_items')) {
+        // countItemsForPlaylist: bind playlistId, userId.
+        const playlistId = String(v[0]);
+        const userId = String(v[1]);
+        n = [...this.items.values()].filter(
+          (item) =>
+            item.playlist_id === playlistId && item.user_id === userId,
         ).length;
-      } else if (sql.includes('FROM sync_likes')) {
-        n = [...this.likes.values()].filter((l) => l.user_id === userId).length;
-      } else if (sql.includes('FROM sync_history')) {
-        n = [...this.history.values()].filter(
-          (h) => h.user_id === userId,
-        ).length;
+      } else {
+        const userId = String(v[0]);
+        if (sql.includes('FROM sync_playlists')) {
+          n = [...this.playlists.values()].filter(
+            (p) => p.user_id === userId,
+          ).length;
+        } else if (sql.includes('FROM sync_likes')) {
+          n = [...this.likes.values()].filter(
+            (l) => l.user_id === userId,
+          ).length;
+        } else if (sql.includes('FROM sync_history')) {
+          n = [...this.history.values()].filter(
+            (h) => h.user_id === userId,
+          ).length;
+        }
       }
+      this.rowsRead += n;
       return { n };
+    }
+    // S8a: stempel hapus riwayat terakhir.
+    if (sql.startsWith('SELECT history_cleared_at FROM sync_user_meta')) {
+      const at = this.userMeta.get(String(v[0]));
+      return at === undefined ? null : { history_cleared_at: at };
     }
     if (sql.startsWith('SELECT provider, expires_at FROM oauth_states')) {
       const s = this.oauthStates.get(String(v[0]));
@@ -495,57 +645,144 @@ class FakeD1 {
   }
 
   allSql(sql: string, v: unknown[]): unknown[] {
-    // S7: jumlah item per playlist (GROUP BY atas playlist yang disentuh).
+    // S9: baca penghitung (1 baris per koleksi/playlist). Seek IN
+    // yang tidak cocok tetap dihitung (wrapper all() menambah
+    // baris dikembalikan; selisihnya ditambah di sini).
+    if (
+      sql.startsWith(
+        'SELECT collection, n, updated_at FROM sync_counts',
+      )
+    ) {
+      if (this.throwOnCounts) throw new Error('no such table: sync_counts');
+      const userId = String(v[0]);
+      const wanted = v.slice(1).map((x) => String(x));
+      const out = wanted
+        .filter((c) =>
+          this.counts.has(FakeD1.countKey(userId, c, '')),
+        )
+        .map((c) => {
+          const row = this.counts.get(FakeD1.countKey(userId, c, ''))!;
+          return { collection: c, n: row.n, updated_at: row.updated_at };
+        });
+      this.rowsRead += wanted.length - out.length;
+      return out;
+    }
+    if (
+      sql.startsWith(
+        'SELECT playlist_id, n, updated_at FROM sync_counts',
+      )
+    ) {
+      if (this.throwOnCounts) throw new Error('no such table: sync_counts');
+      const userId = String(v[0]);
+      const wanted = v.slice(1).map((x) => String(x));
+      const out = wanted
+        .filter((pid) =>
+          this.counts.has(FakeD1.countKey(userId, 'items', pid)),
+        )
+        .map((pid) => {
+          const row = this.counts.get(
+            FakeD1.countKey(userId, 'items', pid),
+          )!;
+          return { playlist_id: pid, n: row.n, updated_at: row.updated_at };
+        });
+      this.rowsRead += wanted.length - out.length;
+      return out;
+    }
+    // S7: jumlah item per playlist (GROUP BY atas playlist yang
+    // disentuh) — jalur fallback S9, difilter user_id (I20).
     if (
       sql.startsWith(
         'SELECT playlist_id, COUNT(*) AS n FROM sync_playlist_items',
       )
     ) {
-      const wanted = new Set(v.map((x) => String(x)));
+      const userId = String(v[0]);
+      const wanted = new Set(v.slice(1).map((x) => String(x)));
       const counts = new Map<string, number>();
+      let scanned = 0;
       for (const item of this.items.values()) {
-        if (wanted.has(item.playlist_id)) {
+        if (item.user_id === userId && wanted.has(item.playlist_id)) {
+          scanned += 1;
           counts.set(
             item.playlist_id,
             (counts.get(item.playlist_id) ?? 0) + 1,
           );
         }
       }
-      return [...counts.entries()].map(([playlist_id, n]) => ({
+      const out = [...counts.entries()].map(([playlist_id, n]) => ({
         playlist_id,
         n,
       }));
+      // GROUP BY memindai semua item yang cocok (bukan hanya
+      // baris grup yang dikembalikan).
+      this.rowsRead += scanned - out.length;
+      return out;
     }
-    // S7: kunci yang sudah ada (membedakan update vs penambahan).
+    // S9: kunci yang sudah ada (membedakan update vs penambahan)
+    // — query TERBATAS: hanya kunci dari entri yang didorong.
     if (
-      sql.startsWith('SELECT client_id FROM sync_playlists WHERE user_id = ?')
+      sql.startsWith(
+        'SELECT client_id FROM sync_playlists WHERE user_id = ? AND client_id IN (',
+      )
     ) {
-      return [...this.playlists.values()]
-        .filter((p) => p.user_id === String(v[0]))
+      const userId = String(v[0]);
+      const wanted = new Set(v.slice(1).map((x) => String(x)));
+      const out = [...this.playlists.values()]
+        .filter((p) => p.user_id === userId && wanted.has(p.client_id))
         .map((p) => ({ client_id: p.client_id }));
+      this.rowsRead += wanted.size - out.length;
+      return out;
     }
-    if (sql.startsWith('SELECT video_id FROM sync_likes WHERE user_id = ?')) {
-      return [...this.likes.values()]
-        .filter((l) => l.user_id === String(v[0]))
+    if (
+      sql.startsWith(
+        'SELECT video_id FROM sync_likes WHERE user_id = ? AND video_id IN (',
+      )
+    ) {
+      const userId = String(v[0]);
+      const wanted = new Set(v.slice(1).map((x) => String(x)));
+      const out = [...this.likes.values()]
+        .filter((l) => l.user_id === userId && wanted.has(l.video_id))
         .map((l) => ({ video_id: l.video_id }));
+      this.rowsRead += wanted.size - out.length;
+      return out;
     }
     if (
       sql.startsWith(
-        'SELECT video_id, played_at FROM sync_history WHERE user_id = ?',
+        'SELECT video_id, played_at FROM sync_history WHERE user_id = ? AND (video_id, played_at) IN (',
       )
     ) {
-      return [...this.history.values()]
-        .filter((h) => h.user_id === String(v[0]))
+      const userId = String(v[0]);
+      const wanted = new Set<string>();
+      for (let i = 1; i + 1 < v.length; i += 2) {
+        wanted.add(`${String(v[i])}|${Number(v[i + 1])}`);
+      }
+      const out = [...this.history.values()]
+        .filter(
+          (h) =>
+            h.user_id === userId &&
+            wanted.has(`${h.video_id}|${h.played_at}`),
+        )
         .map((h) => ({ video_id: h.video_id, played_at: h.played_at }));
+      this.rowsRead += wanted.size - out.length;
+      return out;
     }
     if (
       sql.startsWith(
-        'SELECT video_id FROM sync_playlist_items WHERE playlist_id = ?',
+        'SELECT video_id FROM sync_playlist_items WHERE playlist_id = ? AND user_id = ? AND video_id IN (',
       )
     ) {
-      return [...this.items.values()]
-        .filter((item) => item.playlist_id === String(v[0]))
+      const playlistId = String(v[0]);
+      const userId = String(v[1]);
+      const wanted = new Set(v.slice(2).map((x) => String(x)));
+      const out = [...this.items.values()]
+        .filter(
+          (item) =>
+            item.playlist_id === playlistId &&
+            item.user_id === userId &&
+            wanted.has(item.video_id),
+        )
         .map((item) => ({ video_id: item.video_id }));
+      this.rowsRead += wanted.size - out.length;
+      return out;
     }
     const userId = String(v[0]);
     const since = Number(v[1]);
@@ -668,6 +905,30 @@ async function seedSession(
     created_at: Date.now(),
   });
   return { cookie: `laras_session=${token}`, userId };
+}
+
+/** Seed satu baris penghitung (mensimulasikan keadaan pasca-migrasi 0005). */
+function seedCounter(
+  db: FakeD1,
+  userId: string,
+  collection: string,
+  playlistId: string,
+  n: number,
+  updatedAt: number = Date.now(),
+): void {
+  db.counts.set(FakeD1.countKey(userId, collection, playlistId), {
+    n,
+    updated_at: updatedAt,
+  });
+}
+
+/** Total anggaran tulis terpakai pengguna di semua hari (tes S8). */
+function budgetUsed(db: FakeD1, userId: string): number {
+  let total = 0;
+  for (const [k, v] of db.writeBudget) {
+    if (k.startsWith(`${userId}|`)) total += v;
+  }
+  return total;
 }
 
 /** Seed satu baris playlist langsung di D1 palsu (untuk tes batas S7). */
@@ -1914,5 +2175,530 @@ describe('Worker sync: /api/sync/pull + /api/sync/push', () => {
     };
     expect(body.data.skippedOverLimit.playlists).toBe(0);
     expect(body.data.applied).toBe(1);
+  });
+});
+
+// ------------------------------------------------------------------
+// Blue 5 (Red 5: S8, S9, R19, I20)
+// ------------------------------------------------------------------
+
+describe('Worker sync: Blue 5 (S8/S9/R19/I20)', () => {
+  it('S8: clear riwayat kedua dalam 24 jam diabaikan, data tidak terhapus', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie } = await seedSession(db);
+    const history100 = (from: number) =>
+      Array.from({ length: 100 }, (_, k) => ({
+        videoId: `vid-${from + k}`,
+        playedAt: from + k,
+        secondsPlayed: 30,
+        title: null,
+        artist: null,
+      }));
+    // Clear pertama (sahih): 100 masuk lalu terhapus semua.
+    const res1 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      history: history100(0),
+      historyClearedBefore: 9999999999999,
+    });
+    expect(res1.status).toBe(200);
+    const body1 = (await res1.json()) as {
+      data: { historyClearIgnored?: boolean };
+    };
+    expect(body1.data.historyClearIgnored).toBeUndefined();
+    expect(db.history.size).toBe(0);
+    // Isi lagi 100 (tanpa clear).
+    await push(env, cookie, {
+      deviceId: 'dev-1',
+      history: history100(1000),
+    });
+    expect(db.history.size).toBe(100);
+    // Clear kedua dalam 24 jam: DIABAIKAN dengan respons jelas.
+    const res3 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      historyClearedBefore: 9999999999999,
+    });
+    expect(res3.status).toBe(200);
+    const body3 = (await res3.json()) as {
+      data: {
+        applied: number;
+        historyClearIgnored?: boolean;
+        historyClearRetryAfterSeconds?: number;
+      };
+    };
+    expect(body3.data.historyClearIgnored).toBe(true);
+    expect(body3.data.historyClearRetryAfterSeconds).toBeGreaterThan(0);
+    expect(body3.data.historyClearRetryAfterSeconds).toBeLessThanOrEqual(
+      86400,
+    );
+    expect(body3.data.applied).toBe(0);
+    expect(db.history.size).toBe(100);
+  });
+
+  it('S8: siklus insert 100 + clear berulang tidak bisa menguras anggaran', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let r = 0; r < 25; r++) {
+      const res = await push(env, cookie, {
+        deviceId: 'dev-1',
+        history: Array.from({ length: 100 }, (_, k) => ({
+          videoId: `vid-${r * 1000 + k}`,
+          playedAt: r * 1000 + k,
+          secondsPlayed: 30,
+          title: null,
+          artist: null,
+        })),
+        historyClearedBefore: 9999999999999,
+      });
+      expect(res.status).toBe(200);
+    }
+    // Clear ke-2 dan seterusnya diabaikan: riwayat mentok di batas
+    // 1.000 (bukan berputar tanpa henti seperti sebelum Blue 5).
+    expect(db.history.size).toBe(1000);
+    // Tagihan: push 1 = 100 + 1.000 (clear) + 5 tunjangan = 1.105;
+    // 24 push berikut = 100 + 5 = 105 tiap push. Total 3.625 —
+    // jauh di bawah anggaran 20.000, dan tidak bisa tumbuh lagi
+    // (entri baru dilewati cap, tetapi TETAP ditagih 105/push).
+    expect(budgetUsed(db, userId)).toBe(3625);
+  });
+
+  it('S8: anggaran tulis habis -> 429 + Retry-After; push kecil masih jalan; besok bisa lagi', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // Push muatan penuh: 700 entri + settings. Tagihan 712/push
+    // (700 + 1 settings + tunjangan 2x(3 skalar + 1 playlist) + 3).
+    const maxBody = () => ({
+      deviceId: 'dev-1',
+      playlists: Array.from({ length: 100 }, (_, i) => ({
+        clientId: `dev-1:${i}`,
+        nama: `P${i}`,
+        deskripsi: null,
+      })),
+      playlistItems: Array.from({ length: 100 }, (_, i) => ({
+        playlistClientId: 'dev-1:0',
+        videoId: `vid-${i}`,
+        posisi: i,
+        title: null,
+        artist: null,
+      })),
+      likes: Array.from({ length: 100 }, (_, i) => ({
+        videoId: `vid-${i}`,
+        likedAt: 1000,
+        title: null,
+        artist: null,
+      })),
+      history: Array.from({ length: 100 }, (_, i) => ({
+        videoId: `vid-${i}`,
+        playedAt: 1000 + i,
+        secondsPlayed: 10,
+        title: null,
+        artist: null,
+      })),
+      deletedPlaylists: Array.from({ length: 100 }, (_, i) => ({
+        clientId: `dev-1:hantu-${i}`,
+      })),
+      deletedPlaylistItems: Array.from({ length: 100 }, (_, i) => ({
+        playlistClientId: 'dev-1:0',
+        videoId: `vid-hantu-${i}`,
+      })),
+      deletedLikes: Array.from({ length: 100 }, (_, i) => ({
+        videoId: `vid-hantu-${i}`,
+      })),
+      settings: { settingsJson: '{"version":1}' },
+    });
+    // 28 push x 712 = 19.936 (di bawah 20.000).
+    for (let i = 0; i < 28; i++) {
+      const res = await push(env, cookie, maxBody());
+      expect(res.status).toBe(200);
+    }
+    expect(budgetUsed(db, userId)).toBe(19936);
+    // Push ke-29 (712) melewati anggaran -> 429 + Retry-After.
+    const over = await push(env, cookie, maxBody());
+    expect(over.status).toBe(429);
+    const retryAfter = Number(over.headers.get('Retry-After'));
+    expect(Number.isFinite(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(86400);
+    const overBody = (await over.json()) as {
+      error: { code: string; message: string };
+    };
+    expect(overBody.error.code).toBe('DAILY_WRITE_BUDGET_EXCEEDED');
+    expect(overBody.error.message.length).toBeGreaterThan(0);
+    // Sisa anggaran (64) masih bisa dipakai push kecil.
+    const small = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 2000, title: null, artist: null }],
+    });
+    expect(small.status).toBe(200);
+    // Besok (hari UTC baru): anggaran reset, push besar jalan lagi.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+    try {
+      const nextDay = await push(env, cookie, maxBody());
+      expect(nextDay.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30000);
+
+  it('S9: push pada pengguna penuh (10.000 suka) membaca sedikit, tanpa COUNT', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 10000; i++) {
+      db.likes.set(`${userId}|vid-${i}`, {
+        user_id: userId,
+        video_id: `vid-${i}`,
+        liked_at: 1000 + i,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+    }
+    seedCounter(db, userId, 'likes', '', 10000);
+    // Push 1 update entri lama: auth 2 + rate limit 1 + penghitung
+    // 1 + probe 1 = 5 baris (kode lama: COUNT 10.000 + fetchKeys
+    // 10.000 = 20.000 baris).
+    db.resetReadCount();
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 9999, title: 'Baru', artist: null }],
+    });
+    expect(res.status).toBe(200);
+    expect(db.countQueries).toBe(0);
+    expect(db.rowsRead).toBeLessThanOrEqual(10);
+    expect(db.likes.get(`${userId}|vid-0`)?.title).toBe('Baru');
+    // Push 100 update: baca ~ jumlah entri (104), bukan ukuran tabel.
+    db.resetReadCount();
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: Array.from({ length: 100 }, (_, i) => ({
+        videoId: `vid-${i}`,
+        likedAt: 9999,
+        title: 'U',
+        artist: null,
+      })),
+    });
+    expect(res2.status).toBe(200);
+    expect(db.countQueries).toBe(0);
+    expect(db.rowsRead).toBeLessThanOrEqual(110);
+    const body2 = (await res2.json()) as {
+      data: { applied: number; skippedOverLimit: { likes: number } };
+    };
+    expect(body2.data.skippedOverLimit.likes).toBe(0);
+    expect(body2.data.applied).toBe(100);
+  });
+
+  it('S9: baca tidak tumbuh dengan ukuran tabel (10 suka vs 10.000 suka)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const a = await seedSession(db, { userId: 'user-a' });
+    const b = await seedSession(db, { userId: 'user-b' });
+    for (let i = 0; i < 10; i++) {
+      db.likes.set(`${a.userId}|vid-${i}`, {
+        user_id: a.userId,
+        video_id: `vid-${i}`,
+        liked_at: 1000,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+    }
+    seedCounter(db, a.userId, 'likes', '', 10);
+    for (let i = 0; i < 10000; i++) {
+      db.likes.set(`${b.userId}|vid-${i}`, {
+        user_id: b.userId,
+        video_id: `vid-${i}`,
+        liked_at: 1000,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+    }
+    seedCounter(db, b.userId, 'likes', '', 10000);
+    const oneUpdate = {
+      deviceId: 'dev-1',
+      likes: [{ videoId: 'vid-0', likedAt: 9999, title: 'U', artist: null }],
+    };
+    db.resetReadCount();
+    await push(env, a.cookie, oneUpdate);
+    const readsSmall = db.rowsRead;
+    db.resetReadCount();
+    await push(env, b.cookie, oneUpdate);
+    const readsFull = db.rowsRead;
+    expect(readsFull).toBe(readsSmall);
+    expect(readsFull).toBeLessThanOrEqual(10);
+  });
+
+  it('S9: penghitung benar — 50 masuk dari headroom 50, lalu mentok di 10.000', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 9950; i++) {
+      db.likes.set(`${userId}|vid-${i}`, {
+        user_id: userId,
+        video_id: `vid-${i}`,
+        liked_at: 1000 + i,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+      });
+    }
+    seedCounter(db, userId, 'likes', '', 9950);
+    const newLikes = (from: number) =>
+      Array.from({ length: 100 }, (_, k) => ({
+        videoId: `vid-baru-${from + k}`,
+        likedAt: 5000,
+        title: null,
+        artist: null,
+      }));
+    const res1 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: newLikes(0),
+    });
+    const body1 = (await res1.json()) as {
+      data: { skippedOverLimit: { likes: number } };
+    };
+    expect(body1.data.skippedOverLimit.likes).toBe(50);
+    expect(db.likes.size).toBe(10000);
+    expect(
+      db.counts.get(FakeD1.countKey(userId, 'likes', ''))?.n,
+    ).toBe(10000);
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      likes: newLikes(100),
+    });
+    const body2 = (await res2.json()) as {
+      data: { skippedOverLimit: { likes: number } };
+    };
+    expect(body2.data.skippedOverLimit.likes).toBe(100);
+    expect(db.likes.size).toBe(10000);
+    expect(
+      db.counts.get(FakeD1.countKey(userId, 'likes', ''))?.n,
+    ).toBe(10000);
+  });
+
+  it('S9: penghitung pulih sesudah clear (sentinel -1 -> COUNT ulang)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    const res1 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      history: Array.from({ length: 100 }, (_, k) => ({
+        videoId: `vid-${k}`,
+        playedAt: 1000 + k,
+        secondsPlayed: 30,
+        title: null,
+        artist: null,
+      })),
+      historyClearedBefore: 9999999999999,
+    });
+    expect(res1.status).toBe(200);
+    expect(db.history.size).toBe(0);
+    // Clear menandai penghitung riwayat BASI (-1).
+    expect(
+      db.counts.get(FakeD1.countKey(userId, 'history', ''))?.n,
+    ).toBe(-1);
+    // Push berikut menghitung ulang dari data nyata (COUNT 1x),
+    // lalu penghitung benar lagi.
+    db.resetReadCount();
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      history: Array.from({ length: 50 }, (_, k) => ({
+        videoId: `vid-baru-${k}`,
+        playedAt: 5000 + k,
+        secondsPlayed: 30,
+        title: null,
+        artist: null,
+      })),
+    });
+    expect(res2.status).toBe(200);
+    expect(db.countQueries).toBe(1);
+    expect(db.history.size).toBe(50);
+    expect(
+      db.counts.get(FakeD1.countKey(userId, 'history', ''))?.n,
+    ).toBe(50);
+  });
+
+  it('S9: penghitung melenceng di atas batas memicu rekonsiliasi', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 100; i++) {
+      seedPlaylist(db, userId, `dev-1:${i}`, `Playlist ${i}`);
+    }
+    // Drift: penghitung 5.000 padahal baris nyata 100.
+    seedCounter(db, userId, 'playlists', '', 5000);
+    db.resetReadCount();
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:baru', nama: 'Baru', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    // Rekonsiliasi jalan (COUNT 1x), penghitung dikoreksi ke 100,
+    // dan cap ditegakkan dari nilai benar (sudah di batas).
+    expect(db.countQueries).toBe(1);
+    expect(
+      db.counts.get(FakeD1.countKey(userId, 'playlists', ''))?.n,
+    ).toBe(100);
+    const body = (await res.json()) as {
+      data: { skippedOverLimit: { playlists: number } };
+    };
+    expect(body.data.skippedOverLimit.playlists).toBe(1);
+    expect(db.playlists.size).toBe(100);
+  });
+
+  it('S9 fallback: tanpa tabel penghitung, push tetap jalan via COUNT', async () => {
+    const db = new FakeD1();
+    db.throwOnCounts = true;
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 100; i++) {
+      seedPlaylist(db, userId, `dev-1:${i}`, `Playlist ${i}`);
+    }
+    // Playlist ke-101 tetap ditolak (lewat COUNT fallback).
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:101', nama: 'Lebih', deskripsi: null }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; skippedOverLimit: { playlists: number } };
+    };
+    expect(body.data.skippedOverLimit.playlists).toBe(1);
+    expect(body.data.applied).toBe(0);
+    // Update entri lama tetap jalan tanpa penghitung.
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:5', nama: 'Nama Baru', deskripsi: null }],
+    });
+    const body2 = (await res2.json()) as {
+      data: { applied: number };
+    };
+    expect(body2.data.applied).toBe(1);
+    expect(db.playlists.get('dev-1:5')?.nama).toBe('Nama Baru');
+  });
+
+  it('R19: insert terjaga diblokir bila penghitung naik di tengah batch', async () => {
+    // FakeD1 yang mensimulasikan push bersamaan: saat INSERT
+    // terjaga pertama dievaluasi, increment penghitung push lain
+    // (+50) mendarat duluan — seolah-olah dua batch tumpang tindih.
+    class RacingFakeD1 extends FakeD1 {
+      bumped = false;
+      override runSql(sql: string, v: unknown[]): void {
+        if (
+          !this.bumped &&
+          sql.startsWith('INSERT INTO sync_playlists') &&
+          sql.includes('FROM sync_counts')
+        ) {
+          this.bumped = true;
+          const key = FakeD1.countKey('user-1', 'playlists', '');
+          const cur = this.counts.get(key);
+          if (cur) cur.n += 50;
+        }
+        super.runSql(sql, v);
+      }
+    }
+    const db = new RacingFakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    for (let i = 0; i < 50; i++) {
+      seedPlaylist(db, userId, `dev-1:${i}`, `Playlist ${i}`);
+    }
+    seedCounter(db, userId, 'playlists', '', 50);
+    // Headroom 50: 50 entri baru lolos cap. Increment +50 (counter
+    // 100), lalu "push lain" +50 (counter 150) sebelum insert
+    // dievaluasi — guard (150 - 50 + k >= 100) memblokir semuanya.
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: Array.from({ length: 100 }, (_, i) => ({
+        clientId: `dev-1:baru-${i}`,
+        nama: `Baru ${i}`,
+        deskripsi: null,
+      })),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { skippedOverLimit: { playlists: number } };
+    };
+    expect(body.data.skippedOverLimit.playlists).toBe(50);
+    expect(db.playlists.size).toBe(50);
+    expect(
+      db.counts.get(FakeD1.countKey(userId, 'playlists', ''))?.n,
+    ).toBe(150);
+    // Push berikut merekonsiliasi (150 > 100 + 30): penghitung
+    // kembali ke 50, dan penambahan jalan lagi.
+    const res2 = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:satu', nama: 'Satu', deskripsi: null }],
+    });
+    expect(res2.status).toBe(200);
+    expect(db.playlists.size).toBe(51);
+    expect(
+      db.counts.get(FakeD1.countKey(userId, 'playlists', ''))?.n,
+    ).toBe(51);
+  });
+
+  it('I20: item ke playlist orang lain ditolak notOwned tanpa menyentuh cap', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const a = await seedSession(db, { userId: 'user-a' });
+    const b = await seedSession(db, { userId: 'user-b' });
+    seedPlaylist(db, a.userId, 'dev-a:target', 'Target');
+    for (let i = 0; i < 999; i++) {
+      db.items.set(`dev-a:target|vid-${i}`, {
+        playlist_id: 'dev-a:target',
+        video_id: `vid-${i}`,
+        posisi: i,
+        added_at: 1000,
+        device_id: 'dev-seed',
+        updated_at: 1000,
+        deleted_at: null,
+        title: null,
+        artist: null,
+        user_id: a.userId,
+      });
+    }
+    seedCounter(db, a.userId, 'items', 'dev-a:target', 999);
+    // B mendorong 100 item ke playlist A (999 item).
+    const res = await push(env, b.cookie, {
+      deviceId: 'dev-b',
+      playlistItems: Array.from({ length: 100 }, (_, i) => ({
+        playlistClientId: 'dev-a:target',
+        videoId: `vid-serang-${i}`,
+        posisi: i,
+        title: null,
+        artist: null,
+      })),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: {
+        applied: number;
+        skippedNotOwned: number;
+        skippedOverLimit: { playlistItems: number };
+      };
+    };
+    // Semua ditolak sebagai bukan milik pendorong; cap TIDAK
+    // dihitung untuk playlist itu (0 — tidak membocorkan bahwa
+    // korban punya ~999 item).
+    expect(body.data.skippedNotOwned).toBe(100);
+    expect(body.data.skippedOverLimit.playlistItems).toBe(0);
+    expect(body.data.applied).toBe(0);
+    expect(db.items.size).toBe(999);
+    // Penghitung B untuk playlist A tidak pernah dibuat/dibaca.
+    expect(
+      db.counts.has(FakeD1.countKey(b.userId, 'items', 'dev-a:target')),
+    ).toBe(false);
   });
 });

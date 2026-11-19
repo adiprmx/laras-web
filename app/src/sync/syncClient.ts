@@ -127,6 +127,10 @@ export interface PushData {
     likes: number;
     history: number;
   };
+  /** Hapus riwayat diabaikan server (S8a: maks sekali per 24 jam). */
+  historyClearIgnored?: boolean;
+  /** Detik sampai hapus riwayat boleh dicoba lagi (S8a). */
+  historyClearRetryAfterSeconds?: number;
 }
 
 interface Envelope<T> {

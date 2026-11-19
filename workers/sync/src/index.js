@@ -9,11 +9,17 @@
 //
 // SKEMA: workers/sync/0001_init.sql (7 tabel) + 0002_ratelimit.sql
 // + 0003_item_meta.sql + migrations/0004_oauth_states_item_owner.sql
-// (tabel oauth_states + kolom user_id di sync_playlist_items).
-// Worker ini WAJIB di-deploy sesudah keempat migrasi diterapkan
+// (tabel oauth_states + kolom user_id di sync_playlist_items)
+// + migrations/0005_sync_quotas.sql (tabel sync_counts,
+// sync_write_budget, sync_user_meta — penghitung batas, anggaran
+// tulis harian, stempel hapus riwayat).
+// Worker ini WAJIB di-deploy sesudah kelima migrasi diterapkan
 // (SQL push/pull memakai kolom title/artist dari 0003, SQL
 // callback memakai tabel oauth_states dari 0004, SQL push item
-// memakai kolom user_id dari 0004).
+// memakai kolom user_id dari 0004, SQL kuota memakai tabel 0005).
+// Tanpa 0005, Worker fail-open ke perilaku Blue 4 (COUNT per push
+// + tanpa anggaran tulis) supaya sync tidak mati — tetapi S8/S9
+// kembali terbuka sampai 0005 diterapkan.
 //
 // KREDENSIAL (langkah owner, belum ada saat P7 ditulis):
 // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GITHUB_CLIENT_ID,
@@ -44,10 +50,19 @@
 //   tarik maks 1000 baris per koleksi, rate limit D1 (fail-open),
 //   batas TOTAL per pengguna (arsitektur §4.3, S7): maks 100
 //   playlist, 1.000 item per playlist, 10.000 suka, 1.000
-//   riwayat — dihitung COUNT sebelum upsert, kelebihan
-//   dilewati per koleksi dan dilaporkan di respons push.
-//   Tombstone memakai UPDATE (bukan INSERT) sehingga tidak
-//   pernah menambah baris dan tidak pernah ditolak batas.
+//   riwayat — dihitung dari TABEL PENGHITUNG (S9, 1 baris baca
+//   per koleksi), kelebihan dilewati per koleksi dan dilaporkan
+//   di respons push. Tombstone memakai UPDATE (bukan INSERT)
+//   sehingga tidak pernah menambah baris dan tidak pernah
+//   ditolak batas. Anggaran tulis harian per akun 20.000 baris
+//   (S8b, §4.3 — maks 20% kuota tulis bersama per akun per hari;
+//   push yang melewatinya ditolak 429 + Retry-After). Hapus
+//   riwayat dihonori paling sering sekali per 24 jam per pengguna
+//   (S8a); clear yang terlalu sering diabaikan dengan respons
+//   jelas (historyClearIgnored + Retry-After dalam detik).
+//   Tiap INSERT entri baru dijaga klausa guard-WHERE berbasis
+//   penghitung (R19) sehingga batas ditegakkan per pernyataan
+//   secara atomik, bukan hanya check-then-act di level push.
 // Tanpa log isi: Worker tidak mencatat body, token, atau data
 // pengguna; hanya metrik agregat di console (jumlah request
 // per endpoint per jam) bila dibutuhkan.
@@ -74,6 +89,29 @@ const MAX_PLAYLISTS_PER_USER = 100;
 const MAX_ITEMS_PER_PLAYLIST = 1000;
 const MAX_LIKES_PER_USER = 10000;
 const MAX_HISTORY_PER_USER = 1000;
+// Anggaran tulis harian per akun (arsitektur §4.3, S8b): 20.000
+// baris/hari/akun. Longgar untuk pemakaian normal (sinkron penuh
+// akun yang sudah maksimal pun ~12.100 baris: 100 playlist +
+// 1.000 item + 10.000 suka + 1.000 riwayat), tetapi satu akun
+// paling banyak memakai 20% kuota tulis bersama (100.000/hari),
+// jadi TIDAK BISA mengurasnya sendirian — butuh 5 akun penuh
+// berkoordinasi. Dihitung dari ISI BODY push (termasuk entri
+// yang dilewati cap / bukan milik pendorong) supaya push "gratis"
+// tidak bisa dipakai membakar kuota BACA lewat probe (S9).
+const DAILY_WRITE_BUDGET = 20000;
+// Hapus riwayat dihonori paling sering sekali per 24 jam per
+// pengguna (S8a). Menghapus riwayat adalah tindakan sadar yang
+// jarang (seperti membersihkan riwayat browser); sekali sehari
+// jauh di atas kebutuhan sahih, dan menutup putaran
+// insert-100 + DELETE-keras yang memutar kuota tulis tanpa henti.
+const HISTORY_CLEAR_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// Rekonsiliasi penghitung (S9): hitung ulang via COUNT bila
+// penghitung melenceng di atas batas + 30 (tidak mungkin tanpa
+// drift — guard R19 menahan jumlah nyata di dekat batas), atau
+// lebih tua dari 24 jam saat sudah dalam 500 baris dari batas.
+const COUNTER_RECONCILE_OVER_CAP_SLACK = 30;
+const COUNTER_RECONCILE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const COUNTER_RECONCILE_NEAR_CAP = 500;
 const RATE_AUTH_PER_MIN = 10;
 const RATE_SYNC_PER_MIN = 30;
 const RATE_ME_PER_MIN = 60;
@@ -784,22 +822,38 @@ function validatePushBody(body) {
 }
 
 // ------------------------------------------------------------------
-// Batas total per pengguna (S7, arsitektur §4.3)
+// Batas total per pengguna (S7, arsitektur §4.3) + kuota (Blue 5)
 //
-// COUNT adalah baca D1 (kuota baca 5 juta baris/hari, jauh di
-// atas tulis) dan semuanya tercakup indeks yang sudah ada di
-// 0001 (idx_playlists_user_updated, idx_likes_user_updated,
-// idx_history_user_played, idx_items_playlist) — tidak butuh
-// migrasi baru. Satu COUNT per koleksi per push; query kunci
-// yang sudah ada hanya jalan bila headroom tidak cukup untuk
-// seluruh entri push (kasus umum tidak kena query tambahan).
+// S7 memakai COUNT(*) per push untuk cek batas. Red 5 (S9)
+// membuktikan COUNT itu membuka pembakaran kuota BACA: pengguna
+// di batas suka (10.000) membuat tiap push memindai 20.000 baris
+// (COUNT + fetchKeys tanpa batas), kuota 5 juta baris/hari habis
+// ~8 menit dari satu akun. Blue 5 mengganti kedua sumber baca
+// tak terbatas itu:
+//   (a) cek batas memakai TABEL PENGHITUNG sync_counts (migrasi
+//       0005): 1 baris baca per koleksi per push (lookup PK),
+//       diperbarui di batch yang sama dengan upsert, SEBELUM
+//       upsert — supaya arah melencengnya AMAN: penghitung yang
+//       terlalu tinggi hanya menolak penambahan sah, tidak pernah
+//       mengizinkan pelampauan batas.
+//   (b) cek kunci-yang-sudah-ada memakai query TERBATAS: hanya
+//       kunci dari entri yang didorong (IN (...), maks 100),
+//       bukan seluruh koleksi. Baca probe <= jumlah entri di body.
+// Keduanya diikat ke anggaran tulis harian S8: tiap entri di body
+// membebani anggaran, jadi baca per push tidak bisa dimaksimalkan
+// tanpa menghabiskan anggaran — aritmetika lengkap di
+// docs/blue5-red5-fixes.md (satu penyerang paling banyak ~6%
+// kuota baca per hari). Bila tabel 0005 belum termigrasi, kode
+// fail-open ke jalur COUNT S7 (sementara, sampai koordinator
+// menerapkan 0005) supaya sync tidak mati total.
 // ------------------------------------------------------------------
 
 /**
  * Jumlah baris milik pengguna di satu tabel, TERMASUK
  * tombstone: tombstone tetap baris yang memakan kuota, dan
  * menghitungnya menutup putaran hapus-buat-ulang yang
- * membakar kuota tulis tanpa henti.
+ * membakar kuota tulis tanpa henti. Dipakai rekonsiliasi
+ * penghitung (S9) + jalur fallback bila tabel 0005 belum ada.
  */
 async function countUserRows(db, table, userId) {
   const row = await db
@@ -809,16 +863,31 @@ async function countUserRows(db, table, userId) {
   return row ? Number(row.n) : 0;
 }
 
-/** Jumlah item per playlist untuk playlist-playlist yang disentuh push. */
-async function countItemsPerPlaylist(db, playlistIds) {
+/** Jumlah item di SATU playlist milik pengguna (rekonsiliasi). */
+async function countItemsForPlaylist(db, playlistId, userId) {
+  const row = await db
+    .prepare(
+      'SELECT COUNT(*) AS n FROM sync_playlist_items WHERE playlist_id = ? AND user_id = ?',
+    )
+    .bind(playlistId, userId)
+    .first();
+  return row ? Number(row.n) : 0;
+}
+
+/**
+ * Jumlah item per playlist untuk playlist-playlist yang disentuh
+ * push (jalur fallback S7). Difilter user_id milik pendorong
+ * (I20): hitungan cap tidak pernah menyentuh baris orang lain.
+ */
+async function countItemsPerPlaylist(db, userId, playlistIds) {
   const out = new Map();
   if (playlistIds.length === 0) return out;
   const marks = playlistIds.map(() => '?').join(', ');
   const rows = await db
     .prepare(
-      `SELECT playlist_id, COUNT(*) AS n FROM sync_playlist_items WHERE playlist_id IN (${marks}) GROUP BY playlist_id`,
+      `SELECT playlist_id, COUNT(*) AS n FROM sync_playlist_items WHERE user_id = ? AND playlist_id IN (${marks}) GROUP BY playlist_id`,
     )
-    .bind(...playlistIds)
+    .bind(userId, ...playlistIds)
     .all();
   for (const r of rows.results || []) {
     out.set(r.playlist_id, Number(r.n));
@@ -826,21 +895,133 @@ async function countItemsPerPlaylist(db, playlistIds) {
   return out;
 }
 
+/** Baca penghitung skalar (playlists/likes/history): 1 baris per koleksi. */
+async function readScalarCounters(db, userId, collections) {
+  const out = new Map();
+  if (collections.length === 0) return out;
+  const marks = collections.map(() => '?').join(', ');
+  const rows = await db
+    .prepare(
+      `SELECT collection, n, updated_at FROM sync_counts WHERE user_id = ? AND playlist_id = '' AND collection IN (${marks})`,
+    )
+    .bind(userId, ...collections)
+    .all();
+  for (const r of rows.results || []) {
+    out.set(r.collection, { n: Number(r.n), updatedAt: Number(r.updated_at) });
+  }
+  return out;
+}
+
+/** Baca penghitung item per playlist: 1 baris per playlist yang disentuh. */
+async function readItemCounters(db, userId, playlistIds) {
+  const out = new Map();
+  if (playlistIds.length === 0) return out;
+  const marks = playlistIds.map(() => '?').join(', ');
+  const rows = await db
+    .prepare(
+      `SELECT playlist_id, n, updated_at FROM sync_counts WHERE user_id = ? AND collection = 'items' AND playlist_id IN (${marks})`,
+    )
+    .bind(userId, ...playlistIds)
+    .all();
+  for (const r of rows.results || []) {
+    out.set(r.playlist_id, { n: Number(r.n), updatedAt: Number(r.updated_at) });
+  }
+  return out;
+}
+
+/** Simpan nilai penghitung hasil rekonsiliasi (nilai absolut, bukan delta). */
+async function storeCount(db, userId, collection, playlistId, n, now) {
+  await db
+    .prepare(
+      'INSERT INTO sync_counts (user_id, collection, playlist_id, n, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, collection, playlist_id) DO UPDATE SET n = excluded.n, updated_at = excluded.updated_at',
+    )
+    .bind(userId, collection, playlistId, n, now)
+    .run();
+}
+
 /**
- * Saring entri push ke yang muat dalam batas total. Bila
- * headroom cukup untuk semua entri (kasus umum), tidak ada
- * query tambahan. Bila tidak cukup, ambil kunci yang sudah ada
- * supaya UPDATE entri lama tidak dihitung sebagai penambahan:
- * hanya entri BARU yang memakan headroom. Duplikat kunci dalam
- * satu push dihitung sekali (yang kedua adalah update).
- * Mengembalikan { kept, skipped }.
+ * Hitung ulang satu penghitung dari data nyata (COUNT) lalu simpan.
+ * Dipakai saat penghitung basi (n < 0, sesudah hapus riwayat massal),
+ * melenceng di atas batas (n > cap + 30 — tidak mungkin tanpa drift,
+ * karena guard R19 menahan jumlah nyata di dekat batas), atau sudah
+ * tua (> 24 jam) saat sudah dekat batas (dalam 500 baris). Ketiganya
+ * terbatas: basi hanya sesudah clear (<= 1/hari), melenceng hanya
+ * sesudah race (butuh headroom, yang tidak kembali sesudah cap
+ * tercapai kecuali lewat clear), tua hanya 1x/hari/koleksi dan hanya
+ * bila sudah dekat batas. Lihat aritmetika di blue5-red5-fixes.md.
  */
-async function capNewEntries({ count, cap, entries, keyOf, fetchKeys }) {
-  const headroom = cap - count;
-  if (headroom >= entries.length) return { kept: entries, skipped: 0 };
-  const existing = new Set(await fetchKeys());
+async function reconcileCount(db, userId, collection, playlistId, cap, now) {
+  let n;
+  if (collection === 'items') {
+    n = await countItemsForPlaylist(db, playlistId, userId);
+  } else if (collection === 'playlists') {
+    n = await countUserRows(db, 'sync_playlists', userId);
+  } else if (collection === 'likes') {
+    n = await countUserRows(db, 'sync_likes', userId);
+  } else {
+    n = await countUserRows(db, 'sync_history', userId);
+  }
+  await storeCount(db, userId, collection, playlistId, n, now);
+  return n;
+}
+
+/**
+ * Selesaikan nilai hitung untuk satu koleksi dari baris
+ * penghitungnya. Baris tidak ada = hitung sekali + simpan
+ * (pengguna/playlist baru memindai 0 baris; pengguna lama yang
+ * lolos backfill — baris yang tercipta di jendela antara migrasi
+ * 0005 dan deploy Worker — dikoreksi). Penyimpanan membuat COUNT
+ * ini terjadi paling banyak sekali per (pengguna, koleksi /
+ * playlist) selamanya; tulis simpannya ditagih ke anggaran S8
+ * lewat tunjangan pembukuan di handlePush.
+ */
+async function resolveCount(
+  db,
+  userId,
+  collection,
+  playlistId,
+  cap,
+  row,
+  now,
+) {
+  if (!row) {
+    return reconcileCount(db, userId, collection, playlistId, cap, now);
+  }
+  const stale = row.n < 0;
+  const overCap = row.n > cap + COUNTER_RECONCILE_OVER_CAP_SLACK;
+  const oldNearCap =
+    now - row.updatedAt > COUNTER_RECONCILE_MAX_AGE_MS &&
+    row.n > cap - COUNTER_RECONCILE_NEAR_CAP;
+  if (stale || overCap || oldNearCap) {
+    return reconcileCount(db, userId, collection, playlistId, cap, now);
+  }
+  return row.n;
+}
+
+/**
+ * Saring entri push ke yang muat dalam batas total. Probe kunci
+ * SELALU jalan (S9: query TERBATAS — hanya kunci dari entri yang
+ * didorong, maks 100) supaya klasifikasi baru-vs-update eksak:
+ * klasifikasi itu menentukan delta penghitung + guard R19.
+ * Hanya entri BARU yang memakan headroom; duplikat kunci dalam
+ * satu push dihitung sekali (yang kedua adalah update).
+ * Mengembalikan { kept, newKeys, added, skipped }.
+ */
+async function capNewEntries({ count, cap, entries, keyOf, fetchExisting }) {
+  const seen = new Set();
+  const unique = [];
+  for (const e of entries) {
+    const k = keyOf(e);
+    if (!seen.has(k)) {
+      seen.add(k);
+      unique.push(e);
+    }
+  }
+  const existing = new Set(await fetchExisting(unique));
   const kept = [];
-  let room = headroom;
+  const newKeys = new Set();
+  let room = cap - count;
+  let added = 0;
   let skipped = 0;
   for (const e of entries) {
     const key = keyOf(e);
@@ -851,12 +1032,25 @@ async function capNewEntries({ count, cap, entries, keyOf, fetchKeys }) {
     if (room > 0) {
       room -= 1;
       existing.add(key);
+      newKeys.add(key);
+      added += 1;
       kept.push(e);
     } else {
       skipped += 1;
     }
   }
-  return { kept, skipped };
+  return { kept, newKeys, added, skipped };
+}
+
+/** Detik sampai 00:00 UTC berikutnya (Retry-After anggaran harian). */
+function secondsUntilMidnightUtc(nowMs) {
+  const d = new Date(nowMs);
+  const nextMidnight = Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate() + 1,
+  );
+  return Math.max(1, Math.ceil((nextMidnight - nowMs) / 1000));
 }
 
 async function handlePush(env, request, user) {
@@ -885,8 +1079,118 @@ async function handlePush(env, request, user) {
   const now = Date.now();
   const deviceId = body.deviceId;
   const stmts = [];
-  // S7: tegakkan batas TOTAL per pengguna (§4.3) SEBELUM
-  // membangun pernyataan upsert. Kelebihan DILEWATI per
+  const playlistsIn = body.playlists || [];
+  const itemsIn = body.playlistItems || [];
+  const likesIn = body.likes || [];
+  const historyIn = body.history || [];
+  const deletedPlaylistsIn = body.deletedPlaylists || [];
+  const deletedItemsIn = body.deletedPlaylistItems || [];
+  const deletedLikesIn = body.deletedLikes || [];
+
+  // ---- S8a: gerbang frekuensi hapus riwayat (maks 1x per 24 jam).
+  // Riwayat satu-satunya koleksi tanpa tombstone: tanpa gerbang
+  // ini satu push memasukkan 100 baris lalu DELETE keras menghapus
+  // semuanya, dan COUNT push berikutnya selalu 0 — putaran
+  // hapus-buat-ulang menguras kuota tulis bersama dalam 17-33
+  // menit. Clear yang terlalu sering DIABAIKAN dengan respons
+  // jelas (bukan diam-diam): klien menyimpan penandanya dan
+  // mencoba lagi di sinkronisasi berikut.
+  const clearRequested =
+    body.historyClearedBefore !== undefined &&
+    body.historyClearedBefore !== null;
+  let clearHonored = false;
+  let clearRetryAfterSeconds = 0;
+  let metaWritable = false; // true bila tabel meta terbukti ada
+  if (clearRequested) {
+    try {
+      const row = await db
+        .prepare(
+          'SELECT history_cleared_at FROM sync_user_meta WHERE user_id = ?',
+        )
+        .bind(user.id)
+        .first();
+      metaWritable = true;
+      const last = row ? Number(row.history_cleared_at) : 0;
+      if (now - last >= HISTORY_CLEAR_MIN_INTERVAL_MS) {
+        clearHonored = true;
+      } else {
+        clearRetryAfterSeconds = Math.ceil(
+          (last + HISTORY_CLEAR_MIN_INTERVAL_MS - now) / 1000,
+        );
+      }
+    } catch (e) {
+      console.warn(
+        'history clear: gagal baca stempel, clear diizinkan:',
+        e instanceof Error ? e.message : 'unknown',
+      );
+      clearHonored = true; // Fail-open: tabel belum termigrasi.
+    }
+  }
+
+  // ---- S8b: anggaran tulis harian per akun (atomik, §4.3).
+  // Tagihan dihitung dari ISI BODY (bukan dari pernyataan yang
+  // lolos cap): entri yang dilewati cap / bukan milik pendorong
+  // TETAP ditagih, supaya penyerang tidak bisa memakai push
+  // "gratis" untuk membakar kuota BACA (S9) lewat probe kunci +
+  // cek kepemilikan. DELETE hapus-riwayat ditagih sebesar
+  // MAKSIMUM baris yang bisa dihapusnya (1.000) karena jumlah
+  // pastinya baru diketahui sesudah dieksekusi. Tunjangan
+  // pembukuan menutup tulis yang BUKAN entri: per koleksi yang
+  // disentuh paling banyak 1 increment penghitung + 1 simpan
+  // rekonsiliasi (2x jumlah koleksi), + 3 untuk sentinel clear,
+  // stempel meta, dan upsert cadangan anggaran itu sendiri.
+  // Dengan tunjangan ini tagihan TIDAK PERNAH kurang dari tulis
+  // sebenarnya yang ditimbulkan push (maks 1.909/push).
+  // Cadangan bersifat atomik (satu upsert berkondisi): push
+  // bersamaan tidak bisa sama-sama lolos sesudah anggaran habis.
+  const nonEmptyScalar =
+    (playlistsIn.length > 0 ? 1 : 0) +
+    (likesIn.length > 0 ? 1 : 0) +
+    (historyIn.length > 0 ? 1 : 0);
+  const distinctItemPlaylists = new Set(
+    itemsIn.map((i) => i.playlistClientId),
+  ).size;
+  const charge =
+    playlistsIn.length +
+    itemsIn.length +
+    likesIn.length +
+    historyIn.length +
+    deletedPlaylistsIn.length +
+    deletedItemsIn.length +
+    deletedLikesIn.length +
+    (body.settings ? 1 : 0) +
+    (clearHonored ? MAX_HISTORY_PER_USER : 0) +
+    2 * (nonEmptyScalar + distinctItemPlaylists) +
+    3;
+  // Tagihan selalu >= 3 (tunjangan pembukuan), jadi cadangan
+  // selalu jalan — termasuk push kosong, supaya push kosong pun
+  // tidak bisa dipakai membakar kuota baca tanpa batas.
+  try {
+    const day = new Date(now).toISOString().slice(0, 10);
+    const res = await db
+      .prepare(
+        'INSERT INTO sync_write_budget (user_id, day, rows_written) VALUES (?, ?, ?) ON CONFLICT(user_id, day) DO UPDATE SET rows_written = sync_write_budget.rows_written + excluded.rows_written WHERE sync_write_budget.rows_written + excluded.rows_written <= ?',
+      )
+      .bind(user.id, day, charge, DAILY_WRITE_BUDGET)
+      .run();
+    if (res.meta?.changes !== 1) {
+      const retryAfter = secondsUntilMidnightUtc(now);
+      return jsonError(
+        429,
+        'DAILY_WRITE_BUDGET_EXCEEDED',
+        'Batas sinkronisasi harian tercapai. Coba lagi besok.',
+        { 'Retry-After': String(retryAfter) },
+      );
+    }
+  } catch (e) {
+    console.warn(
+      'anggaran tulis: gagal cadang, push diizinkan:',
+      e instanceof Error ? e.message : 'unknown',
+    );
+  }
+
+  // ---- S7 + S9: tegakkan batas TOTAL per pengguna (§4.3)
+  // SEBELUM membangun pernyataan upsert. Kelebihan DILEWATI per
   // koleksi dan dilaporkan di respons (bukan gagal diam-diam,
   // bukan gagal total — sisa push yang sah tetap diterapkan).
   // Tombstone tidak pernah ditolak batas: tombstone memakai
@@ -898,12 +1202,73 @@ async function handlePush(env, request, user) {
     likes: 0,
     history: 0,
   };
-  const playlistsIn = body.playlists || [];
-  const itemsIn = body.playlistItems || [];
-  const likesIn = body.likes || [];
-  const historyIn = body.history || [];
-  const [playlistCount, likesCount, historyCount, itemCounts] =
-    await Promise.all([
+  // Klasifikasi baru-vs-update per koleksi (untuk delta
+  // penghitung + guard R19); diisi fase cap di bawah.
+  let playlistNewKeys = new Set();
+  let playlistAdded = 0;
+  let likesNewKeys = new Set();
+  let likesAdded = 0;
+  let historyNewKeys = new Set();
+  let historyAdded = 0;
+  const itemNewKeys = new Map(); // playlistId -> Set<videoId>
+  const itemAdded = new Map(); // playlistId -> jumlah entri baru
+  // Hitungan batas: dari penghitung (S9), atau COUNT (fallback
+  // S7 bila tabel 0005 belum termigrasi).
+  let countersOk = true;
+  let playlistCount = 0;
+  let likesCount = 0;
+  let historyCount = 0;
+  const needScalar = [
+    ...(playlistsIn.length > 0 ? ['playlists'] : []),
+    ...(likesIn.length > 0 ? ['likes'] : []),
+    ...(historyIn.length > 0 ? ['history'] : []),
+  ];
+  try {
+    const rows = await readScalarCounters(db, user.id, needScalar);
+    if (playlistsIn.length > 0) {
+      playlistCount = await resolveCount(
+        db,
+        user.id,
+        'playlists',
+        '',
+        MAX_PLAYLISTS_PER_USER,
+        rows.get('playlists'),
+        now,
+      );
+    }
+    if (likesIn.length > 0) {
+      likesCount = await resolveCount(
+        db,
+        user.id,
+        'likes',
+        '',
+        MAX_LIKES_PER_USER,
+        rows.get('likes'),
+        now,
+      );
+    }
+    if (historyIn.length > 0) {
+      historyCount = await resolveCount(
+        db,
+        user.id,
+        'history',
+        '',
+        MAX_HISTORY_PER_USER,
+        rows.get('history'),
+        now,
+      );
+    }
+  } catch (e) {
+    // Tabel penghitung belum ada (0005 belum diterapkan):
+    // fail-open ke COUNT S7 supaya sync tetap jalan. S9 kembali
+    // terbuka di jendela ini — koordinator WAJIB menerapkan 0005
+    // sebelum deploy (lihat README + migrasi 0005).
+    console.warn(
+      'penghitung: gagal baca, fallback ke COUNT:',
+      e instanceof Error ? e.message : 'unknown',
+    );
+    countersOk = false;
+    [playlistCount, likesCount, historyCount] = await Promise.all([
       playlistsIn.length > 0
         ? countUserRows(db, 'sync_playlists', user.id)
         : 0,
@@ -911,101 +1276,100 @@ async function handlePush(env, request, user) {
       historyIn.length > 0
         ? countUserRows(db, 'sync_history', user.id)
         : 0,
-      itemsIn.length > 0
-        ? countItemsPerPlaylist(db, [
-            ...new Set(itemsIn.map((i) => i.playlistClientId)),
-          ])
-        : new Map(),
     ]);
+  }
   if (playlistsIn.length > 0) {
-    const { kept, skipped } = await capNewEntries({
+    const result = await capNewEntries({
       count: playlistCount,
       cap: MAX_PLAYLISTS_PER_USER,
       entries: playlistsIn,
       keyOf: (p) => p.clientId,
-      fetchKeys: async () => {
+      // S9: hanya cek kunci yang didorong (maks 100), bukan
+      // seluruh koleksi milik pengguna.
+      fetchExisting: async (unique) => {
+        const marks = unique.map(() => '?').join(', ');
         const rows = await db
-          .prepare('SELECT client_id FROM sync_playlists WHERE user_id = ?')
-          .bind(user.id)
+          .prepare(
+            `SELECT client_id FROM sync_playlists WHERE user_id = ? AND client_id IN (${marks})`,
+          )
+          .bind(
+            user.id,
+            ...unique.map((p) => p.clientId),
+          )
           .all();
         return (rows.results || []).map((r) => r.client_id);
       },
     });
-    body.playlists = kept;
-    skippedOverLimit.playlists = skipped;
+    body.playlists = result.kept;
+    skippedOverLimit.playlists = result.skipped;
+    playlistNewKeys = result.newKeys;
+    playlistAdded = result.added;
   }
-  if (itemsIn.length > 0) {
-    // Batas 1.000 item berlaku PER playlist, bukan total.
-    const byPlaylist = new Map();
-    for (const item of itemsIn) {
-      const list = byPlaylist.get(item.playlistClientId) || [];
-      list.push(item);
-      byPlaylist.set(item.playlistClientId, list);
-    }
-    const keptItems = [];
-    for (const [playlistId, entries] of byPlaylist) {
-      const { kept, skipped } = await capNewEntries({
-        count: itemCounts.get(playlistId) || 0,
-        cap: MAX_ITEMS_PER_PLAYLIST,
-        entries,
-        keyOf: (i) => i.videoId,
-        fetchKeys: async () => {
-          const rows = await db
-            .prepare(
-              'SELECT video_id FROM sync_playlist_items WHERE playlist_id = ?',
-            )
-            .bind(playlistId)
-            .all();
-          return (rows.results || []).map((r) => r.video_id);
-        },
-      });
-      keptItems.push(...kept);
-      skippedOverLimit.playlistItems += skipped;
-    }
-    body.playlistItems = keptItems;
-  }
+  // Cap item ada di bawah (sesudah cek kepemilikan, I20):
+  // hitungan cap tidak boleh menyentuh playlist orang lain.
   if (likesIn.length > 0) {
-    const { kept, skipped } = await capNewEntries({
+    const result = await capNewEntries({
       count: likesCount,
       cap: MAX_LIKES_PER_USER,
       entries: likesIn,
       keyOf: (l) => l.videoId,
-      fetchKeys: async () => {
+      // S9: hanya cek kunci yang didorong (maks 100).
+      fetchExisting: async (unique) => {
+        const marks = unique.map(() => '?').join(', ');
         const rows = await db
-          .prepare('SELECT video_id FROM sync_likes WHERE user_id = ?')
-          .bind(user.id)
+          .prepare(
+            `SELECT video_id FROM sync_likes WHERE user_id = ? AND video_id IN (${marks})`,
+          )
+          .bind(
+            user.id,
+            ...unique.map((l) => l.videoId),
+          )
           .all();
         return (rows.results || []).map((r) => r.video_id);
       },
     });
-    body.likes = kept;
-    skippedOverLimit.likes = skipped;
+    body.likes = result.kept;
+    skippedOverLimit.likes = result.skipped;
+    likesNewKeys = result.newKeys;
+    likesAdded = result.added;
   }
   if (historyIn.length > 0) {
-    const { kept, skipped } = await capNewEntries({
+    const result = await capNewEntries({
       count: historyCount,
       cap: MAX_HISTORY_PER_USER,
       entries: historyIn,
       keyOf: (h) => `${h.videoId}|${h.playedAt}`,
-      fetchKeys: async () => {
+      // S9: hanya cek pasangan (videoId, playedAt) yang didorong
+      // (row-value IN, maks 100) — bukan seluruh riwayat.
+      fetchExisting: async (unique) => {
+        const marks = unique.map(() => '(?, ?)').join(', ');
+        const binds = unique.flatMap((h) => [h.videoId, h.playedAt]);
         const rows = await db
           .prepare(
-            'SELECT video_id, played_at FROM sync_history WHERE user_id = ?',
+            `SELECT video_id, played_at FROM sync_history WHERE user_id = ? AND (video_id, played_at) IN (${marks})`,
           )
-          .bind(user.id)
+          .bind(user.id, ...binds)
           .all();
-        return (rows.results || []).map((r) => `${r.video_id}|${r.played_at}`);
+        return (rows.results || []).map(
+          (r) => `${r.video_id}|${r.played_at}`,
+        );
       },
     });
-    body.history = kept;
-    skippedOverLimit.history = skipped;
+    body.history = result.kept;
+    skippedOverLimit.history = result.skipped;
+    historyNewKeys = result.newKeys;
+    historyAdded = result.added;
   }
-  // R11: verifikasi kepemilikan playlist untuk item. Playlist
-  // yang sudah ada di D1 harus milik pendorong; playlist baru
-  // (belum ada di D1) diizinkan hanya bila ikut dibuat di push
-  // ini (di body.playlists) — jadi item yatim dan item ke
-  // playlist orang lain ditolak, sementara push "playlist baru
-  // + lagunya sekaligus" tetap jalan.
+  // R11 + I20: verifikasi kepemilikan playlist untuk item
+  // SEBELUM cap item dihitung. Playlist yang sudah ada di D1
+  // harus milik pendorong; playlist baru (belum ada di D1)
+  // diizinkan hanya bila ikut dibuat di push ini (di
+  // body.playlists yang lolos cap) — jadi item yatim dan item ke
+  // playlist orang lain ditolak, sementara push "playlist baru +
+  // lagunya sekaligus" tetap jalan. Urutan ini penting (I20):
+  // item ke playlist orang lain ditolak sebagai notOwned TANPA
+  // menyentuh perhitungan cap, jadi skippedOverLimit tidak
+  // pernah membocorkan perkiraan jumlah item playlist orang lain.
   const newPlaylistIds = new Set(
     (body.playlists || []).map((p) => p.clientId),
   );
@@ -1023,19 +1387,170 @@ async function handlePush(env, request, user) {
     return owned;
   }
   let skippedNotOwned = 0;
+  const ownedItems = [];
+  for (const item of itemsIn) {
+    if (await playlistOwned(item.playlistClientId)) {
+      ownedItems.push(item);
+    } else {
+      skippedNotOwned += 1;
+    }
+  }
+  const ownedDeletedItems = [];
+  for (const d of deletedItemsIn) {
+    if (await playlistOwned(d.playlistClientId)) {
+      ownedDeletedItems.push(d);
+    } else {
+      skippedNotOwned += 1;
+    }
+  }
+  // Cap item (batas 1.000 berlaku PER playlist, bukan total),
+  // hanya untuk item ke playlist milik pendorong.
+  if (ownedItems.length > 0) {
+    const touchedIds = [
+      ...new Set(ownedItems.map((i) => i.playlistClientId)),
+    ];
+    let itemCounts;
+    if (countersOk) {
+      const rows = await readItemCounters(db, user.id, touchedIds);
+      const resolved = await Promise.all(
+        touchedIds.map((pid) =>
+          resolveCount(
+            db,
+            user.id,
+            'items',
+            pid,
+            MAX_ITEMS_PER_PLAYLIST,
+            rows.get(pid),
+            now,
+          ),
+        ),
+      );
+      itemCounts = new Map(touchedIds.map((pid, i) => [pid, resolved[i]]));
+    } else {
+      itemCounts = await countItemsPerPlaylist(db, user.id, touchedIds);
+    }
+    const byPlaylist = new Map();
+    for (const item of ownedItems) {
+      const list = byPlaylist.get(item.playlistClientId) || [];
+      list.push(item);
+      byPlaylist.set(item.playlistClientId, list);
+    }
+    const keptItems = [];
+    for (const [playlistId, entries] of byPlaylist) {
+      const result = await capNewEntries({
+        count: itemCounts.get(playlistId) || 0,
+        cap: MAX_ITEMS_PER_PLAYLIST,
+        entries,
+        keyOf: (i) => i.videoId,
+        // S9: hanya cek kunci yang didorong di playlist ini.
+        fetchExisting: async (unique) => {
+          const marks = unique.map(() => '?').join(', ');
+          const rows = await db
+            .prepare(
+              `SELECT video_id FROM sync_playlist_items WHERE playlist_id = ? AND user_id = ? AND video_id IN (${marks})`,
+            )
+            .bind(
+              playlistId,
+              user.id,
+              ...unique.map((i) => i.videoId),
+            )
+            .all();
+          return (rows.results || []).map((r) => r.video_id);
+        },
+      });
+      keptItems.push(...result.kept);
+      skippedOverLimit.playlistItems += result.skipped;
+      itemNewKeys.set(playlistId, result.newKeys);
+      itemAdded.set(playlistId, result.added);
+    }
+    body.playlistItems = keptItems;
+  } else {
+    body.playlistItems = [];
+  }
+  body.deletedPlaylistItems = ownedDeletedItems;
+
+  // ---- S9: pembaruan penghitung — PALING AWAL di batch.
+  // Penghitung ditambah delta push ini SEBELUM upsert, supaya
+  // (1) guard R19 di bawah membaca nilai yang sudah mencakup
+  // push ini, dan (2) arah melencengnya aman bila batch gagal di
+  // tengah (penghitung terlalu tinggi hanya menolak penambahan
+  // sah, tidak pernah mengizinkan pelampauan batas; pulih lewat
+  // rekonsiliasi). Pernyataan pembukuan ini TIDAK dihitung di
+  // `applied` (bukan entri pengguna).
+  if (countersOk) {
+    const bump = (collection, playlistId, delta) => {
+      if (delta <= 0) return;
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_counts (user_id, collection, playlist_id, n, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, collection, playlist_id) DO UPDATE SET n = sync_counts.n + excluded.n, updated_at = excluded.updated_at',
+          )
+          .bind(user.id, collection, playlistId, delta, now),
+      );
+    };
+    bump('playlists', '', playlistAdded);
+    for (const [playlistId, delta] of itemAdded) {
+      bump('items', playlistId, delta);
+    }
+    bump('likes', '', likesAdded);
+    bump('history', '', historyAdded);
+    // S8a: clear riwayat menghapus jumlah baris yang tidak
+    // diketahui tanpa COUNT — tandai penghitung riwayat BASI
+    // (n = -1) sesudah increment, supaya push berikut menghitung
+    // ulang dari data nyata.
+    if (clearHonored) {
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_counts (user_id, collection, playlist_id, n, updated_at) VALUES (?, ?, ?, -1, ?) ON CONFLICT(user_id, collection, playlist_id) DO UPDATE SET n = -1, updated_at = excluded.updated_at',
+          )
+          .bind(user.id, 'history', '', now),
+      );
+    }
+  }
+  // S8a: stempel clear terakhir (hanya bila tabel meta ada).
+  if (clearHonored && metaWritable) {
+    stmts.push(
+      db
+        .prepare(
+          'INSERT INTO sync_user_meta (user_id, history_cleared_at) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET history_cleared_at = excluded.history_cleared_at',
+        )
+        .bind(user.id, now),
+    );
+  }
+  const bookkeepingStmts = stmts.length;
 
   // Playlist: id server = clientId (deterministik per perangkat
   // pembuat; LWW + tiebreak device_id seperti yang terbukti S8).
   // R11: upsert hanya menimpa bila baris yang ada milik pendorong
   // (user_id cocok) — clientId orang lain tidak bisa ditimpa.
+  // R19: entri BARU memakai INSERT terjaga (guard-WHERE berbasis
+  // penghitung); update entri lama memakai upsert biasa karena
+  // tidak menambah baris. Guard: (penghitung - delta + k) adalah
+  // jumlah nyata sebelum insert ke-k push ini, termasuk kontribusi
+  // push bersamaan yang mendarat duluan — bila sudah di batas,
+  // SELECT mengembalikan 0 baris dan INSERT menjadi no-op.
+  let playlistK = 0;
   for (const p of body.playlists || []) {
-    stmts.push(
-      db
-        .prepare(
-          'INSERT INTO sync_playlists (id, user_id, client_id, nama, deskripsi, device_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(id) DO UPDATE SET nama = excluded.nama, deskripsi = excluded.deskripsi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL WHERE (excluded.updated_at > sync_playlists.updated_at OR (excluded.updated_at = sync_playlists.updated_at AND excluded.device_id > sync_playlists.device_id)) AND sync_playlists.user_id = excluded.user_id',
-        )
-        .bind(p.clientId, user.id, p.clientId, p.nama, p.deskripsi ?? null, deviceId, now),
-    );
+    if (countersOk && playlistNewKeys.has(p.clientId)) {
+      const k = playlistK;
+      playlistK += 1;
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_playlists (id, user_id, client_id, nama, deskripsi, device_id, updated_at, deleted_at) SELECT ?, ?, ?, ?, ?, ?, ?, NULL WHERE (SELECT COALESCE(n, 0) FROM sync_counts WHERE user_id = ? AND collection = ? AND playlist_id = ?) - ? + ? < ? ON CONFLICT(id) DO UPDATE SET nama = excluded.nama, deskripsi = excluded.deskripsi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL WHERE (excluded.updated_at > sync_playlists.updated_at OR (excluded.updated_at = sync_playlists.updated_at AND excluded.device_id > sync_playlists.device_id)) AND sync_playlists.user_id = excluded.user_id',
+          )
+          .bind(p.clientId, user.id, p.clientId, p.nama, p.deskripsi ?? null, deviceId, now, user.id, 'playlists', '', playlistAdded, k, MAX_PLAYLISTS_PER_USER),
+      );
+    } else {
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_playlists (id, user_id, client_id, nama, deskripsi, device_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(id) DO UPDATE SET nama = excluded.nama, deskripsi = excluded.deskripsi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL WHERE (excluded.updated_at > sync_playlists.updated_at OR (excluded.updated_at = sync_playlists.updated_at AND excluded.device_id > sync_playlists.device_id)) AND sync_playlists.user_id = excluded.user_id',
+          )
+          .bind(p.clientId, user.id, p.clientId, p.nama, p.deskripsi ?? null, deviceId, now),
+      );
+    }
   }
   // S7: tombstone memakai UPDATE (bukan INSERT ... ON
   // CONFLICT): tombstone untuk baris yang tidak ada adalah
@@ -1052,24 +1567,32 @@ async function handlePush(env, request, user) {
         .bind(deviceId, now, now, d.clientId, user.id, now, now, deviceId),
     );
   }
+  // Item sudah difilter kepemilikan di atas (I20): tidak ada cek
+  // ulang di sini. Guard R19 per playlist (k dihitung per playlist).
+  const itemK = new Map();
   for (const item of body.playlistItems || []) {
-    if (!(await playlistOwned(item.playlistClientId))) {
-      skippedNotOwned++;
-      continue;
+    const keys = itemNewKeys.get(item.playlistClientId);
+    if (countersOk && keys && keys.has(item.videoId)) {
+      const k = itemK.get(item.playlistClientId) || 0;
+      itemK.set(item.playlistClientId, k + 1);
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_playlist_items (playlist_id, video_id, posisi, added_at, device_id, updated_at, deleted_at, title, artist, user_id) SELECT ?, ?, ?, ?, ?, ?, NULL, ?, ?, ? WHERE (SELECT COALESCE(n, 0) FROM sync_counts WHERE user_id = ? AND collection = ? AND playlist_id = ?) - ? + ? < ? ON CONFLICT(playlist_id, video_id) DO UPDATE SET posisi = excluded.posisi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL, title = excluded.title, artist = excluded.artist, user_id = excluded.user_id WHERE excluded.updated_at > sync_playlist_items.updated_at OR (excluded.updated_at = sync_playlist_items.updated_at AND excluded.device_id > sync_playlist_items.device_id)',
+          )
+          .bind(item.playlistClientId, item.videoId, item.posisi, now, deviceId, now, item.title ?? null, item.artist ?? null, user.id, user.id, 'items', item.playlistClientId, itemAdded.get(item.playlistClientId) || 0, k, MAX_ITEMS_PER_PLAYLIST),
+      );
+    } else {
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_playlist_items (playlist_id, video_id, posisi, added_at, device_id, updated_at, deleted_at, title, artist, user_id) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) ON CONFLICT(playlist_id, video_id) DO UPDATE SET posisi = excluded.posisi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL, title = excluded.title, artist = excluded.artist, user_id = excluded.user_id WHERE excluded.updated_at > sync_playlist_items.updated_at OR (excluded.updated_at = sync_playlist_items.updated_at AND excluded.device_id > sync_playlist_items.device_id)',
+          )
+          .bind(item.playlistClientId, item.videoId, item.posisi, now, deviceId, now, item.title ?? null, item.artist ?? null, user.id),
+      );
     }
-    stmts.push(
-      db
-        .prepare(
-          'INSERT INTO sync_playlist_items (playlist_id, video_id, posisi, added_at, device_id, updated_at, deleted_at, title, artist, user_id) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) ON CONFLICT(playlist_id, video_id) DO UPDATE SET posisi = excluded.posisi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL, title = excluded.title, artist = excluded.artist, user_id = excluded.user_id WHERE excluded.updated_at > sync_playlist_items.updated_at OR (excluded.updated_at = sync_playlist_items.updated_at AND excluded.device_id > sync_playlist_items.device_id)',
-        )
-        .bind(item.playlistClientId, item.videoId, item.posisi, now, deviceId, now, item.title ?? null, item.artist ?? null, user.id),
-    );
   }
   for (const d of body.deletedPlaylistItems || []) {
-    if (!(await playlistOwned(d.playlistClientId))) {
-      skippedNotOwned++;
-      continue;
-    }
     stmts.push(
       db
         .prepare(
@@ -1078,14 +1601,27 @@ async function handlePush(env, request, user) {
         .bind(deviceId, now, now, d.playlistClientId, d.videoId, user.id, now, now, deviceId),
     );
   }
+  let likeK = 0;
   for (const like of body.likes || []) {
-    stmts.push(
-      db
-        .prepare(
-          'INSERT INTO sync_likes (user_id, video_id, liked_at, device_id, updated_at, deleted_at, title, artist) VALUES (?, ?, ?, ?, ?, NULL, ?, ?) ON CONFLICT(user_id, video_id) DO UPDATE SET liked_at = excluded.liked_at, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL, title = excluded.title, artist = excluded.artist WHERE excluded.updated_at > sync_likes.updated_at OR (excluded.updated_at = sync_likes.updated_at AND excluded.device_id > sync_likes.device_id)',
-        )
-        .bind(user.id, like.videoId, like.likedAt, deviceId, now, like.title ?? null, like.artist ?? null),
-    );
+    if (countersOk && likesNewKeys.has(like.videoId)) {
+      const k = likeK;
+      likeK += 1;
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_likes (user_id, video_id, liked_at, device_id, updated_at, deleted_at, title, artist) SELECT ?, ?, ?, ?, ?, NULL, ?, ? WHERE (SELECT COALESCE(n, 0) FROM sync_counts WHERE user_id = ? AND collection = ? AND playlist_id = ?) - ? + ? < ? ON CONFLICT(user_id, video_id) DO UPDATE SET liked_at = excluded.liked_at, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL, title = excluded.title, artist = excluded.artist WHERE excluded.updated_at > sync_likes.updated_at OR (excluded.updated_at = sync_likes.updated_at AND excluded.device_id > sync_likes.device_id)',
+          )
+          .bind(user.id, like.videoId, like.likedAt, deviceId, now, like.title ?? null, like.artist ?? null, user.id, 'likes', '', likesAdded, k, MAX_LIKES_PER_USER),
+      );
+    } else {
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_likes (user_id, video_id, liked_at, device_id, updated_at, deleted_at, title, artist) VALUES (?, ?, ?, ?, ?, NULL, ?, ?) ON CONFLICT(user_id, video_id) DO UPDATE SET liked_at = excluded.liked_at, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL, title = excluded.title, artist = excluded.artist WHERE excluded.updated_at > sync_likes.updated_at OR (excluded.updated_at = sync_likes.updated_at AND excluded.device_id > sync_likes.device_id)',
+          )
+          .bind(user.id, like.videoId, like.likedAt, deviceId, now, like.title ?? null, like.artist ?? null),
+      );
+    }
   }
   for (const d of body.deletedLikes || []) {
     stmts.push(
@@ -1096,14 +1632,27 @@ async function handlePush(env, request, user) {
         .bind(deviceId, now, now, user.id, d.videoId, now, now, deviceId),
     );
   }
+  let historyK = 0;
   for (const h of body.history || []) {
-    stmts.push(
-      db
-        .prepare(
-          'INSERT INTO sync_history (user_id, video_id, played_at, seconds_played, device_id, updated_at, title, artist) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, video_id, played_at) DO UPDATE SET seconds_played = max(sync_history.seconds_played, excluded.seconds_played), device_id = excluded.device_id, updated_at = excluded.updated_at, title = excluded.title, artist = excluded.artist',
-        )
-        .bind(user.id, h.videoId, h.playedAt, h.secondsPlayed, deviceId, now, h.title ?? null, h.artist ?? null),
-    );
+    if (countersOk && historyNewKeys.has(`${h.videoId}|${h.playedAt}`)) {
+      const k = historyK;
+      historyK += 1;
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_history (user_id, video_id, played_at, seconds_played, device_id, updated_at, title, artist) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COALESCE(n, 0) FROM sync_counts WHERE user_id = ? AND collection = ? AND playlist_id = ?) - ? + ? < ? ON CONFLICT(user_id, video_id, played_at) DO UPDATE SET seconds_played = max(sync_history.seconds_played, excluded.seconds_played), device_id = excluded.device_id, updated_at = excluded.updated_at, title = excluded.title, artist = excluded.artist',
+          )
+          .bind(user.id, h.videoId, h.playedAt, h.secondsPlayed, deviceId, now, h.title ?? null, h.artist ?? null, user.id, 'history', '', historyAdded, k, MAX_HISTORY_PER_USER),
+      );
+    } else {
+      stmts.push(
+        db
+          .prepare(
+            'INSERT INTO sync_history (user_id, video_id, played_at, seconds_played, device_id, updated_at, title, artist) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, video_id, played_at) DO UPDATE SET seconds_played = max(sync_history.seconds_played, excluded.seconds_played), device_id = excluded.device_id, updated_at = excluded.updated_at, title = excluded.title, artist = excluded.artist',
+          )
+          .bind(user.id, h.videoId, h.playedAt, h.secondsPlayed, deviceId, now, h.title ?? null, h.artist ?? null),
+      );
+    }
   }
   if (body.settings) {
     stmts.push(
@@ -1114,7 +1663,8 @@ async function handlePush(env, request, user) {
         .bind(user.id, body.settings.settingsJson, deviceId, now),
     );
   }
-  if (body.historyClearedBefore) {
+  // S8a: DELETE hanya bila clear dihonori (sekali per 24 jam).
+  if (clearHonored) {
     stmts.push(
       db
         .prepare('DELETE FROM sync_history WHERE user_id = ? AND played_at <= ?')
@@ -1127,7 +1677,10 @@ async function handlePush(env, request, user) {
   }
   return jsonOk({
     serverTime: now,
-    applied: stmts.length,
+    // `applied` hanya menghitung pernyataan data (bukan
+    // pembukuan penghitung/stempel) supaya artinya tetap
+    // "entri yang diterapkan".
+    applied: stmts.length - bookkeepingStmts,
     skippedNotOwned,
     // S7: kelebihan di atas batas total, per koleksi, + nilai
     // batasnya — klien bisa menampilkan pesan yang jelas
@@ -1139,6 +1692,14 @@ async function handlePush(env, request, user) {
       likes: MAX_LIKES_PER_USER,
       history: MAX_HISTORY_PER_USER,
     },
+    // S8a: clear yang diabaikan dilaporkan eksplisit (klien
+    // menyimpan penandanya dan mencoba lagi nanti).
+    ...(clearRequested && !clearHonored
+      ? {
+          historyClearIgnored: true,
+          historyClearRetryAfterSeconds: clearRetryAfterSeconds,
+        }
+      : {}),
   });
 }
 
@@ -1251,6 +1812,11 @@ export default {
             db.prepare('DELETE FROM sync_likes WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM sync_history WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM sync_settings WHERE user_id = ?').bind(user.id),
+            // Blue 5: hapus juga penghitung, anggaran, dan stempel
+            // pengguna (migrasi 0005) supaya tidak ada sisa.
+            db.prepare('DELETE FROM sync_counts WHERE user_id = ?').bind(user.id),
+            db.prepare('DELETE FROM sync_write_budget WHERE user_id = ?').bind(user.id),
+            db.prepare('DELETE FROM sync_user_meta WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
             db.prepare('DELETE FROM users WHERE id = ?').bind(user.id),
           ]);

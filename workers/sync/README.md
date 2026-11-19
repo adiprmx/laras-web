@@ -22,9 +22,14 @@ playlist, 10.000 suka, 1.000 riwayat. Kelebihan dilewati per
 koleksi dan dilaporkan di respons push (`skippedOverLimit` +
 `limits`); update entri lama dan penghapusan tidak pernah
 dibatasi. Tombstone memakai UPDATE (bukan INSERT) sehingga
-tidak pernah menambah baris. Tidak ada migrasi baru untuk ini:
-semua COUNT tercakup indeks 0001 (terverifikasi EXPLAIN QUERY
-PLAN di SQLite lokal — semua memakai covering index).
+tidak pernah menambah baris. Sejak Blue 5, cek batas memakai
+tabel penghitung (1 baris baca per koleksi, bukan COUNT per
+push) + tiap INSERT entri baru dijaga klausa guard-WHERE,
+anggaran tulis harian per akun 20.000 baris (push yang
+melewatinya ditolak 429 + `Retry-After`), dan hapus riwayat
+dihonori paling sering sekali per 24 jam (clear yang terlalu
+sering diabaikan + dilaporkan `historyClearIgnored`).
+Detail + aritmetika kuota: `docs/blue5-red5-fixes.md`.
 
 ## Checklist deploy (koordinator)
 
@@ -36,12 +41,18 @@ PLAN di SQLite lokal — semua memakai covering index).
    wrangler d1 execute laras-web-sync --file=workers/sync/0002_ratelimit.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/0003_item_meta.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0004_oauth_states_item_owner.sql --remote
+   wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0005_sync_quotas.sql --remote
    ```
    Migrasi 0003 WAJIB sebelum deploy Worker ini — SQL push/pull
    memakai kolom `title`/`artist` dari 0003. Migrasi 0004 WAJIB
    sebelum deploy Worker pasca-Blue 3 — SQL callback memakai tabel
    `oauth_states` dan SQL push item memakai kolom `user_id` dari
    0004 (tanpa tabelnya, login fail-open tanpa single-use).
+   Migrasi 0005 WAJIB sebelum deploy Worker pasca-Blue 5 — SQL
+   kuota memakai tabel `sync_counts`, `sync_write_budget`, dan
+   `sync_user_meta` dari 0005 (tanpa tabelnya, Worker fail-open
+   ke perilaku Blue 4: COUNT per push + tanpa anggaran tulis,
+   sehingga S8/S9 kembali terbuka sampai 0005 diterapkan).
 2. **Aplikasi OAuth (langkah owner — BELUM DIBUAT saat P7 ditulis).**
    Buat aplikasi OAuth Google + GitHub, daftarkan redirect URI:
    `https://laras-sync.hiroohengkerr.workers.dev/api/auth/callback`

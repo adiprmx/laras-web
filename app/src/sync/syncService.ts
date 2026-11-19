@@ -65,7 +65,11 @@ export interface SyncSettingsPayload {
 
 export interface SyncDeps {
   pull: (since: number) => Promise<PullData>;
-  push: (body: PushBody) => Promise<{ serverTime: number; applied: number }>;
+  push: (body: PushBody) => Promise<{
+    serverTime: number;
+    applied: number;
+    historyClearIgnored?: boolean;
+  }>;
 }
 
 export const defaultSyncDeps: SyncDeps = {
@@ -172,6 +176,11 @@ export async function applyPull(
         if (stale()) return;
         await getPlayerService().applySyncedEqSettings(payload.eq);
         const lyrics = await getLyricsService();
+        // R20: cek generasi TEPAT sebelum penulisan ini juga —
+        // dua await di atas memberi jendela bagi wipe, dan tanpa
+        // cek ini preferensi lirik server bisa bangkit di database
+        // segar sesudah wipe.
+        if (stale()) return;
         await lyrics.setEnabled(payload.lyricsEnabled, { quiet: true });
         if (stale()) return;
         await setSettingsAppliedAt(pull.settings.updatedAt);
@@ -371,6 +380,12 @@ export async function syncNow(
   );
   let serverTime = pull.serverTime;
   let pushed = 0;
+  // S8a: bila server mengabaikan hapus riwayat (baru boleh sekali
+  // per 24 jam), penanda lokal DIPERTAHANKAN supaya sinkronisasi
+  // berikut mencoba lagi — bukan dibuang (riwayat server belum
+  // terhapus, dan penanda yang hilang berarti clear tidak pernah
+  // sampai ke server).
+  let clearIgnored = false;
   for (let i = 0; i < rounds; i++) {
     // R18: wipe di tengah dorong — berhenti, jangan lanjut ronde.
     if (!isSyncEpochCurrent(epoch)) {
@@ -396,6 +411,8 @@ export async function syncNow(
     const result = await deps.push(roundBody);
     serverTime = result.serverTime;
     pushed += result.applied;
+    // Penanda hapus riwayat hanya dikirim di ronde pertama.
+    if (i === 0 && result.historyClearIgnored) clearIgnored = true;
   }
 
   // 3) Penanda sukses (hanya bila SEMUA dorong berhasil).
@@ -411,7 +428,7 @@ export async function syncNow(
     const maxPlayedAt = Math.max(...body.history.map((h) => h.playedAt));
     await library.setMeta(SYNC_HISTORY_PUSHED_KEY, String(maxPlayedAt));
   }
-  if (body.historyClearedBefore !== undefined) {
+  if (body.historyClearedBefore !== undefined && !clearIgnored) {
     await library.setMeta(SYNC_HISTORY_CLEARED_KEY, '');
   }
   if (body.settings) {

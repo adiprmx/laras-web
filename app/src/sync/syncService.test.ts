@@ -15,8 +15,12 @@ import {
   resetLibraryService,
   type LibraryService,
 } from '../data/library';
-import { resetLyricsService } from '../lyrics/lyricsService';
+import {
+  LYRICS_ENABLED_KEY,
+  resetLyricsService,
+} from '../lyrics/lyricsService';
 import { DEFAULT_EQ_SETTINGS, EQ_PRESET_GAINS } from '../player/equalizer';
+import { getPlayerService } from '../player/service';
 import { useEqualizerStore } from '../store/equalizer';
 import { getDeviceId } from './deviceId';
 import {
@@ -382,6 +386,43 @@ describe('syncService', () => {
       // sesudah baca kedua membatalkan sisanya.
       expect(created).toEqual(['dev-x:1']);
     });
+
+    it('R20: setEnabled tidak dipanggil bila generasi berubah selama applySyncedEqSettings', async () => {
+      // Wipe mendarat di jendela antara dua await cabang
+      // pengaturan (applySyncedEqSettings + getLyricsService):
+      // preferensi lirik server tidak boleh bangkit di database
+      // segar sesudah wipe.
+      const player = getPlayerService();
+      const spy = vi
+        .spyOn(player, 'applySyncedEqSettings')
+        .mockImplementation(async () => {
+          invalidateSyncEpoch();
+        });
+      try {
+        const payload: SyncSettingsPayload = {
+          version: 1,
+          eq: { preset: 'bass', gains: [...EQ_PRESET_GAINS.bass] },
+          lyricsEnabled: false,
+        };
+        await applyPull(library, {
+          ...emptyPull(),
+          settings: {
+            settingsJson: JSON.stringify(payload),
+            updatedAt: 9000,
+          },
+        });
+        const lyrics = await import('../lyrics/lyricsService').then((m) =>
+          m.getLyricsService(),
+        );
+        // setEnabled tidak berjalan: meta lirik tidak tertulis,
+        // nilai tetap default (aktif), penanda tidak ditulis.
+        expect(await library.getMeta(LYRICS_ENABLED_KEY)).toBeNull();
+        expect(await lyrics.isEnabled()).toBe(true);
+        expect((await getSettingsMarkers()).appliedAt).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 
   describe('collectPushBody', () => {
@@ -630,6 +671,31 @@ describe('syncService', () => {
       expect(await library.playlistByClientId('dev-x:7')).toBeNull();
       // Penanda sukses tidak ditulis ke database.
       expect(await library.getMeta(SYNC_LAST_PULL_KEY)).toBeNull();
+    });
+
+    it('S8: penanda hapus riwayat dipertahankan bila server mengabaikan clear', async () => {
+      await library.setMeta(SYNC_HISTORY_CLEARED_KEY, '12345');
+      const deps = {
+        pull: async () => emptyPull(20_000),
+        push: async (body: PushBody) => {
+          expect(body.historyClearedBefore).toBe(12345);
+          return {
+            serverTime: 21_000,
+            applied: 0,
+            historyClearIgnored: true,
+          };
+        },
+      };
+      await syncNow(deps);
+      // Penanda dipertahankan — sinkronisasi berikut mencoba lagi.
+      expect(await library.getMeta(SYNC_HISTORY_CLEARED_KEY)).toBe('12345');
+      // Bila server menghormati clear, penanda dibersihkan.
+      const deps2 = {
+        pull: async () => emptyPull(22_000),
+        push: async () => ({ serverTime: 23_000, applied: 1 }),
+      };
+      await syncNow(deps2);
+      expect(await library.getMeta(SYNC_HISTORY_CLEARED_KEY)).toBe('');
     });
   });
 });
