@@ -1,31 +1,30 @@
 /**
- * Failover proxy Cloudflare -> Render (KERANGKA, BELUM DIAKTIFKAN).
+ * Failover egress resolve (Cloudflare -> Render -> Invidious).
  *
- * Status 19 Nov 2026: DRAFT. Layanan Render BELUM DIBUAT (API key
- * Render belum ada; lihat docs/render-egress.md). Modul ini TIDAK
- * diimpor oleh resolve.ts, innertube.ts, atau modul lain. Hanya
- * koordinator yang wiring sesudah vonis BERSIH dari probe live
- * (OK + format audio pada min 2 sel independen SAAT CF ditolak).
- * Jangan aktifkan sebelum itu: failover ke egress yang belum
- * terbukti hanya menambah latensi tanpa nilai.
+ * LAPISAN RENDER (KERANGKA, BELUM DIAKTIFKAN, TETAP MATI):
+ * layanan Render dibuat 19 Nov 2026 dan DITOLAK oleh probe
+ * (0/18 sel OK lintas siklus 3+4; lihat docs/render-egress.md).
+ * `postInnertubeWithFailover` tetap ada sebagai kerangka draft
+ * dan TIDAK diimpor oleh resolve.ts; saklar RENDER_FAILOVER_ENABLED
+ * tetap false. Jangan aktifkan: failover ke egress yang terbukti
+ * ditolak hanya menambah latensi tanpa nilai.
  *
- * Perilaku bila diaktifkan (wiring mengganti pemanggilan
- * postInnertube di postViaProxy dengan postInnertubeWithFailover):
- * coba Cloudflare dulu; bila CF melempar (jaringan/proxy) atau
- * /api/innertube/player mengembalikan playability penolakan
- * (LOGIN_REQUIRED/UNPLAYABLE), coba Render sekali. Hasil Render
- * dikembalikan apa adanya (termasuk bila ikut menolak) supaya
- * pemanggil tetap melihat playability sebenarnya. Jalur selain
- * player (search/browse/next) hanya failover saat CF melempar,
- * karena responsnya tidak membawa playability.
- *
- * Catatan tidur Render: layanan gratis tidur sesudah 15 menit
- * idle dan bangun sekitar 1 menit. Percobaan Render pertama
- * sesudah tidur bisa melewati timeout pemanggil; keep-alive ping
- * tiap 10 menit ke /healthz (di luar modul ini) yang menjaga
- * layanan tetap bangun. Modul ini TIDAK melakukan warm-up
- * sendiri: satu percobaan failover yang gagal karena tidur
- * dicatat sebagai galat jaringan biasa.
+ * LAPISAN INVIDIOUS (AKTIF sebagai cadangan TERAKHIR):
+ * instance Invidious publik yt.chocolatemoo53.com terverifikasi
+ * BERSIH oleh re-probe Koordinator #9 (20 Nov 2026 01:22-01:24
+ * WIB): 3/3 OK_AUDIO dengan braket kontrol CF sebelum+sesudah
+ * sama-sama ditolak; URL audio terverifikasi mengalir
+ * (Range -> 206); CORS terbuka (ACAO *). Alasan cadangan
+ * terakhir (bukan utama): instance tunggal tak dikenal,
+ * ekosistem Invidious publik tipis, operator tidak dikenal,
+ * respons lambat (6-23 detik) dan kemungkinan dari cache.
+ * Urutan resolve penuh: proxy CF -> cache D1 -> Invidious ->
+ * fallback IFrame. Wiring lewat injeksi `cacheLookup` di
+ * StreamResolver (service.ts), TANPA mengubah resolve.ts:
+ * `fetchCachedStreamWithInvidiousFallback` mencoba cache D1
+ * dulu, Invidious hanya bila cache kosong. Matikan saklar
+ * INVIDIOUS_FAILOVER_ENABLED bila instance mati atau re-probe
+ * berkala gagal.
  */
 import {
   INNERTUBE_MAX_BYTES,
@@ -37,6 +36,11 @@ import {
   type InnertubeErrorKind,
 } from '../extractor/innertube';
 import { readCappedText, ResponseTooBigError } from '../extractor/readCapped';
+import {
+  fetchCachedStream,
+  type CachedStream,
+} from '../extractor/resolveCache';
+import { fetchInvidiousStream } from '../extractor/invidious';
 import { isRefusalPlayability } from './retry';
 
 /** URL dasar proxy Render (egress ketiga). Layanan belum dibuat. */
@@ -47,6 +51,44 @@ export const RENDER_PROXY_BASE_URL = 'https://laras-proxy-render.onrender.com';
  * Per-panggilan bisa di-override lewat opts (dipakai tes).
  */
 export const RENDER_FAILOVER_ENABLED = false;
+
+/**
+ * Saklar failover Invidious. TRUE sesudah vonis BERSIH re-probe
+ * Koordinator #9 (20 Nov 2026 01:22-01:24 WIB, 3/3 OK_AUDIO,
+ * braket CF bersih). Matikan bila instance mati atau re-probe
+ * berkala gagal — resolve kembali ke cache D1 saja.
+ * Per-panggilan bisa di-override lewat opts (dipakai tes).
+ */
+export const INVIDIOUS_FAILOVER_ENABLED = true;
+
+/**
+ * Lookup gabungan cache D1 + Invidious untuk StreamResolver.
+ *
+ * Dipakai service.ts sebagai `cacheLookup` (resolve.ts tidak
+ * diubah): sesudah semua putaran resolve langsung gagal,
+ * StreamResolver memanggil lookup ini; cache D1 dicoba dulu,
+ * Invidious hanya bila cache kosong. Bila keduanya kosong,
+ * resolve melempar seperti biasa dan service masuk fallback
+ * IFrame. Kedua lookup tidak pernah melempar (null = kosong),
+ * dan tryCache di resolve.ts juga membungkus lookup ini dengan
+ * try/catch — kegagalan di sini tidak menutupi penyebab asli.
+ */
+export async function fetchCachedStreamWithInvidiousFallback(
+  videoId: string,
+  opts: {
+    enabled?: boolean;
+    cacheLookup?: (videoId: string) => Promise<CachedStream | null>;
+    invidiousLookup?: (videoId: string) => Promise<CachedStream | null>;
+  } = {},
+): Promise<CachedStream | null> {
+  const cacheLookup = opts.cacheLookup ?? fetchCachedStream;
+  const cached = await cacheLookup(videoId);
+  if (cached) return cached;
+  const enabled = opts.enabled ?? INVIDIOUS_FAILOVER_ENABLED;
+  if (!enabled) return null;
+  const invidiousLookup = opts.invidiousLookup ?? fetchInvidiousStream;
+  return invidiousLookup(videoId);
+}
 
 export type ProxyEgress = 'cloudflare' | 'render';
 

@@ -579,7 +579,10 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
     const state = usePlayerStore.getState();
     expect(state.status).toBe('error');
     expect(state.errorMessage).toContain('Server perantara');
-  });
+    // Batas 20 dtk seperti tes tetangga di atas: tes ini memakan
+    // ~4 dtk sendiri dan melewati batas bawaan 5 dtk saat suite
+    // penuh membebani VM (gagal timeout 2x beruntun, 930/931).
+  }, 20000);
 
   it('kanari gagal baru-baru ini: putaran cepat dilewati + status awal', async () => {
     await seedCanary(

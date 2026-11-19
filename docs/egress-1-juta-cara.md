@@ -23,7 +23,7 @@ sesaat, masing-masing <1 menit: 18:50, 19:00, 19:57, 22:30, 22:50-22:56).
 | 0 | Render / Oregon | DITOLAK | 0/18 lintas siklus 3+4 | 19 Nov 22:33 |
 | 0 | poToken | DITOLAK | spike: token 1/8 vs tanpa 1/11; tidak replikasi | 19 Nov 19:11 |
 | 0 | visitorData via proxy | DITOLAK | tidak membantu | 19 Nov |
-| P0 | Fly.io | TAK MEYAKINKAN (0 probe) | deploy terhenti: kartu tak terjawab + egress mati; kode siap | 19 Nov 23:18 |
+| P0 | Fly.io | TERBLOKIR-KARTU (DITUTUP) | `flyctl apps create` ditolak API: "We need your payment information to continue!" (kartu/kredit wajib); 0 probe | 20 Nov 01:07 |
 | P1 | Klien IOS / ANDROID / TVHTML5 / TVHTML5_SAMSUNG / WEB_EMBEDDED_PLAYER (+embedUrl) | DITOLAK (6 varian) | 0/54 sel proxy (18 CF + 36 Render) | 19 Nov 23:07 |
 | P2a | Supabase Edge Functions | DITOLAK | 0/9 (5 LOGIN_REQUIRED + 4x HTTP 403) | 19 Nov 22:55 |
 | P2a | Hugging Face Spaces | TERBLOKIR (butuh token via browser) | token tidak ditemukan; artefak siap | 19 Nov |
@@ -34,22 +34,30 @@ sesaat, masing-masing <1 menit: 18:50, 19:00, 19:57, 22:30, 22:50-22:56).
 | P2b | Railway | TERBLOKIR (butuh browser + gerbang bayar sementara) | status page 18 Nov | 19 Nov |
 | P3 | Cache resolve D1 | DIBANGUN (di-wire koordinator #8) | migrasi 0008 + endpoint + populator | 19 Nov |
 | P3 | Fallback IFrame Player | DIBANGUN (di-wire koordinator #8) | docs/iframe-fallback.md + komponen | 19 Nov |
-| P4 | Invidious (yt.chocolatemoo53.com) | BERSIH (cadangan terakhir saja) | 6/6 OK_AUDIO, braket CF sah | 19 Nov 22:52 |
+| P4 | Invidious (yt.chocolatemoo53.com) | BERSIH, DI-WIRE (cadangan terakhir) | re-probe 20 Nov 01:24: 3/3 OK_AUDIO, braket CF sah, Range 206, CORS * | 20 Nov 01:24 |
 | P4 | Piped (8 instance) | DITOLAK (0/8 hidup) | 522/502/403/empty | 19 Nov |
 
-## P0: Fly.io (TAK MEYAKINKAN)
+## P0: Fly.io (TERBLOKIR-KARTU, DITUTUP 20 Nov 01:07 WIB)
 
 Token org valid (org ADIP RMX, slug `personal`, 1 member ADMIN).
 flyctl v0.5.13 terpasang di `~/.fly/bin` (installer resmi gagal chown
 sandbox; jalan keluar tarball GitHub + `tar --no-same-owner`). Kode proxy
 siap di `workers/fly-proxy/` (server.js cermin Render, fly.toml app
-`laras-proxy-fly` region sin, Dockerfile node:24-alpine). `apps create`
-gagal transport (`context deadline exceeded` ke api.machines.dev) dan
-kartu persetujuan tidak dijawab; egress VM mati total ~22:58-23:04 WIB;
-`apps list` susulan timeout + kartu ke-2 tak terjawab. Belum ada bukti
-blokir kartu. Status create ambigu: cek `apps list` dulu sebelum create
-ulang. Lanjut HANYA saat owner hadir menyetujui kartu (masa hidup
-~10 menit). Bukti: `hidden_files/koordinator/fly-egress.md`, `p0-log.md`.
+`laras-proxy-fly` region sin, Dockerfile node:24-alpine). Percobaan
+`apps create` P0 (19 Nov ~22:57 WIB) gagal transport; retry koordinator
+#11 (20 Nov 01:07 WIB) membuktikan penolakan di level API: `flyctl
+apps create laras-proxy-fly --org personal` -> exit 1, "We need your
+payment information to continue! Add a credit card or buy credit"
+(Request ID 01M7TFYT0QH7SDG2WPP7S3S29A-ewr). `apps list` sesaat
+sebelumnya sukses ("No apps found"), bukan galat transport atau auth.
+Akun tidak bisa membuat aplikasi apa pun tanpa kartu/kredit; opsi
+"buy credit" (prabayar) juga pembayaran dan melanggar FREE TIER
+FOREVER. Kartu persetujuan api.fly.io sudah "always allowed" (owner,
+01:02 WIB), bukan lagi penghalang. TREK DITUTUP: 0 sel ter-probe
+(tidak ada layanan yang bisa dibuat, jadi tidak ada vonis atas IP
+Fly.io); dibuka lagi hanya bila owner sendiri menambahkan kartu/kredit
+(keputusan owner). Bukti: `hidden_files/koordinator/fly-egress.md`,
+`p0-log.md`, `fly-create-blocked.txt`.
 
 ## P1: Klien InnerTube tambahan (DITOLAK, 6 varian)
 
@@ -70,6 +78,20 @@ Tindak lanjut (bukan P1): config memakai ANDROID_VR id 14
 (= ANDROID_CREATOR), sementara yt-dlp/YouTube.js/MeeTube sepakat
 ANDROID_VR id = 28. Perlu verifikasi + koreksi terpisah (perubahan
 perilaku, jangan asal ubah).
+
+Hasil tindak lanjut (Koordinator #9, 20 Nov 01:28-01:32 WIB):
+klaim sumber TERKONFIRMASI (yt-dlp master
+`INNERTUBE_CLIENTS['android_vr']` = 28; YouTube.js
+`CLIENT_NAME_IDS`: ANDROID_CREATOR '14', ANDROID_VR '28';
+bukti `hidden_files/koordinator/c9-clientid-sources.md`).
+Probe 28 vs 14 (selang-seling 3x masing-masing, kontrol CF):
+id14 OK 0/3, id28 OK 0/3 (semua respons valid LOGIN_REQUIRED;
+masing-masing 1 timeout transport); kontrol-sesudah WEB_REMIX OK
+sehingga vonis formal TAK_MEYAKINKAN, tapi substansinya SAMA.
+Keputusan: config TIDAK DIUBAH (tidak ada bukti perilaku lebih
+baik; yt-dlp juga mencatat format ANDROID_VR 1.65.10 di-403
+sejak 17 Agu 2026). Bukti: `c9-clientid28.jsonl`,
+`c9-driver-clientid2-stdout.log`.
 
 ## P2a: Supabase Edge Functions (DITOLAK) + HF Spaces (TERBLOKIR)
 
@@ -185,14 +207,58 @@ sementara Invidious, proxy CF, dan GitHub merespons normal dari
 sandbox yang sama). Bukti: `hidden_files/koordinator/p4-invidious-piped.md`,
 `p4-probes.jsonl`, `p4-control.jsonl`, `p4-health.jsonl`.
 
+### Re-probe + wiring (Koordinator #9, 20 Nov 2026 00:38-01:24 WIB)
+
+Vonis P4 kedaluwarsa cepat, jadi diprobe ulang dengan protokol sama
+(kontrol CF sebelum+sesudah). Siklus 1 (00:46-00:47): TAK MEYAKINKAN
+(3/3 OK_AUDIO tapi kontrol-sesudah WEB_REMIX OK, jendela berkedip).
+Siklus 2 (00:53-01:08): TANPA_VONIS (jendela terbuka panjang; satu
+timeout transport sempat disalahartikan sebagai jendela tertutup,
+cacat driver diperbaiki: penutupan jendela hanya diakui dari
+penolakan nyata LOGIN_REQUIRED/UNPLAYABLE). Siklus 3 (01:22-01:24):
+BERSIH, 3/3 OK_AUDIO (7,75/11,52/22,91 dtk; 5 format audio; braket
+CF sebelum+sesudah 2/2 LOGIN_REQUIRED); URL audio terverifikasi
+mengalir (Range 206, 4096 byte, audio/mp4, 76,63 dtk); daftar resmi
+tetap api:true, cors:true, uptime 99,978%. CORS dibuktikan terpisah:
+GET dengan Origin -> 200 + Access-Control-Allow-Origin: *; OPTIONS
+preflight -> 204. WIRING: lapisan cadangan TERAKHIR sebelum fallback
+IFrame (urutan: proxy CF -> cache D1 -> Invidious -> IFrame); modul
+baru `app/src/extractor/invidious.ts` + flag
+`INVIDIOUS_FAILOVER_ENABLED` di proxyFailover.ts + injeksi
+cacheLookup di service.ts (resolve.ts tidak diubah). Alasan cadangan
+terakhir: instance tunggal tak dikenal. Bukti:
+`hidden_files/koordinator/c9-invidious-reprobe.jsonl`,
+`c9-invidious-verdict-cycle3.txt`, `c9-invidious-cors.jsonl`,
+`c9-driver-cycle3-stdout.log`.
+
 ## Yang belum dicoba / berikutnya
 
-1. Fly.io retry saat owner hadir (kartu persetujuan) — kode siap,
-   cek `apps list` dulu (create ambigu).
+1. Fly.io DITUTUP (TERBLOKIR-KARTU, 20 Nov 01:07 WIB); dibuka lagi
+   hanya bila owner sendiri menambahkan kartu/kredit.
 2. HF Spaces sesudah token Write dibuat via browser.
 3. Appwrite sesudah login via browser (proyek `laras-proxy`).
 4. Railway sesudah trial deploy dibuka lagi (cek status page).
-5. Invidious sebagai cadangan terakhir — HANYA bila parent putuskan,
-   dengan re-probe berkala + failover terpisah (bukan jalur utama).
-6. Koreksi ANDROID_VR clientId 14 -> 28 (verifikasi dulu).
+5. Invidious sebagai cadangan terakhir: SELESAI DI-WIRE 20 Nov
+   01:24 WIB (re-probe BERSIH + CORS terbuka); re-probe berkala
+   tetap utang.
+6. Koreksi ANDROID_VR clientId 14 -> 28: TIDAK DILAKUKAN (klaim
+   sumber benar, tapi probe 0/3 vs 0/3, substansi SAMA).
 7. Perbaiki `deploy_function.py` konektor legacy (tambah `?slug=`).
+
+## Status deploy (20 Nov 2026 00:34 WIB)
+
+Program ditutup. Push `18d6fbc7` (42 berkas: cache D1 + fallback
+IFrame + bukti) CI-nya sempat gagal (run 44568305390, job e2e:
+1 tes retry-ladder, balapan tes vs pemeriksaan cache D1,
+diperbaiki dengan `expect.poll`, tanpa ubah perilaku aplikasi),
+push perbaikan `d2fa0380` CI hijau (run 44573600725). Deploy dari
+artefak CI ke kedua branch: main
+`8f059b0a.laras-web.pages.dev` + preview
+`8f783d93.laras-web.pages.dev`. Chunk `index-B8mDUzPZ.js`
+(598.200 B, SHA-256
+`1310bb37…c24ae`) terverifikasi byte-identik di deployment main,
+produksi, preview, dan domain kustom `laras.adipmusic.my.id`
+(home + `/spike` 200, SW 0.9.0-71925ff2). Yang LIVE dari program
+ini: cache resolve D1 + populator (cron tiap 5 menit) + fallback
+IFrame Player. Tidak ada jalur egress baru yang di-wire (tidak
+ada yang BERSIH).

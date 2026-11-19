@@ -45,6 +45,7 @@ import {
   type FailureSnapshot,
 } from '../resilience/diagnostics';
 import { logPlayer, persistPlayerLog } from '../resilience/playerLog';
+import { fetchCachedStreamWithInvidiousFallback } from '../resilience/proxyFailover';
 import {
   migrateLocalStorageQueue,
   restoreQueueState,
@@ -818,7 +819,14 @@ export class PlayerService {
 
   private async ensureResolver(): Promise<StreamResolver> {
     if (!this.resolver) {
-      this.resolver = new StreamResolver();
+      // Urutan resolve penuh: proxy CF (putaran resolve) -> cache
+      // D1 -> Invidious (cadangan terakhir, instance tunggal tak
+      // dikenal; lihat proxyFailover.ts) -> fallback IFrame (bila
+      // resolve melempar). Injeksi cacheLookup ini satu-satunya
+      // titik wiring; resolve.ts tidak diubah.
+      this.resolver = new StreamResolver({
+        cacheLookup: fetchCachedStreamWithInvidiousFallback,
+      });
     }
     if (!this.resolverInit) {
       this.resolverInit = this.resolver

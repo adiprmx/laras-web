@@ -8,9 +8,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { PROXY_BASE_URL, type ClientDefinition } from '../spike/config';
 import { InnertubeError } from '../extractor/innertube';
+import type { CachedStream } from '../extractor/resolveCache';
 import {
+  INVIDIOUS_FAILOVER_ENABLED,
   RENDER_FAILOVER_ENABLED,
   RENDER_PROXY_BASE_URL,
+  fetchCachedStreamWithInvidiousFallback,
   postInnertubeWithFailover,
 } from './proxyFailover';
 
@@ -282,5 +285,71 @@ describe('proxyFailover (kerangka, belum di-wire)', () => {
     expect(error).toBeInstanceOf(InnertubeError);
     expect((error as InnertubeError).kind).toBe('rate-limited');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('fetchCachedStreamWithInvidiousFallback (cadangan terakhir)', () => {
+  const cacheHit: CachedStream = {
+    videoId: 'hhn-nGSuenM',
+    title: 'Semua Tentang Kita',
+    url: 'https://rr1---sn-ajab55-cx.googlevideo.com/videoplayback?expire=9999999999',
+    itag: 251,
+    bitrate: 155000,
+    client: 'ANDROID_VR',
+    expiresAtMs: 9999999999000,
+    resolvedAtMs: 0,
+  };
+  const invidiousHit: CachedStream = {
+    ...cacheHit,
+    client: 'INVIDIOUS',
+  };
+
+  it('saklar Invidious AKTIF sesudah vonis BERSIH re-probe', () => {
+    expect(INVIDIOUS_FAILOVER_ENABLED).toBe(true);
+  });
+
+  it('cache D1 ada -> dipakai, Invidious tidak dipanggil', async () => {
+    const cacheLookup = vi.fn(async () => cacheHit);
+    const invidiousLookup = vi.fn(async () => invidiousHit);
+    const out = await fetchCachedStreamWithInvidiousFallback('hhn-nGSuenM', {
+      cacheLookup,
+      invidiousLookup,
+    });
+    expect(out).toBe(cacheHit);
+    expect(cacheLookup).toHaveBeenCalledTimes(1);
+    expect(invidiousLookup).not.toHaveBeenCalled();
+  });
+
+  it('cache kosong + aktif -> Invidious dipanggil', async () => {
+    const cacheLookup = vi.fn(async () => null);
+    const invidiousLookup = vi.fn(async () => invidiousHit);
+    const out = await fetchCachedStreamWithInvidiousFallback('hhn-nGSuenM', {
+      cacheLookup,
+      invidiousLookup,
+    });
+    expect(out).toBe(invidiousHit);
+    expect(cacheLookup).toHaveBeenCalledTimes(1);
+    expect(invidiousLookup).toHaveBeenCalledTimes(1);
+    expect(invidiousLookup).toHaveBeenCalledWith('hhn-nGSuenM');
+  });
+
+  it('cache kosong + nonaktif -> null, Invidious tidak dipanggil', async () => {
+    const cacheLookup = vi.fn(async () => null);
+    const invidiousLookup = vi.fn(async () => invidiousHit);
+    const out = await fetchCachedStreamWithInvidiousFallback('hhn-nGSuenM', {
+      enabled: false,
+      cacheLookup,
+      invidiousLookup,
+    });
+    expect(out).toBeNull();
+    expect(invidiousLookup).not.toHaveBeenCalled();
+  });
+
+  it('keduanya kosong -> null', async () => {
+    const out = await fetchCachedStreamWithInvidiousFallback('hhn-nGSuenM', {
+      cacheLookup: async () => null,
+      invidiousLookup: async () => null,
+    });
+    expect(out).toBeNull();
   });
 });
