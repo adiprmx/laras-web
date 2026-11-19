@@ -23,6 +23,7 @@ import {
   CONFIG_URL,
   FAKE_STREAM_URL,
   fulfillRange,
+  INVIDIOUS_INSTANCE_URL,
   PROXY_BASE_URL,
   SEARCH_PETERPAN,
 } from './p4-helpers';
@@ -142,6 +143,34 @@ async function mockLadderNetwork(
       }),
     });
   });
+  // Cache resolve D1: mock MISS (lihat p4-helpers) — tanpa ini,
+  // isi cache live bisa membalik tes tangga jadi memutar lagu.
+  await context.route(`${PROXY_BASE_URL}/api/resolve-cache*`, (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: false,
+        error: {
+          code: 'CACHE_MISS',
+          message: 'Tidak ada simpanan untuk lagu ini',
+        },
+      }),
+    }),
+  );
+  // Invidious cadangan-terakhir: tanpa mock, resolve yang gagal
+  // memanggil instance asli (6-30 dtk) dan notice tangga muncul
+  // sesudah batas tunggu tes (gagal 3 tes x 2 proyek di CI
+  // 059abc0d). Mock 404 = instance tidak merespons -> null.
+  await context.route(
+    `${INVIDIOUS_INSTANCE_URL}/api/v1/videos/*`,
+    (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Mock Invidious mati' }),
+      }),
+  );
   await context.route('**googlevideo.com/videoplayback*', (route) =>
     fulfillRange(route, TONE_10S, 'audio/wav'),
   );

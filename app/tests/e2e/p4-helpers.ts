@@ -24,6 +24,8 @@ export const CONFIG_URL =
   'https://raw.githubusercontent.com/adiprmx/laras/config-v1/player-config.json';
 export const FAKE_STREAM_URL =
   'https://rr2---sn-q4flrnes.googlevideo.com/videoplayback?expire=1999999999&itag=251&mock=1';
+/** Instance Invidious cadangan-terakhir (cermin src/extractor/invidious.ts). */
+export const INVIDIOUS_INSTANCE_URL = 'https://yt.chocolatemoo53.com';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTRACTOR_FIXTURES = path.join(HERE, '..', '..', 'src', 'extractor', 'test-fixtures');
@@ -303,6 +305,36 @@ export async function mockP4Network(
       }),
     });
   });
+  // Cache resolve D1: tanpa mock, browser CI memanggil Worker
+  // asli — bila populator kebetulan mengisi lagu tes, tes galat
+  // berubah jadi memutar lagu (flake non-deterministik). Mock
+  // MISS = keadaan normal tes, cepat + hermetis.
+  await context.route(`${PROXY_BASE_URL}/api/resolve-cache*`, (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: false,
+        error: {
+          code: 'CACHE_MISS',
+          message: 'Tidak ada simpanan untuk lagu ini',
+        },
+      }),
+    }),
+  );
+  // Invidious cadangan-terakhir: tanpa mock, resolve yang gagal
+  // memanggil instance asli (6-30 detik per percobaan) dan tes
+  // galat/tangga kehabisan waktu (gagal 4 tes x 2 proyek di CI
+  // 059abc0d). Mock 404 = instance tidak merespons -> null.
+  await context.route(
+    `${INVIDIOUS_INSTANCE_URL}/api/v1/videos/*`,
+    (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Mock Invidious mati' }),
+      }),
+  );
   await context.route('**googlevideo.com/videoplayback*', (route) =>
     fulfillRange(route, TONE_10S, 'audio/wav'),
   );

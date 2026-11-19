@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, expect, type Page, type Route } from '@playwright/test';
-import { SEARCH_PETERPAN } from './p4-helpers';
+import { INVIDIOUS_INSTANCE_URL, SEARCH_PETERPAN } from './p4-helpers';
 
 const PROXY_BASE_URL =
   'https://laras-proxy-spike.hiroohengkerr.workers.dev';
@@ -109,6 +109,8 @@ async function fulfillRange(
 interface MockOptions {
   /** Bila true, endpoint player proxy membalas 500 (uji galat). */
   playerFails?: () => boolean;
+  /** Bila true, mock Invidious membalas stream audio valid. */
+  invidiousSucceeds?: boolean;
 }
 
 /** Pasang semua mock jaringan untuk satu halaman.
@@ -158,6 +160,54 @@ async function mockNetwork(page: Page, opts: MockOptions = {}): Promise<void> {
       }),
     });
   });
+  // Cache resolve D1: mock MISS (lihat p4-helpers) — tanpa ini,
+  // isi cache live bisa membalik tes galat jadi memutar lagu.
+  await page.context().route(`${PROXY_BASE_URL}/api/resolve-cache*`, (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: false,
+        error: {
+          code: 'CACHE_MISS',
+          message: 'Tidak ada simpanan untuk lagu ini',
+        },
+      }),
+    }),
+  );
+  // Invidious cadangan-terakhir: tanpa mock, resolve yang gagal
+  // memanggil instance asli (6-30 dtk) dan tes galat kehabisan
+  // waktu (gagal di CI 059abc0d). Default 404 = instance mati;
+  // opsi invidiousSucceeds membalas stream valid (uji positif).
+  await page.context().route(
+    `${INVIDIOUS_INSTANCE_URL}/api/v1/videos/*`,
+    (route) => {
+      if (opts.invidiousSucceeds) {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            videoId: 'hhn-nGSuenM',
+            title: 'Semua Tentang Kita',
+            adaptiveFormats: [
+              {
+                itag: '251',
+                type: 'audio/webm; codecs="opus"',
+                bitrate: '154822',
+                url: FAKE_STREAM_URL,
+              },
+            ],
+            formatStreams: [],
+          }),
+        });
+      }
+      return route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Mock Invidious mati' }),
+      });
+    },
+  );
   await page.context().route('**googlevideo.com/videoplayback*', (route) =>
     fulfillRange(route, TONE_10S, 'audio/wav'),
   );
@@ -360,6 +410,29 @@ test.describe('pemutar (mock resolve + nada lokal)', () => {
       .poll(async () => (await debugState(page))?.status)
       .toBe('playing');
     await expect(page.getByTestId('player-error')).toHaveCount(0);
+  });
+
+  test('failover Invidious: proxy gagal + cache kosong -> lagu tetap jalan', async ({
+    page,
+  }) => {
+    await mockNetwork(page, {
+      playerFails: () => true,
+      invidiousSucceeds: true,
+    });
+    await page.goto('/search?q=noah');
+    await page.getByTestId('search-song-hhn-nGSuenM').click();
+    await page.getByTestId('mini-open').click();
+    // Proxy 500 semua putaran, cache D1 MISS (mock) — lapisan
+    // terakhir Invidious membalas stream valid, lagu memutar.
+    await expect
+      .poll(async () => (await debugState(page))?.status, {
+        timeout: 30000,
+      })
+      .toBe('playing');
+    await expect(page.getByTestId('player-error')).toHaveCount(0);
+    await expect(page.getByTestId('mini-player')).toContainText(
+      'Semua Tentang Kita',
+    );
   });
 
   test('pengatur suara saat streaming: pesan jujur', async ({ page }) => {
