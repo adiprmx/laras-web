@@ -285,6 +285,26 @@ export function previewImport(bytes: Uint8Array): BackupData {
 }
 
 /**
+ * Batas lagu yang diantre sekali ketuk "Unduh ulang"
+ * (Blue 3, Red 3 R14). Satu file bisa membawa puluhan ribu flag
+ * `downloaded`; tanpa cap, satu ketukan mengantre puluhan ribu
+ * unduhan. Kelebihan dilaporkan ke pengguna, bukan diam-diam
+ * dipotong (lihat capRedownloadIds).
+ */
+export const MAX_REDOWLOAD_JOBS = 200;
+
+/** Bagi daftar lagu unduh-ulang ke yang diantre + jumlah yang dilewati. */
+export function capRedownloadIds(ids: string[]): {
+  queued: string[];
+  skipped: number;
+} {
+  return {
+    queued: ids.slice(0, MAX_REDOWLOAD_JOBS),
+    skipped: Math.max(0, ids.length - MAX_REDOWLOAD_JOBS),
+  };
+}
+
+/**
  * Impor file salinan yang sudah lolos previewImport.
  *
  * Merge database berjalan dalam satu transaksi; pengaturan dari

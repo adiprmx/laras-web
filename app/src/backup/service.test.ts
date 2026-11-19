@@ -27,6 +27,7 @@ import {
   applyBackupSettings,
   buildBackupData,
   buildExportPayload,
+  capRedownloadIds,
   importBackup,
   previewImport,
   triggerBrowserDownload,
@@ -427,5 +428,23 @@ describe('applyBackupSettings', () => {
       eqGains: null,
     });
     expect(useEqualizerStore.getState().settings.preset).toBe('flat');
+  });
+});
+
+describe('capRedownloadIds (Blue 3, R14)', () => {
+  it('250 lagu -> 200 diantre + 50 dilewati', () => {
+    const ids = Array.from({ length: 250 }, (_, i) => `vid-${i}`);
+    const { queued, skipped } = capRedownloadIds(ids);
+    expect(queued).toHaveLength(200);
+    expect(queued[0]).toBe('vid-0');
+    expect(queued[199]).toBe('vid-199');
+    expect(skipped).toBe(50);
+  });
+
+  it('100 lagu -> semua diantre, tidak ada yang dilewati', () => {
+    const ids = Array.from({ length: 100 }, (_, i) => `vid-${i}`);
+    const { queued, skipped } = capRedownloadIds(ids);
+    expect(queued).toHaveLength(100);
+    expect(skipped).toBe(0);
   });
 });

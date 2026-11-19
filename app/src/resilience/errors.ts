@@ -82,15 +82,15 @@ export function classifyPlaybackFailure(input: {
   const { online, error } = input;
   const attempts = attemptsOf(error);
   const message = messageOf(error);
+  // I11: DOMException bukan turunan Error — cek `name` langsung.
+  const errorName = (error as { name?: unknown } | null)?.name;
   const isTimeout =
-    message.includes('melewati batas') ||
-    (error instanceof Error && error.name === 'TimeoutError');
+    message.includes('melewati batas') || errorName === 'TimeoutError';
   let cause: FailureCause;
   if (!online) {
     cause = 'offline';
   } else if (
-    error instanceof Error &&
-    (error.name === 'TypeError' || error.name === 'AbortError') &&
+    (errorName === 'TypeError' || errorName === 'AbortError') &&
     attempts.length === 0
   ) {
     // Galat fetch mentah tanpa upaya tercatat = jaringan putus.

@@ -52,6 +52,7 @@ interface ItemRow {
   deleted_at: number | null;
   title: string | null;
   artist: string | null;
+  user_id: string | null;
 }
 interface LikeRow {
   user_id: string;
@@ -86,6 +87,10 @@ class FakeD1 {
     { user_id: string; settings_json: string; device_id: string; updated_at: number }
   >();
   rateLimits = new Map<string, number>();
+  oauthStates = new Map<
+    string,
+    { provider: string; expires_at: number; created_at: number }
+  >();
 
   prepare(query: string) {
     const sql = query;
@@ -136,6 +141,25 @@ class FakeD1 {
       for (const [k] of [...this.rateLimits]) {
         if (Number(k.split('|')[1]) < cutoff) this.rateLimits.delete(k);
       }
+      return;
+    }
+    if (sql.startsWith('INSERT INTO oauth_states')) {
+      this.oauthStates.set(String(v[0]), {
+        provider: String(v[1]),
+        expires_at: Number(v[2]),
+        created_at: Number(v[3]),
+      });
+      return;
+    }
+    if (sql.startsWith('DELETE FROM oauth_states WHERE expires_at < ?')) {
+      const cutoff = Number(v[0]);
+      for (const [k, s] of [...this.oauthStates]) {
+        if (s.expires_at < cutoff) this.oauthStates.delete(k);
+      }
+      return;
+    }
+    if (sql.startsWith('DELETE FROM oauth_states WHERE state_hash = ?')) {
+      this.oauthStates.delete(String(v[0]));
       return;
     }
     if (sql.startsWith('INSERT INTO sessions')) {
@@ -200,7 +224,12 @@ class FakeD1 {
         updated_at: Number(v[6]),
         deleted_at: tombstone ? Number(v[7]) : null,
       };
-      if (!existing || this.wins(row.updated_at, row.device_id, existing)) {
+      if (
+        !existing ||
+        // R11: upsert hanya menimpa bila baris yang ada milik pendorong.
+        (existing.user_id === row.user_id &&
+          this.wins(row.updated_at, row.device_id, existing))
+      ) {
         this.playlists.set(id, row);
       }
       return;
@@ -220,6 +249,7 @@ class FakeD1 {
             deleted_at: Number(v[5]),
             title: existing?.title ?? null,
             artist: existing?.artist ?? null,
+            user_id: String(v[6]),
           }
         : {
             playlist_id: String(v[0]),
@@ -231,6 +261,7 @@ class FakeD1 {
             deleted_at: null,
             title: v[6] as string | null,
             artist: v[7] as string | null,
+            user_id: String(v[8]),
           };
       if (!existing || this.wins(row.updated_at, row.device_id, existing)) {
         this.items.set(key, row);
@@ -352,6 +383,16 @@ class FakeD1 {
     if (sql.startsWith('SELECT count FROM rate_limits')) {
       const count = this.rateLimits.get(`${String(v[0])}|${Number(v[1])}`);
       return count === undefined ? null : { count };
+    }
+    if (sql.startsWith('SELECT provider, expires_at FROM oauth_states')) {
+      const s = this.oauthStates.get(String(v[0]));
+      return s
+        ? { provider: s.provider, expires_at: s.expires_at }
+        : null;
+    }
+    if (sql.startsWith('SELECT user_id FROM sync_playlists WHERE id = ?')) {
+      const p = this.playlists.get(String(v[0]));
+      return p ? { user_id: p.user_id } : null;
     }
     if (sql.startsWith('SELECT id, user_id, expires_at FROM sessions')) {
       for (const s of this.sessions.values()) {
@@ -577,6 +618,31 @@ describe('Worker sync: /api/auth/me', () => {
     expect(body.error.code).toBe('UNAUTHORIZED');
   });
 
+  it('I12: cookie dengan % malformed tidak membuat 500', async () => {
+    const env = makeEnv(new FakeD1());
+    const res = await call(env, '/api/auth/me', {
+      headers: { Cookie: 'laras_session=%E0%A4%A' },
+    });
+    // Nilai rusak dipakai mentah; sesi tidak ditemukan -> 401, bukan 500.
+    expect(res.status).toBe(401);
+  });
+
+  it('I14: respons JSON membawa nosniff, halaman 503 membawa CSP + nosniff', async () => {
+    const env = makeEnv(new FakeD1());
+    const me = await call(env, '/api/auth/me');
+    expect(me.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    const pending = makeEnv(new FakeD1(), {
+      GOOGLE_CLIENT_ID: '',
+      GOOGLE_CLIENT_SECRET: '',
+    });
+    const res = await call(pending, '/api/auth/login?provider=google');
+    expect(res.status).toBe(503);
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(res.headers.get('Content-Security-Policy')).toContain(
+      "default-src 'none'",
+    );
+  });
+
   it('200 + nama tampil dengan cookie sesi valid', async () => {
     const db = new FakeD1();
     const env = makeEnv(db);
@@ -726,6 +792,106 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     await doLogin();
     expect(db.users.size).toBe(1);
     expect([...db.users.values()][0].display_name).toBe('Nama Baru');
+  });
+
+  // ---- Blue 3 (Red 3 S6): rate limit callback + state sekali pakai ----
+
+  /** Login dari satu IP, kembalikan nilai cookie state + state-nya. */
+  async function loginState(
+    env: ReturnType<typeof makeEnv>,
+    ip: string,
+  ): Promise<{ stateValue: string; state: string }> {
+    const login = await call(env, '/api/auth/login?provider=google', {
+      headers: { 'CF-Connecting-IP': ip },
+    });
+    expect(login.status).toBe(302);
+    const stateCookie = login.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('laras_oauth_state=')) as string;
+    const stateValue = stateCookie.split(';')[0].split('=')[1];
+    return { stateValue, state: stateValue.split('.')[0] };
+  }
+
+  it('S6: 11 callback cepat dari satu IP -> 10 diproses + 1 ditolak 429', async () => {
+    // Kode palsu: tukar kode gagal (token endpoint 400) sehingga
+    // tiap callback "diproses" sampai exchange lalu 302 error.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('bad', { status: 400 })),
+    );
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const callbackIp = '203.0.113.99';
+    const statuses: number[] = [];
+    for (let i = 0; i < 11; i++) {
+      // Login dari IP berbeda tiap kali supaya rate limit login
+      // (10/mnt/IP) tidak menghalangi pembuatan 11 state valid.
+      const { stateValue, state } = await loginState(
+        env,
+        `198.51.100.${i + 1}`,
+      );
+      const res = await call(
+        env,
+        `/api/auth/callback?code=kode-palsu&state=${state}`,
+        {
+          headers: {
+            Cookie: `laras_oauth_state=${stateValue}`,
+            'CF-Connecting-IP': callbackIp,
+          },
+        },
+      );
+      statuses.push(res.status);
+    }
+    expect(statuses.slice(0, 10)).toEqual(Array(10).fill(302));
+    expect(statuses[10]).toBe(429);
+    // Tidak ada pengguna yang tercipta dari kode palsu.
+    expect(db.users.size).toBe(0);
+  });
+
+  it('S6: callback kedua dengan state yang sama ditolak', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { stateValue, state } = await loginState(env, '203.0.113.5');
+    const first = await call(
+      env,
+      `/api/auth/callback?code=code-abc&state=${state}`,
+      { headers: { Cookie: `laras_oauth_state=${stateValue}` } },
+    );
+    expect(first.status).toBe(302);
+    expect(first.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=ok`,
+    );
+    expect(db.sessions.size).toBe(1);
+    const second = await call(
+      env,
+      `/api/auth/callback?code=code-abc&state=${state}`,
+      { headers: { Cookie: `laras_oauth_state=${stateValue}` } },
+    );
+    expect(second.status).toBe(302);
+    expect(second.headers.get('Location')).toContain('auth=error&reason=state');
+    expect(db.sessions.size).toBe(1);
+  });
+
+  it('S6: state yang tidak pernah dikeluarkan login ditolak', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    // Cookie dan query cocok, tetapi tidak ada login yang
+    // mengeluarkan state ini (tidak ada baris di oauth_states).
+    const res = await call(
+      env,
+      '/api/auth/callback?code=code-abc&state=0123456789abcdef0123456789abcdef',
+      {
+        headers: {
+          Cookie:
+            'laras_oauth_state=0123456789abcdef0123456789abcdef.google',
+        },
+      },
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toContain('auth=error&reason=state');
+    expect(db.users.size).toBe(0);
   });
 });
 
@@ -1111,5 +1277,148 @@ describe('Worker sync: /api/sync/pull + /api/sync/push', () => {
       data: { playlists: unknown[] };
     };
     expect(body.data.playlists).toEqual([]);
+  });
+
+  // ---- Blue 3 (Red 3 R11): push tanpa cek kepemilikan ----
+
+  it('R11: B mendorong playlist dengan clientId milik A -> data A tidak berubah', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const a = await seedSession(db, { userId: 'user-a' });
+    const b = await seedSession(db, { userId: 'user-b' });
+    await push(env, a.cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:1', nama: 'Punya A', deskripsi: 'Asli' }],
+    });
+    const attack = await push(env, b.cookie, {
+      deviceId: 'dev-9',
+      playlists: [{ clientId: 'dev-1:1', nama: 'Diambil B', deskripsi: null }],
+    });
+    expect(attack.status).toBe(200);
+    const res = await pull(env, a.cookie, 0);
+    const body = (await res.json()) as {
+      data: { playlists: Array<{ nama: string; deskripsi: string | null }> };
+    };
+    expect(body.data.playlists).toHaveLength(1);
+    expect(body.data.playlists[0]?.nama).toBe('Punya A');
+    expect(body.data.playlists[0]?.deskripsi).toBe('Asli');
+    // B juga tidak melihat playlist itu sebagai miliknya.
+    const resB = await pull(env, b.cookie, 0);
+    const bodyB = (await resB.json()) as {
+      data: { playlists: unknown[] };
+    };
+    expect(bodyB.data.playlists).toEqual([]);
+  });
+
+  it('R11: B mendorong item ke playlist milik A -> item ditolak, pull A tidak berubah', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const a = await seedSession(db, { userId: 'user-a' });
+    const b = await seedSession(db, { userId: 'user-b' });
+    await push(env, a.cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:1', nama: 'Punya A', deskripsi: null }],
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:1',
+          videoId: 'vid-asli',
+          posisi: 0,
+          title: 'Lagu Asli',
+          artist: null,
+        },
+      ],
+    });
+    const attack = await push(env, b.cookie, {
+      deviceId: 'dev-9',
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:1',
+          videoId: 'vid-jahat',
+          posisi: 1,
+          title: 'Lagu Jahat',
+          artist: null,
+        },
+      ],
+    });
+    expect(attack.status).toBe(200);
+    const attackBody = (await attack.json()) as {
+      data: { skippedNotOwned: number };
+    };
+    expect(attackBody.data.skippedNotOwned).toBe(1);
+    const res = await pull(env, a.cookie, 0);
+    const body = (await res.json()) as {
+      data: { playlistItems: Array<{ videoId: string }> };
+    };
+    expect(body.data.playlistItems.map((i) => i.videoId)).toEqual(['vid-asli']);
+  });
+
+  it('R11: tombstone playlist milik A dari B tidak menghapus playlist A', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const a = await seedSession(db, { userId: 'user-a' });
+    const b = await seedSession(db, { userId: 'user-b' });
+    await push(env, a.cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:1', nama: 'Punya A', deskripsi: null }],
+    });
+    await push(env, b.cookie, {
+      deviceId: 'dev-9',
+      deletedPlaylists: [{ clientId: 'dev-1:1' }],
+    });
+    const res = await pull(env, a.cookie, 0);
+    const body = (await res.json()) as {
+      data: { playlists: Array<{ deletedAt: number | null }> };
+    };
+    expect(body.data.playlists).toHaveLength(1);
+    expect(body.data.playlists[0]?.deletedAt).toBeNull();
+  });
+
+  it('R11: item untuk playlist yang tidak ada (yatim) ditolak', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie } = await seedSession(db);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:tidak-ada',
+          videoId: 'vid-1',
+          posisi: 0,
+          title: null,
+          artist: null,
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { applied: number; skippedNotOwned: number };
+    };
+    expect(body.data.skippedNotOwned).toBe(1);
+    expect(body.data.applied).toBe(0);
+    expect(db.items.size).toBe(0);
+  });
+
+  it('R11: playlist baru + item-nya dalam satu push tetap jalan', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie } = await seedSession(db);
+    const res = await push(env, cookie, {
+      deviceId: 'dev-1',
+      playlists: [{ clientId: 'dev-1:1', nama: 'Baru', deskripsi: null }],
+      playlistItems: [
+        {
+          playlistClientId: 'dev-1:1',
+          videoId: 'vid-1',
+          posisi: 0,
+          title: 'Lagu',
+          artist: null,
+        },
+      ],
+    });
+    const body = (await res.json()) as {
+      data: { skippedNotOwned: number };
+    };
+    expect(body.data.skippedNotOwned).toBe(0);
+    expect(db.items.size).toBe(1);
   });
 });

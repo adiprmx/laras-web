@@ -17,6 +17,12 @@
  * sesi sinkronisasi (HttpOnly, tidak bisa dihapus dari JS), dan
  * data sinkronisasi di server (penghapusan akun terpisah, PRD
  * B10.3 — tombol hapus akun ada di bagian Sinkronisasi).
+ *
+ * PENTING (Blue 3, Red 3 R15): pemanggil (WipeFlow) WAJIB
+ * memanggil POST /api/auth/logout SEBELUM wipeAllData ini bila
+ * pengguna sedang masuk. Tanpa logout, sesi server tetap hidup
+ * dan sync otomatis 20 detik sesudah reload mengembalikan
+ * seluruh data dari server — wipe jadi tidak ada artinya.
  */
 import { deleteDatabase } from '../data/database';
 import { resetLibraryService } from '../data/library';

@@ -16,12 +16,17 @@ import { useState } from 'react';
 import { exportBackup } from '../../backup/service';
 import { wipeAllData } from '../../backup/wipe';
 import { strings } from '../../strings/id';
+import { fetchLogout } from '../../sync/syncClient';
+import { useSyncStore } from '../../sync/syncStore';
 
 export default function WipeFlow({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState<1 | 2>(1);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
   const [wiping, setWiping] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutFailed, setLogoutFailed] = useState(false);
+  const syncStatus = useSyncStore((s) => s.status);
 
   const handleSaveFirst = async () => {
     if (exporting) return;
@@ -43,7 +48,7 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const handleWipe = async () => {
+  const doWipe = async () => {
     if (wiping) return;
     setWiping(true);
     try {
@@ -54,6 +59,29 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
       // lebih membingungkan daripada reload ke keadaan bersih.
       window.location.reload();
     }
+  };
+
+  const handleWipe = async () => {
+    if (wiping || loggingOut) return;
+    // R15: bila sedang masuk, akhiri sesi server DULU (logout)
+    // sebelum menghapus data lokal. Tanpa ini, cookie sesi
+    // HttpOnly bertahan dan sync otomatis 20 detik sesudah
+    // reload mengembalikan seluruh data dari server.
+    if (syncStatus === 'signed-in') {
+      setLoggingOut(true);
+      try {
+        await fetchLogout();
+      } catch {
+        // Offline/server mati: JANGAN diam-diam lanjut — beri
+        // tahu pengguna datanya bisa kembali, dan tawarkan
+        // mencoba keluar lagi atau tetap menghapus.
+        setLoggingOut(false);
+        setLogoutFailed(true);
+        return;
+      }
+      setLoggingOut(false);
+    }
+    await doWipe();
   };
 
   return (
@@ -79,6 +107,14 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
             <p className="mt-2 text-sm leading-relaxed text-zinc-400">
               {strings.backupWipeBody1}
             </p>
+            {syncStatus === 'signed-in' ? (
+              <p
+                data-testid="wipe-sync-note"
+                className="mt-2 text-sm leading-relaxed text-zinc-300"
+              >
+                {strings.backupWipeSyncNote}
+              </p>
+            ) : null}
             <button
               type="button"
               onClick={() => void handleSaveFirst()}
@@ -123,25 +159,66 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
             <p className="mt-2 text-sm leading-relaxed text-zinc-400">
               {strings.backupWipeBody2}
             </p>
-            <div className="mt-5 flex justify-end gap-2">
+            {syncStatus === 'signed-in' && !logoutFailed ? (
+              <p
+                data-testid="wipe-sync-note"
+                className="mt-2 text-sm leading-relaxed text-zinc-300"
+              >
+                {strings.backupWipeSyncNote}
+              </p>
+            ) : null}
+            {logoutFailed ? (
+              <p
+                data-testid="wipe-logout-failed"
+                className="mt-2 text-sm leading-relaxed text-amber-200"
+              >
+                {strings.backupWipeLogoutFailed}
+              </p>
+            ) : null}
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
                 onClick={onClose}
-                disabled={wiping}
+                disabled={wiping || loggingOut}
                 data-testid="wipe-cancel-2"
                 className="h-11 rounded-xl px-4 text-sm font-medium text-zinc-100 transition-colors hover:bg-white/10 active:scale-95 disabled:opacity-50"
               >
                 {strings.cancel}
               </button>
-              <button
-                type="button"
-                onClick={() => void handleWipe()}
-                disabled={wiping}
-                data-testid="wipe-confirm"
-                className="h-11 rounded-xl bg-red-500 px-4 text-sm font-medium text-white transition-transform duration-150 active:scale-95 disabled:opacity-50"
-              >
-                {wiping ? strings.backupWiping : strings.backupWipeConfirm}
-              </button>
+              {logoutFailed ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void handleWipe()}
+                    disabled={wiping || loggingOut}
+                    data-testid="wipe-retry-logout"
+                    className="h-11 rounded-xl border border-white/15 px-4 text-sm font-medium transition-colors hover:bg-white/5 active:scale-95 disabled:opacity-50"
+                  >
+                    {strings.backupWipeRetryLogout}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void doWipe()}
+                    disabled={wiping || loggingOut}
+                    data-testid="wipe-anyway"
+                    className="h-11 rounded-xl bg-red-500 px-4 text-sm font-medium text-white transition-transform duration-150 active:scale-95 disabled:opacity-50"
+                  >
+                    {strings.backupWipeAnyway}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void handleWipe()}
+                  disabled={wiping || loggingOut}
+                  data-testid="wipe-confirm"
+                  className="h-11 rounded-xl bg-red-500 px-4 text-sm font-medium text-white transition-transform duration-150 active:scale-95 disabled:opacity-50"
+                >
+                  {wiping || loggingOut
+                    ? strings.backupWiping
+                    : strings.backupWipeConfirm}
+                </button>
+              )}
             </div>
           </div>
         )}

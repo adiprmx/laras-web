@@ -23,8 +23,29 @@ export function tokenize(text: string): string[] {
 
 /** Token unik (urutan kemunculan pertama dipertahankan). */
 export function uniqueTokens(text: string): string[] {
-  return [...new Set(tokenize(text))];
+  const out: string[] = [];
+  for (const token of new Set(tokenize(text))) {
+    // Token super panjang (satu kata 5 MB tanpa spasi) tidak
+    // pernah dicari pengguna; membuangnya melindungi indeks.
+    if (token.length > MAX_TOKEN_CHARS) continue;
+    out.push(token);
+    if (out.length >= MAX_UNIQUE_TOKENS) break;
+  }
+  return out;
 }
+
+/**
+ * Batas token unik per teks yang diindeks (Blue 3, Red 3 R14).
+ * Satu judul 5 MB berisi kata unik bisa menghasilkan ratusan
+ * ribu baris token_index dalam satu transaksi impor; parser
+ * backup kini membatasi judul ke 1.000 karakter, dan cap ini
+ * adalah lapis kedua di titik penulisan indeks (judul nyata
+ * jarang melewati 20 token).
+ */
+export const MAX_UNIQUE_TOKENS = 200;
+
+/** Batas panjang satu token yang diindeks. */
+export const MAX_TOKEN_CHARS = 100;
 
 /**
  * Id semu artis dari nama, port `localArtistIdForName` APK.

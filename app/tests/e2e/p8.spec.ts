@@ -257,6 +257,17 @@ test.describe('P8: round-trip backup', () => {
       { timeout: 15000 },
     );
 
+    // Blue 3 (R12): file di atas 10 MB ditolak sebelum dibaca isinya.
+    await page.getByTestId('import-backup-file-input').setInputFiles({
+      name: 'besar.json',
+      mimeType: 'application/json',
+      buffer: Buffer.alloc(10_000_001, 97),
+    });
+    await expect(page.getByTestId('import-backup-error')).toHaveText(
+      'File ini terlalu besar (lebih dari 10 MB).',
+      { timeout: 15000 },
+    );
+
     // Database tidak berubah.
     expect(await readCounts(page)).toBe(SEED_COUNTS);
   });
@@ -308,6 +319,31 @@ test.describe('P8: impor Spotify', () => {
     await expect(page.getByText('Impor Spotify')).toBeVisible({
       timeout: 30000,
     });
+  });
+
+  test('Blue 3 (R13): tempelan 35 lagu dipotong ke 30 dengan laporan jelas', async ({
+    page,
+  }) => {
+    await mockNetwork(page);
+    await openSettings(page);
+    await page.getByTestId('backup-spotify-open').click();
+    await expect(page.getByTestId('spotify-import-dialog')).toBeVisible({
+      timeout: 15000,
+    });
+    const lines = Array.from(
+      { length: 35 },
+      (_, i) => `Artis ${i} - Lagu ${i}`,
+    ).join('\n');
+    await page.getByTestId('spotify-paste').fill(lines);
+    await page.getByTestId('spotify-read-pasted').click();
+    await expect(page.getByTestId('spotify-track-count')).toHaveText(
+      '30 lagu',
+      { timeout: 15000 },
+    );
+    await expect(page.getByTestId('spotify-truncated')).toHaveText(
+      'File berisi 35 lagu, hanya 30 lagu pertama yang diimpor.',
+      { timeout: 15000 },
+    );
   });
 
   test('dari tautan publik (mock proxy): draf terbaca, tidak ada yang cocok', async ({

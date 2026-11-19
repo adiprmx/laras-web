@@ -15,10 +15,15 @@ import { useRef, useState } from 'react';
 import {
   BackupException,
   formatBackupDate,
+  MAX_BACKUP_BYTES,
   type BackupData,
 } from '../../backup/format';
 import type { ImportReport } from '../../backup/report';
-import { importBackup, previewImport } from '../../backup/service';
+import {
+  capRedownloadIds,
+  importBackup,
+  previewImport,
+} from '../../backup/service';
 import { getDownloadManager } from '../../downloads/downloadManager';
 import { strings } from '../../strings/id';
 import ImportReportView from './ImportReportView';
@@ -62,11 +67,22 @@ export default function ImportBackupDialog({
   const [applySettings, setApplySettings] = useState(true);
   const [redownloading, setRedownloading] = useState(false);
   const [redownloadDone, setRedownloadDone] = useState(false);
+  const [redownloadResult, setRedownloadResult] = useState<{
+    queued: number;
+    skipped: number;
+  } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const handleFile = async (file: File | undefined) => {
     if (!file) return;
     setError(null);
+    // R12: cek ukuran SEBELUM arrayBuffer() — file raksasa tidak
+    // boleh dialokasikan ke memori tab dulu (cek di parser tetap
+    // ada sebagai lapis kedua).
+    if (file.size > MAX_BACKUP_BYTES) {
+      setError(strings.backupErrorTooLarge);
+      return;
+    }
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       setData(previewImport(bytes));
@@ -93,9 +109,12 @@ export default function ImportBackupDialog({
     if (!data || !report || redownloading) return;
     setRedownloading(true);
     try {
+      // R14: antrean unduh-ulang dibatasi 200 lagu; kelebihan
+      // dilaporkan, bukan diam-diam dipotong.
+      const { queued, skipped } = capRedownloadIds(report.downloadedSongIds);
       const manager = await getDownloadManager();
       const songsById = new Map(data.songs.map((s) => [s.id, s]));
-      for (const songId of report.downloadedSongIds) {
+      for (const songId of queued) {
         const song = songsById.get(songId);
         if (!song) continue;
         await manager.enqueue(songId, 'balanced', {
@@ -104,6 +123,7 @@ export default function ImportBackupDialog({
           artistNames: song.artists.map((a) => a.name),
         });
       }
+      setRedownloadResult({ queued: queued.length, skipped });
       setRedownloadDone(true);
     } catch {
       // Gagal antre: pengguna bisa mengunduh manual dari Library.
@@ -249,7 +269,12 @@ export default function ImportBackupDialog({
                     data-testid="import-backup-redownload-done"
                     className="mt-2 text-sm text-zinc-300"
                   >
-                    {strings.backupRedownloadDone}
+                    {redownloadResult && redownloadResult.skipped > 0
+                      ? strings.backupRedownloadPartial(
+                          redownloadResult.queued,
+                          redownloadResult.skipped,
+                        )
+                      : strings.backupRedownloadDone}
                   </p>
                 ) : (
                   <button

@@ -366,6 +366,8 @@ export const strings = {
   backupErrorUnknown: 'File ini tidak bisa dipakai.',
   backupRedownload: 'Unduh ulang lagu yang dulu terunduh',
   backupRedownloadDone: 'Lagu masuk antrean unduhan.',
+  backupRedownloadPartial: (queued: number, skipped: number) =>
+    `${queued} lagu masuk antrean unduhan, ${skipped} lagu dilewati karena antrean dibatasi 200 lagu.`,
   backupRedownloadNote:
     'File lagunya tidak ikut tersimpan di salinan, jadi perlu diunduh ulang.',
   importFailureNotFound: 'tidak ketemu di YouTube Music',
@@ -383,14 +385,20 @@ export const strings = {
   backupWipeSaved: 'Salinan tersimpan. Kamu bisa lanjut menghapus.',
   backupWipeTitle2: 'Yakin hapus semuanya?',
   backupWipeBody2:
-    'Sesudah ini, app kembali kosong seperti baru dipasang. Salinan yang sudah tersimpan tetap bisa dipulihkan nanti.',
+    'Sesudah ini, app kembali kosong seperti baru dipasang. Salinan yang sudah tersimpan tetap bisa dipulihkan nanti. Data yang tersimpan di akunmu tetap ada di server sampai akun dihapus.',
+  backupWipeSyncNote:
+    'Kamu sedang masuk. Akunmu akan dikeluarkan dulu supaya datamu tidak kembali sendiri lewat sinkronisasi.',
+  backupWipeLogoutFailed:
+    'Tidak bisa keluar dari akun, mungkin internetmu sedang putus. Bila tetap menghapus, datamu bisa kembali sendiri lewat sinkronisasi karena kamu masih masuk.',
+  backupWipeRetryLogout: 'Coba keluar lagi',
+  backupWipeAnyway: 'Tetap hapus',
   backupWipeConfirm: 'Ya, hapus semuanya',
   backupWiping: 'Menghapus.',
   // Impor Spotify (P8)
   spotifyImport: 'Impor dari Spotify',
   spotifyImportTitle: 'Impor playlist Spotify',
   spotifyImportBody:
-    'Tanpa masuk Spotify. Tempel daftar lagu atau tautan playlist publik, lalu tiap lagu dicocokkan ke YouTube Music satu per satu.',
+    'Tanpa masuk Spotify. Tempel daftar lagu atau tautan playlist publik, lalu tiap lagu dicocokkan ke YouTube Music satu per satu. Setiap impor dibatasi 30 lagu.',
   spotifyTabFile: 'Dari file',
   spotifyTabLink: 'Dari tautan',
   spotifyPasteHint:
@@ -402,9 +410,11 @@ export const strings = {
   spotifyFetchLink: 'Ambil daftar',
   spotifyFetching: 'Mengambil daftar.',
   spotifyLinkLimit:
-    'Dari tautan, hanya 30 lagu pertama yang terbaca. Untuk playlist panjang, pakai file.',
+    'Dari tautan, hanya 30 lagu pertama yang terbaca.',
   spotifyLinkTruncated:
     'Hanya 30 lagu pertama yang terbaca dari tautan ini.',
+  spotifyFileTruncated: (total: number, kept: number) =>
+    `File berisi ${total} lagu, hanya ${kept} lagu pertama yang diimpor.`,
   spotifyNameLabel: 'Nama playlist baru',
   spotifyNameDefault: 'Impor Spotify',
   spotifyTrackCount: (n: number) => `${n} lagu`,
@@ -422,6 +432,9 @@ export const strings = {
     'Tidak ada lagu yang terbaca dari tautan ini. Spotify mungkin mengubah halamannya, coba pakai file.',
   spotifyErrorFile:
     'File ini tidak berisi daftar lagu yang bisa dibaca. Pastikan formatnya teks "Artis - Judul", CSV, atau JSON ekspor Spotify.',
+  spotifyErrorTooLarge: 'File ini terlalu besar (lebih dari 10 MB).',
+  spotifyErrorImportFailed:
+    'Impor gagal. Coba lagi, atau persingkat nama playlist-nya.',
   spotifyErrorPasted:
     'Tidak ada lagu yang terbaca. Pastikan tiap baris berisi Artis - Judul.',
 } as const;

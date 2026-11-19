@@ -130,8 +130,16 @@ describe('sweepExpiredWindows', () => {
   it('menghapus jendela lama, mempertahankan jendela berjalan', async () => {
     const db = new FakeD1();
     const now = 1794784800000;
-    await isRateLimited(db, 'innertube:203.0.113.7', 60, now - 120000);
-    await isRateLimited(db, 'innertube:203.0.113.7', 60, now);
+    // I15: matikan sapu probabilistik (1%) selama penyiapan —
+    // sapu acak yang menyala di dalam isRateLimited kedua bisa
+    // menghapus baris lama sebelum asersi (flaky 1%).
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.99);
+    try {
+      await isRateLimited(db, 'innertube:203.0.113.7', 60, now - 120000);
+      await isRateLimited(db, 'innertube:203.0.113.7', 60, now);
+    } finally {
+      randomSpy.mockRestore();
+    }
     expect(db.rows.size).toBe(2);
     await sweepExpiredWindows(db, now);
     expect(db.rows.size).toBe(1);

@@ -127,4 +127,13 @@ describe('syncClient', () => {
       fetchAuthMe(fetchMock as unknown as typeof fetch),
     ).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
   });
+
+  it('I11: DOMException AbortError dipetakan ke TIMEOUT, bukan NETWORK', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new DOMException('The operation was aborted.', 'AbortError');
+    });
+    await expect(
+      fetchAuthMe(fetchMock as unknown as typeof fetch),
+    ).rejects.toMatchObject({ code: 'TIMEOUT', status: 0 });
+  });
 });

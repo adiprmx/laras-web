@@ -146,7 +146,8 @@ async function request<T>(
     return body.data;
   } catch (e) {
     if (e instanceof SyncApiError) throw e;
-    if (e instanceof Error && e.name === 'AbortError') {
+    // I11: timeout fetch asli adalah DOMException (bukan Error).
+    if ((e as { name?: unknown } | null)?.name === 'AbortError') {
       throw new SyncApiError(0, 'TIMEOUT', 'Sinkronisasi terlalu lama');
     }
     throw new SyncApiError(

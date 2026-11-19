@@ -258,10 +258,10 @@ export async function fetchRangeViaProxy(
         signal: combineSignal(signal, DOWNLOAD_CHUNK_TIMEOUT_MS),
       });
     } catch (error) {
-      if (
-        error instanceof Error &&
-        (error.name === 'AbortError' || error.name === 'TimeoutError')
-      ) {
+      // I11: abort/timeout fetch asli adalah DOMException, BUKAN
+      // turunan Error — cek `name` langsung, tanpa gate instanceof.
+      const errorName = (error as { name?: unknown } | null)?.name;
+      if (errorName === 'AbortError' || errorName === 'TimeoutError') {
         if (signal.aborted) throw new DownloadAbortedError();
         throw new RetryableError('Request chunk melewati batas waktu');
       }

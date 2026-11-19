@@ -135,8 +135,9 @@ export function retryDelayMs(attempt: number): number {
 }
 
 function isAbort(error: unknown): boolean {
+  // I11: DOMException bukan turunan Error — cek `name` langsung.
   return (
-    (error instanceof Error && error.name === 'AbortError') ||
+    (error as { name?: unknown } | null)?.name === 'AbortError' ||
     error instanceof DownloadAbortedError
   );
 }

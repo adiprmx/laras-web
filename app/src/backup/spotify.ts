@@ -44,7 +44,7 @@
  * Tidak ada padanan yakin = gagal "tidak ditemukan"; app TIDAK
  * PERNAH menebak diam-diam.
  */
-import { getLibraryService, type LibraryService } from '../data/library';
+import { getLibraryService, MAX_PLAYLIST_NAME_LENGTH, type LibraryService } from '../data/library';
 import { readCappedText, ResponseTooBigError } from '../extractor/readCapped';
 import {
   getSearchService,
@@ -62,6 +62,21 @@ export const SPOTIFY_PAGE_MAX_BYTES = 2 * 1024 * 1024;
 
 /** Jumlah baris lagu yang dirender halaman statis Spotify. */
 export const SPOTIFY_LINK_MAX_TRACKS = 30;
+
+/** Batas ukuran file daftar lagu jalur file (sama dengan batas file salinan). */
+export const SPOTIFY_FILE_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Batas jumlah lagu per impor jalur file (Blue 3, Red 3 R13):
+ * SAMA dengan jalur tautan (30). Tanpa cap, satu file buatan
+ * bisa mengantre ribuan pencarian YTM berurutan dan membakar
+ * kuota proxy berjam-jam. Kelebihan dilaporkan ke pengguna
+ * (draft.truncated + draft.totalTracks), bukan diam-diam dipotong.
+ */
+export const SPOTIFY_FILE_MAX_TRACKS = 30;
+
+/** Batas panjang satu judul/artis dari file (dipotong, bukan ditolak). */
+export const MAX_SPOTIFY_TRACK_TEXT_CHARS = 1000;
 
 /** Jeda antar pencarian pencocokan (sopan terhadap rate limit YTM). */
 export const SPOTIFY_MATCH_DELAY_MS = 150;
@@ -93,9 +108,12 @@ export class SpotifyLinkException extends Error {
 
 /** Kegagalan membaca file daftar lagu (jalur B). */
 export class SpotifyFileException extends Error {
-  constructor(message: string) {
+  readonly kind: 'tooLarge' | 'unreadable';
+
+  constructor(message: string, kind: 'tooLarge' | 'unreadable' = 'unreadable') {
     super(message);
     this.name = 'SpotifyFileException';
+    this.kind = kind;
   }
 }
 
@@ -119,6 +137,11 @@ export interface SpotifyPlaylistDraft {
   tracks: SpotifyTrackRef[];
   /** True bila daftar ini terpotong (jalur A: hanya 30 lagu pertama yang terbaca dari halaman statis). */
   truncated: boolean;
+  /**
+   * Jumlah lagu yang ditemukan sebelum cap (hanya diisi bila
+   * terpotong di jalur file — UI melaporkannya ke pengguna).
+   */
+  totalTracks?: number;
 }
 
 // ------------------------------------------------------------------
@@ -137,6 +160,14 @@ export function parseSpotifyFile(
   bytes: Uint8Array,
   fileName?: string,
 ): SpotifyPlaylistDraft {
+  // R13: tolak file di atas 10 MB SEBELUM decode/parse (lapis
+  // kedua; dialog juga mengecek file.size sebelum membaca isi).
+  if (bytes.length > SPOTIFY_FILE_MAX_BYTES) {
+    throw new SpotifyFileException(
+      'file melebihi 10 MB',
+      'tooLarge',
+    );
+  }
   let text: string;
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -150,18 +181,22 @@ export function parseSpotifyFile(
   const baseName = baseNameWithoutExtension(fileName);
   if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
     const draft = parseSpotifyJson(trimmed);
-    return {
+    return capDraft({
       tracks: draft.tracks,
       name: draft.name ?? baseName,
       truncated: draft.truncated,
-    };
+    });
   }
   const lines = trimmed
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l !== '');
   if (lines.length > 0 && looksLikeCsvHeader(lines[0]!)) {
-    return { tracks: parseSpotifyCsv(trimmed), name: baseName, truncated: false };
+    return capDraft({
+      tracks: parseSpotifyCsv(trimmed),
+      name: baseName,
+      truncated: false,
+    });
   }
   // CSV tanpa header (dua kolom "Artis,Judul") dideteksi dari koma di
   // mayoritas baris — kalau tidak, perlakukan sebagai teks.
@@ -171,13 +206,34 @@ export function parseSpotifyFile(
   ) {
     const csv = parseSpotifyCsv(trimmed);
     if (csv.length > 0) {
-      return { tracks: csv, name: baseName, truncated: false };
+      return capDraft({ tracks: csv, name: baseName, truncated: false });
     }
   }
-  return {
+  return capDraft({
     tracks: parseSpotifyText(trimmed),
     name: baseName,
     truncated: false,
+  });
+}
+
+/**
+ * Terapkan cap jalur file pada draf: potong judul/artis ke 1.000
+ * karakter, lalu potong daftar ke SPOTIFY_FILE_MAX_TRACKS lagu.
+ * Kelebihan dicatat di totalTracks supaya UI bisa melaporkannya.
+ */
+function capDraft(draft: SpotifyPlaylistDraft): SpotifyPlaylistDraft {
+  const tracks = draft.tracks.map((t) => ({
+    title: t.title.slice(0, MAX_SPOTIFY_TRACK_TEXT_CHARS),
+    artist: t.artist.slice(0, MAX_SPOTIFY_TRACK_TEXT_CHARS),
+  }));
+  if (tracks.length <= SPOTIFY_FILE_MAX_TRACKS) {
+    return { ...draft, tracks };
+  }
+  return {
+    ...draft,
+    tracks: tracks.slice(0, SPOTIFY_FILE_MAX_TRACKS),
+    truncated: true,
+    totalTracks: tracks.length,
   };
 }
 
@@ -532,7 +588,8 @@ async function fetchPlaylistPage(
     }
   } catch (error) {
     if (error instanceof SpotifyLinkException) throw error;
-    if (error instanceof Error && error.name === 'AbortError') {
+    // I11: abort fetch asli adalah DOMException (bukan Error).
+    if ((error as { name?: unknown } | null)?.name === 'AbortError') {
       throw new SpotifyLinkException('unreadable', 'waktu habis');
     }
     throw new SpotifyLinkException('unreadable', 'jaringan bermasalah');
@@ -694,6 +751,12 @@ export async function importDraft(
     deps.search ?? ((q: string) => getSearchService().search(q));
   const library = deps.library ?? (await getLibraryService());
   const matchDelayMs = deps.matchDelayMs ?? SPOTIFY_MATCH_DELAY_MS;
+  // R16: nama dari og:title/nama file tidak terbatas panjangnya,
+  // sementara createPlaylist melempar di atas 100 karakter.
+  // Potong ke batas SEBELUM createPlaylist (mengikuti merge backup).
+  const safeName = opts.playlistName
+    .trim()
+    .slice(0, MAX_PLAYLIST_NAME_LENGTH);
   const total = draft.tracks.length;
   let succeeded = 0;
   let alreadyExisted = 0;
@@ -747,7 +810,7 @@ export async function importDraft(
   }
   let playlistId: number | null = null;
   if (matched.length > 0) {
-    playlistId = await library.createPlaylist(opts.playlistName);
+    playlistId = await library.createPlaylist(safeName);
     for (const song of matched) {
       await library.upsertSong(
         {
@@ -798,7 +861,7 @@ export async function importDraft(
     alreadyExisted,
     failures,
     playlistId,
-    playlistName: matched.length === 0 ? null : opts.playlistName,
+    playlistName: matched.length === 0 ? null : safeName,
     downloadedSongIds: [],
     exportedAt: null,
     appVersion: null,

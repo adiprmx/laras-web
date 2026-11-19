@@ -25,6 +25,8 @@ import {
   parseSpotifyJson,
   parseSpotifyPlaylistHtml,
   parseSpotifyText,
+  SPOTIFY_FILE_MAX_BYTES,
+  SPOTIFY_FILE_MAX_TRACKS,
   SpotifyFileException,
   SpotifyLinkException,
   trackLabel,
@@ -662,5 +664,86 @@ describe('importDraft', () => {
     const counts = await library.libraryCounts();
     expect(counts.songs).toBe(1);
     expect(counts.playlists).toBe(2);
+  });
+
+  it('R16: nama playlist 150 karakter dipotong ke 100, impor tetap jalan', async () => {
+    const library = await makeService();
+    const search = searchStub({
+      'Peterpan Semua Tentang Kita': [
+        { videoId: 'j9ITOOStWNU', title: 'Semua Tentang Kita', artist: 'Peterpan' },
+      ],
+    });
+    const one: SpotifyPlaylistDraft = {
+      name: 'x'.repeat(150),
+      truncated: false,
+      tracks: [{ title: 'Semua Tentang Kita', artist: 'Peterpan' }],
+    };
+    const longName = 'y'.repeat(150);
+    const report = await importDraft(
+      one,
+      { playlistName: longName },
+      { search, library, matchDelayMs: 0 },
+    );
+    expect(report.playlistId).not.toBeNull();
+    expect(report.playlistName).toBe('y'.repeat(100));
+    const playlists = await library.playlistsPage({});
+    expect(playlists[0]?.playlist.name).toBe('y'.repeat(100));
+  });
+});
+
+describe('parseSpotifyFile: cap ukuran dan jumlah lagu (Blue 3, R13)', () => {
+  it('file teks 35 lagu dipotong ke 30 + truncated + totalTracks', () => {
+    const lines = Array.from(
+      { length: 35 },
+      (_, i) => `Artis ${i} - Lagu ${i}`,
+    ).join('\n');
+    const draft = parseSpotifyFile(new TextEncoder().encode(lines), 'daftar.txt');
+    expect(draft.tracks).toHaveLength(SPOTIFY_FILE_MAX_TRACKS);
+    expect(draft.truncated).toBe(true);
+    expect(draft.totalTracks).toBe(35);
+  });
+
+  it('file JSON 40 lagu dipotong ke 30', () => {
+    const items = Array.from({ length: 40 }, (_, i) => ({
+      name: `Lagu ${i}`,
+      artist: `Artis ${i}`,
+    }));
+    const draft = parseSpotifyFile(
+      new TextEncoder().encode(JSON.stringify({ tracks: items })),
+      'daftar.json',
+    );
+    expect(draft.tracks).toHaveLength(30);
+    expect(draft.truncated).toBe(true);
+    expect(draft.totalTracks).toBe(40);
+  });
+
+  it('file 30 lagu tidak terpotong', () => {
+    const lines = Array.from(
+      { length: 30 },
+      (_, i) => `Artis ${i} - Lagu ${i}`,
+    ).join('\n');
+    const draft = parseSpotifyFile(new TextEncoder().encode(lines));
+    expect(draft.tracks).toHaveLength(30);
+    expect(draft.truncated).toBe(false);
+    expect(draft.totalTracks).toBeUndefined();
+  });
+
+  it('file di atas 10 MB ditolak dengan kind tooLarge', () => {
+    const bytes = new Uint8Array(SPOTIFY_FILE_MAX_BYTES + 1);
+    bytes.fill(97); // 'a'
+    try {
+      parseSpotifyFile(bytes, 'besar.txt');
+      throw new Error('diharapkan SpotifyFileException');
+    } catch (e) {
+      expect(e).toBeInstanceOf(SpotifyFileException);
+      expect((e as SpotifyFileException).kind).toBe('tooLarge');
+    }
+  });
+
+  it('judul 1.500 karakter dipotong ke 1.000', () => {
+    const draft = parseSpotifyFile(
+      new TextEncoder().encode(`Artis - ${'x'.repeat(1500)}`),
+    );
+    expect(draft.tracks[0]?.title).toBe('x'.repeat(1000));
   });
 });

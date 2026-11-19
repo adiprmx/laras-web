@@ -54,6 +54,41 @@ export const MAX_BACKUP_BYTES = 10_000_000;
 /** Batas antrean di file salinan (sama dengan batas antrean pemutar). */
 export const MAX_BACKUP_QUEUE_ITEMS = 200;
 
+// --- Cap per-field dan per-koleksi (Blue 3, Red 3 R14) ---
+// Cap total 10 MB saja tidak cukup: satu judul 5 MB berisi kata
+// unik bisa membengkakkan indeks token, dan puluhan ribu playlist
+// kosong bisa membengkakkan database. Cap di bawah ini menolak
+// file yang melewatinya (BackupException invalidStructure) —
+// kecuali nama/deskripsi playlist yang tetap dipotong saat merge
+// (100/500 karakter, library.ts), karena file sah dari app yang
+// sama tidak pernah melewati angka-ini.
+/** Batas panjang satu judul/nama teks (lagu, album, artis). */
+export const MAX_BACKUP_TEXT_CHARS = 1000;
+/** Batas panjang nama/deskripsi playlist di parser (merge memotong ke 100/500). */
+export const MAX_BACKUP_PLAYLIST_TEXT_CHARS = 1000;
+/** Batas panjang satu query pencarian. */
+export const MAX_BACKUP_QUERY_CHARS = 500;
+/** Batas panjang satu id (lagu, album, artis, referensi). */
+export const MAX_BACKUP_ID_CHARS = 200;
+/** Batas panjang satu URL gambar. */
+export const MAX_BACKUP_URL_CHARS = 2048;
+/** Batas jumlah artis per lagu. */
+export const MAX_BACKUP_SONG_ARTISTS = 50;
+/** Batas jumlah lagu per playlist di file (sama dengan batas playlist app). */
+export const MAX_BACKUP_PLAYLIST_SONGS = 1000;
+/** Batas jumlah lagu (PRD B10.1: 10 MB / 200 byte per lagu). */
+export const MAX_BACKUP_SONGS = 50000;
+/** Batas jumlah album. */
+export const MAX_BACKUP_ALBUMS = 50000;
+/** Batas jumlah artis. */
+export const MAX_BACKUP_ARTISTS = 50000;
+/** Batas jumlah playlist. */
+export const MAX_BACKUP_PLAYLISTS = 1000;
+/** Batas jumlah entri riwayat putar (sama dengan batas riwayat app). */
+export const MAX_BACKUP_PLAY_EVENTS = 10000;
+/** Batas jumlah query riwayat pencarian (sama dengan batas app). */
+export const MAX_BACKUP_SEARCH_HISTORY = 100;
+
 export type BackupErrorKind =
   | 'tooLarge'
   | 'invalidJson'
@@ -255,6 +290,20 @@ function isInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value);
 }
 
+/** String tak kosong dengan panjang paling banyak `max`. */
+function isBoundedString(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max;
+}
+
+/** String opsional (null/undefined boleh) dengan panjang paling banyak `max`. */
+function isOptionalBoundedString(value: unknown, max: number): boolean {
+  return (
+    value === null ||
+    value === undefined ||
+    (typeof value === 'string' && value.length <= max)
+  );
+}
+
 function toJsonArtistRef(a: BackupArtistRef): Record<string, unknown> {
   return { id: a.id, name: a.name };
 }
@@ -452,8 +501,8 @@ function parseArtistRef(raw: unknown): BackupArtistRef | null {
   if (!isRecord(raw)) return null;
   const id = raw['id'];
   const name = raw['name'];
-  if (typeof id !== 'string' || id.length === 0) return null;
-  if (typeof name !== 'string' || name.length === 0) return null;
+  if (!isBoundedString(id, MAX_BACKUP_ID_CHARS)) return null;
+  if (!isBoundedString(name, MAX_BACKUP_TEXT_CHARS)) return null;
   return { id, name };
 }
 
@@ -461,11 +510,12 @@ function parseSong(raw: unknown): BackupSong | null {
   if (!isRecord(raw)) return null;
   const id = raw['id'];
   const title = raw['title'];
-  if (typeof id !== 'string' || id.length === 0) return null;
-  if (typeof title !== 'string' || title.length === 0) return null;
+  if (!isBoundedString(id, MAX_BACKUP_ID_CHARS)) return null;
+  if (!isBoundedString(title, MAX_BACKUP_TEXT_CHARS)) return null;
   const artists: BackupArtistRef[] = [];
   const rawArtists = raw['artists'];
   if (Array.isArray(rawArtists)) {
+    if (rawArtists.length > MAX_BACKUP_SONG_ARTISTS) return null;
     for (const item of rawArtists) {
       const ref = parseArtistRef(item);
       if (!ref) return null;
@@ -483,9 +533,9 @@ function parseSong(raw: unknown): BackupSong | null {
   const dateAdded = raw['dateAdded'];
   const downloaded = raw['downloaded'];
   const unplayable = raw['unplayable'];
-  if (albumId != null && typeof albumId !== 'string') return null;
+  if (!isOptionalBoundedString(albumId, MAX_BACKUP_ID_CHARS)) return null;
   if (durationSeconds != null && !isInt(durationSeconds)) return null;
-  if (thumbnailUrl != null && typeof thumbnailUrl !== 'string') return null;
+  if (!isOptionalBoundedString(thumbnailUrl, MAX_BACKUP_URL_CHARS)) return null;
   if (liked != null && typeof liked !== 'boolean') return null;
   if (inLibrary != null && typeof inLibrary !== 'boolean') return null;
   if (totalPlayTimeMs != null && !isInt(totalPlayTimeMs)) return null;
@@ -512,14 +562,14 @@ function parseAlbum(raw: unknown): BackupAlbum | null {
   if (!isRecord(raw)) return null;
   const id = raw['id'];
   const title = raw['title'];
-  if (typeof id !== 'string' || id.length === 0) return null;
-  if (typeof title !== 'string' || title.length === 0) return null;
+  if (!isBoundedString(id, MAX_BACKUP_ID_CHARS)) return null;
+  if (!isBoundedString(title, MAX_BACKUP_TEXT_CHARS)) return null;
   const year = raw['year'];
   const thumbnailUrl = raw['thumbnailUrl'];
   const liked = raw['liked'];
   const dateAdded = raw['dateAdded'];
   if (year != null && !isInt(year)) return null;
-  if (thumbnailUrl != null && typeof thumbnailUrl !== 'string') return null;
+  if (!isOptionalBoundedString(thumbnailUrl, MAX_BACKUP_URL_CHARS)) return null;
   if (liked != null && typeof liked !== 'boolean') return null;
   if (dateAdded != null && !isInt(dateAdded)) return null;
   return {
@@ -536,12 +586,12 @@ function parseArtist(raw: unknown): BackupArtist | null {
   if (!isRecord(raw)) return null;
   const id = raw['id'];
   const name = raw['name'];
-  if (typeof id !== 'string' || id.length === 0) return null;
-  if (typeof name !== 'string' || name.length === 0) return null;
+  if (!isBoundedString(id, MAX_BACKUP_ID_CHARS)) return null;
+  if (!isBoundedString(name, MAX_BACKUP_TEXT_CHARS)) return null;
   const thumbnailUrl = raw['thumbnailUrl'];
   const liked = raw['liked'];
   const dateAdded = raw['dateAdded'];
-  if (thumbnailUrl != null && typeof thumbnailUrl !== 'string') return null;
+  if (!isOptionalBoundedString(thumbnailUrl, MAX_BACKUP_URL_CHARS)) return null;
   if (liked != null && typeof liked !== 'boolean') return null;
   if (dateAdded != null && !isInt(dateAdded)) return null;
   return {
@@ -556,16 +606,17 @@ function parseArtist(raw: unknown): BackupArtist | null {
 function parsePlaylist(raw: unknown): BackupPlaylist | null {
   if (!isRecord(raw)) return null;
   const name = raw['name'];
-  if (typeof name !== 'string' || name.length === 0) return null;
+  if (!isBoundedString(name, MAX_BACKUP_PLAYLIST_TEXT_CHARS)) return null;
   const description = raw['description'];
   const songIds = raw['songIds'];
   const createdAt = raw['createdAt'];
-  if (description != null && typeof description !== 'string') return null;
+  if (!isOptionalBoundedString(description, MAX_BACKUP_PLAYLIST_TEXT_CHARS)) return null;
   if (createdAt != null && !isInt(createdAt)) return null;
   const ids: string[] = [];
   if (Array.isArray(songIds)) {
+    if (songIds.length > MAX_BACKUP_PLAYLIST_SONGS) return null;
     for (const item of songIds) {
-      if (typeof item !== 'string' || item.length === 0) return null;
+      if (!isBoundedString(item, MAX_BACKUP_ID_CHARS)) return null;
       ids.push(item);
     }
   } else if (songIds !== null && songIds !== undefined) {
@@ -584,7 +635,7 @@ function parsePlayEvent(raw: unknown): BackupPlayEvent | null {
   const songId = raw['songId'];
   const timestamp = raw['timestamp'];
   const playTimeMs = raw['playTimeMs'];
-  if (typeof songId !== 'string' || songId.length === 0) return null;
+  if (!isBoundedString(songId, MAX_BACKUP_ID_CHARS)) return null;
   if (!isInt(timestamp) || timestamp < 0) return null;
   if (!isInt(playTimeMs) || playTimeMs < 0) return null;
   return { songId, timestamp, playTimeMs };
@@ -594,7 +645,7 @@ function parseSearchQuery(raw: unknown): BackupSearchQuery | null {
   if (!isRecord(raw)) return null;
   const query = raw['query'];
   const timestamp = raw['timestamp'];
-  if (typeof query !== 'string' || query.length === 0) return null;
+  if (!isBoundedString(query, MAX_BACKUP_QUERY_CHARS)) return null;
   if (!isInt(timestamp) || timestamp < 0) return null;
   return { query, timestamp };
 }
@@ -603,8 +654,8 @@ function parseQueueItem(raw: unknown): BackupQueueItem | null {
   if (!isRecord(raw)) return null;
   const songId = raw['songId'];
   const source = raw['source'];
-  if (typeof songId !== 'string' || songId.length === 0) return null;
-  if (source != null && typeof source !== 'string') return null;
+  if (!isBoundedString(songId, MAX_BACKUP_ID_CHARS)) return null;
+  if (!isOptionalBoundedString(source, MAX_BACKUP_ID_CHARS)) return null;
   return { songId, source: (source as string | null | undefined) ?? null };
 }
 
@@ -644,7 +695,9 @@ function parseSettings(raw: unknown): BackupSettings | null {
   return {
     dataSaver: typeof dataSaver === 'boolean' ? dataSaver : null,
     defaultQuality:
-      typeof defaultQuality === 'string' ? defaultQuality : null,
+      typeof defaultQuality === 'string' && defaultQuality.length <= 100
+        ? defaultQuality
+        : null,
     wifiOnly: typeof wifiOnly === 'boolean' ? wifiOnly : null,
     cacheLimitBytes: isInt(cacheLimitBytes) ? cacheLimitBytes : null,
     playbackSpeed:
@@ -652,14 +705,21 @@ function parseSettings(raw: unknown): BackupSettings | null {
     playbackPitch:
       typeof playbackPitch === 'number' ? playbackPitch : null,
     skipSilence: typeof skipSilence === 'boolean' ? skipSilence : null,
-    sortSongs: typeof sortSongs === 'string' ? sortSongs : null,
+    sortSongs:
+      typeof sortSongs === 'string' && sortSongs.length <= 100
+        ? sortSongs
+        : null,
     eqEnabled: typeof eqEnabled === 'boolean' ? eqEnabled : null,
     eqPreset: isInt(eqPreset) ? eqPreset : null,
     lyricsEnabled:
       typeof lyricsEnabled === 'boolean' ? lyricsEnabled : null,
-    eqPresetName: typeof eqPresetName === 'string' ? eqPresetName : null,
+    eqPresetName:
+      typeof eqPresetName === 'string' && eqPresetName.length <= 100
+        ? eqPresetName
+        : null,
     eqGains:
       Array.isArray(eqGains) &&
+      eqGains.length <= 10 &&
       eqGains.every((g) => typeof g === 'number' && Number.isFinite(g))
         ? (eqGains as number[])
         : null,
@@ -670,12 +730,19 @@ function parseList<T>(
   raw: unknown,
   parse: (item: unknown) => T | null,
   section: string,
+  maxItems?: number,
 ): T[] {
   if (raw == null) return [];
   if (!Array.isArray(raw)) {
     throw new BackupException(
       'invalidStructure',
       `bagian "${section}" bukan daftar`,
+    );
+  }
+  if (maxItems !== undefined && raw.length > maxItems) {
+    throw new BackupException(
+      'invalidStructure',
+      `bagian "${section}" melebihi ${maxItems} item`,
     );
   }
   const out: T[] = [];
@@ -695,7 +762,7 @@ function parseList<T>(
 function fromJsonV1(json: Record<string, unknown>): BackupData {
   const appVersion = json['appVersion'];
   const exportedAt = json['exportedAt'];
-  if (typeof appVersion !== 'string' || appVersion.length === 0) {
+  if (!isBoundedString(appVersion, MAX_BACKUP_ID_CHARS)) {
     throw new BackupException(
       'invalidStructure',
       'appVersion hilang atau bukan string',
@@ -712,25 +779,33 @@ function fromJsonV1(json: Record<string, unknown>): BackupData {
       'exportedAt hilang atau bukan tanggal ISO',
     );
   }
-  const songs = parseList(json['songs'], parseSong, 'songs');
-  const albums = parseList(json['albums'], parseAlbum, 'albums');
-  const artists = parseList(json['artists'], parseArtist, 'artists');
+  const songs = parseList(json['songs'], parseSong, 'songs', MAX_BACKUP_SONGS);
+  const albums = parseList(json['albums'], parseAlbum, 'albums', MAX_BACKUP_ALBUMS);
+  const artists = parseList(json['artists'], parseArtist, 'artists', MAX_BACKUP_ARTISTS);
   const playlists = parseList(
     json['playlists'],
     parsePlaylist,
     'playlists',
+    MAX_BACKUP_PLAYLISTS,
   );
   const playEvents = parseList(
     json['playEvents'],
     parsePlayEvent,
     'playEvents',
+    MAX_BACKUP_PLAY_EVENTS,
   );
   const searchHistory = parseList(
     json['searchHistory'],
     parseSearchQuery,
     'searchHistory',
+    MAX_BACKUP_SEARCH_HISTORY,
   );
-  const queue = parseList(json['queue'], parseQueueItem, 'queue');
+  const queue = parseList(
+    json['queue'],
+    parseQueueItem,
+    'queue',
+    MAX_BACKUP_QUEUE_ITEMS,
+  );
   // Id lagu wajib unik (duplikat = file rusak, bukan merge diam-diam).
   const songIds = new Set<string>();
   for (const song of songs) {
@@ -779,12 +854,6 @@ function fromJsonV1(json: Record<string, unknown>): BackupData {
         `antrean menunjuk lagu yang tidak ada: ${item.songId}`,
       );
     }
-  }
-  if (queue.length > MAX_BACKUP_QUEUE_ITEMS) {
-    throw new BackupException(
-      'invalidStructure',
-      'antrean di file melebihi 200 item',
-    );
   }
   const playbackState =
     json['playbackState'] == null

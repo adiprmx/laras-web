@@ -25,9 +25,13 @@ spike S8 yang sudah terbukti (`docs/spikes/s8-s10-data.md`).
    wrangler d1 execute laras-web-sync --file=workers/sync/0001_init.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/0002_ratelimit.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/0003_item_meta.sql --remote
+   wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0004_oauth_states_item_owner.sql --remote
    ```
    Migrasi 0003 WAJIB sebelum deploy Worker ini — SQL push/pull
-   memakai kolom `title`/`artist` dari 0003.
+   memakai kolom `title`/`artist` dari 0003. Migrasi 0004 WAJIB
+   sebelum deploy Worker pasca-Blue 3 — SQL callback memakai tabel
+   `oauth_states` dan SQL push item memakai kolom `user_id` dari
+   0004 (tanpa tabelnya, login fail-open tanpa single-use).
 2. **Aplikasi OAuth (langkah owner — BELUM DIBUAT saat P7 ditulis).**
    Buat aplikasi OAuth Google + GitHub, daftarkan redirect URI:
    `https://laras-sync.hiroohengkerr.workers.dev/api/auth/callback`
@@ -55,8 +59,14 @@ spike S8 yang sudah terbukti (`docs/spikes/s8-s10-data.md`).
   memvalidasi header `Origin` terhadap `ALLOWED_ORIGINS`.
   Bila Worker pindah ke subdomain app (same-site), set
   `COOKIE_SAMESITE=Lax` di vars untuk memperketat.
-- Rate limit D1 fail-open: auth 10/mnt/IP, sync 30/mnt/user,
-  me 60/mnt/IP. Bila D1 mati, request diizinkan (layanan
-  tetap jalan, bukan mati total).
+- Rate limit D1 fail-open: auth 10/mnt/IP, auth-callback
+  10/mnt/IP, sync 30/mnt/user, me 60/mnt/IP. Bila D1 mati,
+  request diizinkan (layanan tetap jalan, bukan mati total).
+- State OAuth sekali pakai: hash state disimpan di D1 saat login
+  (tabel `oauth_states`, TTL 10 menit) dan dihapus saat callback
+  memakainya. State yang sudah dipakai atau tidak dikenal ditolak.
+- `ALLOWED_ORIGINS` produksi hanya domain app (tanpa localhost).
+  Dev lokal: `wrangler dev --env dev` (localhost hanya di
+  `[env.dev.vars]` di `wrangler.toml`).
 - Penghapusan akun menghapus data secara eksplisit berurutan
   (tidak mengandalkan ON DELETE CASCADE).

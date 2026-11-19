@@ -8,9 +8,12 @@
 // settings 4 KB.
 //
 // SKEMA: workers/sync/0001_init.sql (7 tabel) + 0002_ratelimit.sql
-// + 0003_item_meta.sql. Worker ini WAJIB di-deploy sesudah ketiga
-// migrasi diterapkan (SQL push/pull memakai kolom title/artist
-// dari 0003).
+// + 0003_item_meta.sql + migrations/0004_oauth_states_item_owner.sql
+// (tabel oauth_states + kolom user_id di sync_playlist_items).
+// Worker ini WAJIB di-deploy sesudah keempat migrasi diterapkan
+// (SQL push/pull memakai kolom title/artist dari 0003, SQL
+// callback memakai tabel oauth_states dari 0004, SQL push item
+// memakai kolom user_id dari 0004).
 //
 // KREDENSIAL (langkah owner, belum ada saat P7 ditulis):
 // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GITHUB_CLIENT_ID,
@@ -79,7 +82,11 @@ function jsonError(status, code, message, extraHeaders = {}) {
     JSON.stringify({ success: false, error: { code, message } }),
     {
       status,
-      headers: { 'Content-Type': 'application/json', ...extraHeaders },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Content-Type-Options': 'nosniff',
+        ...extraHeaders,
+      },
     },
   );
 }
@@ -87,7 +94,11 @@ function jsonError(status, code, message, extraHeaders = {}) {
 function jsonOk(data, extraHeaders = {}) {
   return new Response(JSON.stringify({ success: true, data }), {
     status: 200,
-    headers: { 'Content-Type': 'application/json', ...extraHeaders },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Content-Type-Options': 'nosniff',
+      ...extraHeaders,
+    },
   });
 }
 
@@ -120,7 +131,16 @@ function parseCookies(request) {
   const header = request.headers.get('Cookie') || '';
   for (const part of header.split(';')) {
     const [name, ...rest] = part.trim().split('=');
-    if (name) out[name] = decodeURIComponent(rest.join('=') || '');
+    if (!name) continue;
+    // I12: nilai cookie malformed (% tidak valid) membuat
+    // decodeURIComponent melempar; pakai nilai mentah daripada
+    // menggagalkan seluruh request dengan 500.
+    const raw = rest.join('=') || '';
+    try {
+      out[name] = decodeURIComponent(raw);
+    } catch {
+      out[name] = raw;
+    }
   }
   return out;
 }
@@ -300,6 +320,85 @@ function oauthConfig(env, provider) {
   };
 }
 
+// ------------------------------------------------------------------
+// State OAuth sekali pakai (Red 3 S6, migrasi 0004)
+//
+// State disimpan sebagai hash SHA-256 di D1 saat login, lalu
+// DIHAPUS saat callback memakainya: state yang sama tidak bisa
+// dipakai dua kali, dan state yang tidak pernah dikeluarkan
+// login ditolak. Cookie saja tidak cukup — penyerang terskrip
+// mengabaikan Set-Cookie penghapus dan memakai ulang cookie
+// state tanpa batas. TTL 10 menit, sama dengan cookie.
+// ------------------------------------------------------------------
+
+/** Simpan hash state (best-effort: gagal simpan tidak mematikan login). */
+async function storeOAuthState(env, state, provider) {
+  if (!env.DB) return;
+  try {
+    const now = Date.now();
+    // Sapu baris kedaluwarsa supaya tabel tidak tumbuh tanpa batas.
+    await env.DB.prepare(
+      'DELETE FROM oauth_states WHERE expires_at < ?',
+    )
+      .bind(now)
+      .run();
+    await env.DB.prepare(
+      'INSERT INTO oauth_states (state_hash, provider, expires_at, created_at) VALUES (?, ?, ?, ?)',
+    )
+      .bind(
+        await sha256Hex(state),
+        provider,
+        now + STATE_MAX_AGE_SECONDS * 1000,
+        now,
+      )
+      .run();
+  } catch (e) {
+    console.warn(
+      'oauth state: gagal simpan:',
+      e instanceof Error ? e.message : 'unknown',
+    );
+  }
+}
+
+/**
+ * Pakai satu state: true bila state dikenal, provider cocok,
+ * belum kedaluwarsa, dan belum pernah dipakai (baris dihapus
+ * saat dipakai). State tak dikenal/kedaluwarsa/sudah dipakai
+ * mengembalikan false. Galat D1 (mis. tabel belum termigrasi
+ * atau D1 mati sesaat) fail-open ke true supaya login tidak
+ * mati total — rate limit callback tetap melindungi kuota.
+ * Koordinator WAJIB menerapkan migrasi 0004 sebelum deploy
+ * supaya single-use benar-benar aktif.
+ */
+async function consumeOAuthState(env, state, provider) {
+  if (!env.DB) return false;
+  const hash = await sha256Hex(state);
+  try {
+    const row = await env.DB.prepare(
+      'SELECT provider, expires_at FROM oauth_states WHERE state_hash = ?',
+    )
+      .bind(hash)
+      .first();
+    if (!row) return false;
+    if (row.provider !== provider || row.expires_at <= Date.now()) {
+      await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ?')
+        .bind(hash)
+        .run();
+      return false;
+    }
+    await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ?')
+      .bind(hash)
+      .run();
+    return true;
+  } catch (e) {
+    console.warn(
+      'oauth state: gagal baca (fail-open, login dilanjutkan):',
+      e instanceof Error ? e.message : 'unknown',
+    );
+    return true;
+  }
+}
+
 function setupPendingPage(env) {
   // Halaman penjelasan saat aplikasi OAuth belum dibuat owner.
   // Bahasa sehari-hari, tanpa jargon, tanpa detail teknis.
@@ -314,7 +413,12 @@ function setupPendingPage(env) {
       `</body></html>`,
     {
       status: 503,
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy':
+          "default-src 'none'; style-src 'unsafe-inline'",
+      },
     },
   );
 }
@@ -335,6 +439,9 @@ async function handleLogin(request, env, url) {
     return r;
   }
   const state = randomTokenHex(16);
+  // S6: catat state di server supaya callback bisa menolak
+  // pemakaian ulang (single-use).
+  await storeOAuthState(env, state, provider);
   const redirectUri = `${url.origin}/api/auth/callback`;
   const params = new URLSearchParams({
     client_id: config.clientId,
@@ -443,6 +550,11 @@ async function handleCallback(request, env, url) {
     return fail('state');
   }
   if (!env.DB) return fail('server');
+  // S6: state sekali pakai di server — tolak state yang sudah
+  // dipakai, tidak dikenal, atau kedaluwarsa (sebelum tukar kode).
+  if (!(await consumeOAuthState(env, state, provider))) {
+    return fail('state');
+  }
   const config = oauthConfig(env, provider);
   if (!config.clientId || !config.clientSecret) {
     return setupPendingPage(env);
@@ -689,14 +801,39 @@ async function handlePush(env, request, user) {
   const now = Date.now();
   const deviceId = body.deviceId;
   const stmts = [];
+  // R11: verifikasi kepemilikan playlist untuk item. Playlist
+  // yang sudah ada di D1 harus milik pendorong; playlist baru
+  // (belum ada di D1) diizinkan hanya bila ikut dibuat di push
+  // ini (di body.playlists) — jadi item yatim dan item ke
+  // playlist orang lain ditolak, sementara push "playlist baru
+  // + lagunya sekaligus" tetap jalan.
+  const newPlaylistIds = new Set(
+    (body.playlists || []).map((p) => p.clientId),
+  );
+  const ownedCache = new Map();
+  async function playlistOwned(clientId) {
+    if (ownedCache.has(clientId)) return ownedCache.get(clientId);
+    const row = await db
+      .prepare('SELECT user_id FROM sync_playlists WHERE id = ?')
+      .bind(clientId)
+      .first();
+    const owned = row
+      ? row.user_id === user.id
+      : newPlaylistIds.has(clientId);
+    ownedCache.set(clientId, owned);
+    return owned;
+  }
+  let skippedNotOwned = 0;
 
   // Playlist: id server = clientId (deterministik per perangkat
   // pembuat; LWW + tiebreak device_id seperti yang terbukti S8).
+  // R11: upsert hanya menimpa bila baris yang ada milik pendorong
+  // (user_id cocok) — clientId orang lain tidak bisa ditimpa.
   for (const p of body.playlists || []) {
     stmts.push(
       db
         .prepare(
-          'INSERT INTO sync_playlists (id, user_id, client_id, nama, deskripsi, device_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(id) DO UPDATE SET nama = excluded.nama, deskripsi = excluded.deskripsi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL WHERE excluded.updated_at > sync_playlists.updated_at OR (excluded.updated_at = sync_playlists.updated_at AND excluded.device_id > sync_playlists.device_id)',
+          'INSERT INTO sync_playlists (id, user_id, client_id, nama, deskripsi, device_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(id) DO UPDATE SET nama = excluded.nama, deskripsi = excluded.deskripsi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL WHERE (excluded.updated_at > sync_playlists.updated_at OR (excluded.updated_at = sync_playlists.updated_at AND excluded.device_id > sync_playlists.device_id)) AND sync_playlists.user_id = excluded.user_id',
         )
         .bind(p.clientId, user.id, p.clientId, p.nama, p.deskripsi ?? null, deviceId, now),
     );
@@ -705,27 +842,35 @@ async function handlePush(env, request, user) {
     stmts.push(
       db
         .prepare(
-          'INSERT INTO sync_playlists (id, user_id, client_id, nama, deskripsi, device_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at WHERE excluded.updated_at > sync_playlists.updated_at OR (excluded.updated_at = sync_playlists.updated_at AND excluded.device_id > sync_playlists.device_id)',
+          'INSERT INTO sync_playlists (id, user_id, client_id, nama, deskripsi, device_id, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at WHERE (excluded.updated_at > sync_playlists.updated_at OR (excluded.updated_at = sync_playlists.updated_at AND excluded.device_id > sync_playlists.device_id)) AND sync_playlists.user_id = excluded.user_id',
         )
         .bind(d.clientId, user.id, d.clientId, '', null, deviceId, now, now),
     );
   }
   for (const item of body.playlistItems || []) {
+    if (!(await playlistOwned(item.playlistClientId))) {
+      skippedNotOwned++;
+      continue;
+    }
     stmts.push(
       db
         .prepare(
-          'INSERT INTO sync_playlist_items (playlist_id, video_id, posisi, added_at, device_id, updated_at, deleted_at, title, artist) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?) ON CONFLICT(playlist_id, video_id) DO UPDATE SET posisi = excluded.posisi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL, title = excluded.title, artist = excluded.artist WHERE excluded.updated_at > sync_playlist_items.updated_at OR (excluded.updated_at = sync_playlist_items.updated_at AND excluded.device_id > sync_playlist_items.device_id)',
+          'INSERT INTO sync_playlist_items (playlist_id, video_id, posisi, added_at, device_id, updated_at, deleted_at, title, artist, user_id) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) ON CONFLICT(playlist_id, video_id) DO UPDATE SET posisi = excluded.posisi, device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = NULL, title = excluded.title, artist = excluded.artist, user_id = excluded.user_id WHERE excluded.updated_at > sync_playlist_items.updated_at OR (excluded.updated_at = sync_playlist_items.updated_at AND excluded.device_id > sync_playlist_items.device_id)',
         )
-        .bind(item.playlistClientId, item.videoId, item.posisi, now, deviceId, now, item.title ?? null, item.artist ?? null),
+        .bind(item.playlistClientId, item.videoId, item.posisi, now, deviceId, now, item.title ?? null, item.artist ?? null, user.id),
     );
   }
   for (const d of body.deletedPlaylistItems || []) {
+    if (!(await playlistOwned(d.playlistClientId))) {
+      skippedNotOwned++;
+      continue;
+    }
     stmts.push(
       db
         .prepare(
-          'INSERT INTO sync_playlist_items (playlist_id, video_id, posisi, added_at, device_id, updated_at, deleted_at) VALUES (?, ?, 0, ?, ?, ?, ?) ON CONFLICT(playlist_id, video_id) DO UPDATE SET device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at WHERE excluded.updated_at > sync_playlist_items.updated_at OR (excluded.updated_at = sync_playlist_items.updated_at AND excluded.device_id > sync_playlist_items.device_id)',
+          'INSERT INTO sync_playlist_items (playlist_id, video_id, posisi, added_at, device_id, updated_at, deleted_at, user_id) VALUES (?, ?, 0, ?, ?, ?, ?, ?) ON CONFLICT(playlist_id, video_id) DO UPDATE SET device_id = excluded.device_id, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at, user_id = excluded.user_id WHERE excluded.updated_at > sync_playlist_items.updated_at OR (excluded.updated_at = sync_playlist_items.updated_at AND excluded.device_id > sync_playlist_items.device_id)',
         )
-        .bind(d.playlistClientId, d.videoId, now, deviceId, now, now),
+        .bind(d.playlistClientId, d.videoId, now, deviceId, now, now, user.id),
     );
   }
   for (const like of body.likes || []) {
@@ -775,7 +920,7 @@ async function handlePush(env, request, user) {
   if (stmts.length > 0) {
     await db.batch(stmts);
   }
-  return jsonOk({ serverTime: now, applied: stmts.length });
+  return jsonOk({ serverTime: now, applied: stmts.length, skippedNotOwned });
 }
 
 // ------------------------------------------------------------------
@@ -810,6 +955,17 @@ export default {
       if (url.pathname === '/api/auth/callback') {
         if (request.method !== 'GET') {
           return jsonError(405, 'METHOD_NOT_ALLOWED', 'Metode tidak diizinkan');
+        }
+        // S6: callback adalah endpoint terakhir tanpa rate limit —
+        // tanpa ini satu IP bisa membakar kuota harian akun lewat
+        // tukar kode berulang. Dicek SEBELUM tukar kode.
+        const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+        if (
+          await checkRateLimit(env, `auth-callback:${ip}`, RATE_AUTH_PER_MIN)
+        ) {
+          const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak percobaan masuk');
+          r.headers.set('Retry-After', '60');
+          return r;
         }
         return handleCallback(request, env, url);
       }

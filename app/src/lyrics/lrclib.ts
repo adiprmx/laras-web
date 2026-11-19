@@ -110,6 +110,11 @@ export function pickSearchResult(
 function recordToResult(
   record: LrclibRecord,
 ): LyricsFetchResult {
+  // I13: /api/get bisa mengembalikan JSON literal null (HTTP 200);
+  // tanpa cek ini, `record.instrumental` melempar TypeError.
+  if (typeof record !== 'object' || record === null) {
+    return { status: 'not-found' };
+  }
   if (record.instrumental) return { status: 'not-found' };
   const plain = record.plainLyrics?.trim() ?? '';
   const synced = record.syncedLyrics?.trim() || null;

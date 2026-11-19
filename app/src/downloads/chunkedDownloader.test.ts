@@ -384,6 +384,27 @@ describe('downloadChunked', () => {
     ).rejects.toThrow('Unduhan dibatalkan');
   });
 
+  it('I11: DOMException AbortError dari fetchRange dikenali sebagai batal', async () => {
+    const controller = new AbortController();
+    const fetchRange: FetchRange = async () => {
+      controller.abort();
+      throw new DOMException('The operation was aborted.', 'AbortError');
+    };
+    await expect(
+      downloadChunked({
+        streamUrl: 'https://rr1.googlevideo.com/videoplayback?x=1',
+        startByte: 0,
+        chunkSizeBytes: 1000,
+        fetchRange,
+        reResolve: () => Promise.resolve('https://rr1.googlevideo.com/baru'),
+        onChunk: async () => undefined,
+        onProgress: () => undefined,
+        signal: controller.signal,
+        sleep: sleepInstant,
+      }),
+    ).rejects.toThrow('Unduhan dibatalkan');
+  });
+
   it('melaporkan progres per chunk', async () => {
     const buffer = bytesOf(2500);
     const { fetchRange } = fakeRangeFetch(buffer);

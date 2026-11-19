@@ -242,3 +242,12 @@ describe('fetchLyricsFromNetwork', () => {
     });
   });
 });
+
+describe('fetchLyricsFromNetwork (Blue 3, I13)', () => {
+  it('/api/get mengembalikan JSON null -> not-found, bukan TypeError', async () => {
+    const result = await fetchLyricsFromNetwork(QUERY, {
+      fetchFn: mockFetch(() => jsonResponse(null)),
+    });
+    expect(result).toEqual({ status: 'not-found' });
+  });
+});

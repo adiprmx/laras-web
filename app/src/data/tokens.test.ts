@@ -39,6 +39,19 @@ describe('uniqueTokens', () => {
   it('membuang duplikat, urutan pertama dipertahankan', () => {
     expect(uniqueTokens('kita kita semua kita')).toEqual(['kita', 'semua']);
   });
+
+  it('R14: dibatasi 200 token unik', () => {
+    const words = Array.from({ length: 300 }, (_, i) => `kata${i}`).join(' ');
+    const tokens = uniqueTokens(words);
+    expect(tokens).toHaveLength(200);
+    expect(tokens[0]).toBe('kata0');
+    expect(tokens[199]).toBe('kata199');
+  });
+
+  it('R14: token lebih dari 100 karakter dibuang', () => {
+    const tokens = uniqueTokens(`pendek ${'x'.repeat(101)} juga-pendek`);
+    expect(tokens).toEqual(['pendek', 'juga']);
+  });
 });
 
 describe('localArtistIdForName', () => {

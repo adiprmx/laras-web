@@ -389,3 +389,149 @@ describe('encodeBackupData', () => {
     expect(json['playbackState']).toBeNull();
   });
 });
+
+describe('parseBackupText: cap per-field dan per-koleksi (Blue 3, R14)', () => {
+  const base = {
+    backupVersion: 1,
+    appVersion: '0.9.0',
+    exportedAt: '2026-11-17T04:38:00.000Z',
+  };
+
+  function song(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'vid-1',
+      title: 'Lagu Satu',
+      artists: [],
+      albumId: null,
+      durationSeconds: null,
+      thumbnailUrl: null,
+      liked: false,
+      inLibrary: false,
+      totalPlayTimeMs: 0,
+      dateAdded: null,
+      downloaded: false,
+      unplayable: false,
+      ...overrides,
+    };
+  }
+
+  it('judul lagu 1.001 karakter ditolak, 1.000 diterima', () => {
+    expectKind(
+      () =>
+        parseBackupText(
+          JSON.stringify({ ...base, songs: [song({ title: 'x'.repeat(1001) })] }),
+        ),
+      'invalidStructure',
+    );
+    const ok = parseBackupText(
+      JSON.stringify({ ...base, songs: [song({ title: 'x'.repeat(1000) })] }),
+    );
+    expect(ok.songs).toHaveLength(1);
+  });
+
+  it('query pencarian 501 karakter ditolak', () => {
+    expectKind(
+      () =>
+        parseBackupText(
+          JSON.stringify({
+            ...base,
+            searchHistory: [{ query: 'x'.repeat(501), timestamp: 1 }],
+          }),
+        ),
+      'invalidStructure',
+    );
+  });
+
+  it('1.001 playlist ditolak, 1.000 diterima', () => {
+    const make = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        name: `P${i}`,
+        description: null,
+        songIds: [],
+        createdAt: null,
+      }));
+    expectKind(
+      () => parseBackupText(JSON.stringify({ ...base, playlists: make(1001) })),
+      'invalidStructure',
+    );
+    const ok = parseBackupText(JSON.stringify({ ...base, playlists: make(1000) }));
+    expect(ok.playlists).toHaveLength(1000);
+  });
+
+  it('10.001 entri riwayat putar ditolak', () => {
+    const playEvents = Array.from({ length: 10001 }, (_, i) => ({
+      songId: 'vid-1',
+      timestamp: i,
+      playTimeMs: 0,
+    }));
+    expectKind(
+      () =>
+        parseBackupText(
+          JSON.stringify({ ...base, songs: [song()], playEvents }),
+        ),
+      'invalidStructure',
+    );
+  });
+
+  it('101 query riwayat pencarian ditolak', () => {
+    const searchHistory = Array.from({ length: 101 }, (_, i) => ({
+      query: `q${i}`,
+      timestamp: i,
+    }));
+    expectKind(
+      () => parseBackupText(JSON.stringify({ ...base, searchHistory })),
+      'invalidStructure',
+    );
+  });
+
+  it('playlist dengan 1.001 lagu ditolak', () => {
+    const songIds = Array.from({ length: 1001 }, () => 'vid-1');
+    expectKind(
+      () =>
+        parseBackupText(
+          JSON.stringify({
+            ...base,
+            songs: [song()],
+            playlists: [
+              { name: 'P', description: null, songIds, createdAt: null },
+            ],
+          }),
+        ),
+      'invalidStructure',
+    );
+  });
+
+  it('lagu dengan 51 artis ditolak', () => {
+    const artists = Array.from({ length: 51 }, (_, i) => ({
+      id: `a${i}`,
+      name: `Artis ${i}`,
+    }));
+    expectKind(
+      () =>
+        parseBackupText(
+          JSON.stringify({ ...base, songs: [song({ artists })] }),
+        ),
+      'invalidStructure',
+    );
+  });
+
+  it('50.001 lagu ditolak', () => {
+    const songs = Array.from({ length: 50001 }, (_, i) =>
+      song({ id: `vid-${i}` }),
+    );
+    expectKind(
+      () => parseBackupText(JSON.stringify({ ...base, songs })),
+      'invalidStructure',
+    );
+  });
+
+  it('eqGains 11 angka diabaikan (jadi null), bukan menolak file', () => {
+    const parsed = parseBackupText(
+      JSON.stringify({
+        ...base,
+        settings: { eqGains: Array(11).fill(0), eqPresetName: 'custom' },
+      }),
+    );
+    expect(parsed.settings?.eqGains).toBeNull();
+  });
+});

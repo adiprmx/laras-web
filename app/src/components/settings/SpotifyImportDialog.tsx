@@ -17,6 +17,7 @@ import {
   fetchFromLink,
   importDraft,
   parseSpotifyFile,
+  SPOTIFY_FILE_MAX_BYTES,
   SpotifyFileException,
   SpotifyLinkException,
   type SpotifyPlaylistDraft,
@@ -70,9 +71,11 @@ export default function SpotifyImportDialog({
       );
     } catch (e) {
       setError(
-        e instanceof SpotifyFileException
-          ? strings.spotifyErrorPasted
-          : strings.spotifyErrorFile,
+        e instanceof SpotifyFileException && e.kind === 'tooLarge'
+          ? strings.spotifyErrorTooLarge
+          : e instanceof SpotifyFileException
+            ? strings.spotifyErrorPasted
+            : strings.spotifyErrorFile,
       );
     }
   };
@@ -80,11 +83,21 @@ export default function SpotifyImportDialog({
   const handleFile = async (file: File | undefined) => {
     if (!file) return;
     setError(null);
+    // R13: cek ukuran SEBELUM arrayBuffer() (pola yang sama
+    // dengan impor backup, R12).
+    if (file.size > SPOTIFY_FILE_MAX_BYTES) {
+      setError(strings.spotifyErrorTooLarge);
+      return;
+    }
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       openDraft(parseSpotifyFile(bytes, file.name));
-    } catch {
-      setError(strings.spotifyErrorFile);
+    } catch (e) {
+      setError(
+        e instanceof SpotifyFileException && e.kind === 'tooLarge'
+          ? strings.spotifyErrorTooLarge
+          : strings.spotifyErrorFile,
+      );
     }
   };
 
@@ -106,6 +119,7 @@ export default function SpotifyImportDialog({
     const name = playlistName.trim() === '' ? strings.spotifyNameDefault : playlistName.trim();
     cancelledRef.current = false;
     setImporting(true);
+    setError(null);
     setProgress([0, draft.tracks.length]);
     try {
       const result = await importDraft(
@@ -117,6 +131,10 @@ export default function SpotifyImportDialog({
         },
       );
       setReport(result);
+    } catch {
+      // R16: kegagalan impor (mis. nama playlist ditolak) WAJIB
+      // tampil ke pengguna, bukan unhandled rejection diam-diam.
+      setError(strings.spotifyErrorImportFailed);
     } finally {
       setImporting(false);
     }
@@ -289,7 +307,12 @@ export default function SpotifyImportDialog({
                 data-testid="spotify-truncated"
                 className="mt-1 text-sm text-amber-200"
               >
-                {strings.spotifyLinkTruncated}
+                {draft.totalTracks !== undefined
+                  ? strings.spotifyFileTruncated(
+                      draft.totalTracks,
+                      draft.tracks.length,
+                    )
+                  : strings.spotifyLinkTruncated}
               </p>
             ) : null}
             <label
@@ -332,6 +355,14 @@ export default function SpotifyImportDialog({
                   {strings.spotifyProgress(progress[0], progress[1])}
                 </p>
               </div>
+            ) : null}
+            {error ? (
+              <p
+                data-testid="spotify-error"
+                className="mt-3 text-sm text-red-300"
+              >
+                {error}
+              </p>
             ) : null}
             <div className="mt-5 flex justify-end gap-2">
               {importing ? (

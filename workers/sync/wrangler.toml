@@ -4,8 +4,8 @@ compatibility_date = "2025-11-01"
 workers_dev = true
 
 # D1 yang sama dengan proxy (database laras-web-sync, UUID dari
-# spike S8). Migrasi 0001 + 0002 + 0003 WAJIB diterapkan sebelum
-# deploy pertama (lihat README.md di folder ini).
+# spike S8). Migrasi 0001 + 0002 + 0003 + 0004 WAJIB diterapkan
+# sebelum deploy pertama (lihat README.md di folder ini).
 [[d1_databases]]
 binding = "DB"
 database_name = "laras-web-sync"
@@ -15,6 +15,18 @@ database_id = "3a2cb6d6-5481-42a1-b213-070215cd2ce5"
 # Domain app produksi (tujuan redirect sesudah login + origin
 # yang diizinkan CORS). Override per environment bila perlu.
 APP_URL = "https://laras.adipmusic.my.id"
+# R10 (Red 3): produksi HANYA domain app — localhost TIDAK BOLEH
+# ada di sini. Cookie sesi memakai SameSite=None sehingga cek
+# Origin adalah satu-satunya lapisan CSRF untuk POST; server dev
+# apa pun di localhost:5173/4173 di mesin korban akan lolos cek
+# itu bila localhost dipercaya. Dev lokal pakai [env.dev] di bawah.
+ALLOWED_ORIGINS = "https://laras.adipmusic.my.id"
+
+# Dev lokal: `wrangler dev --env dev` memakai daftar ini
+# (localhost dipercaya HANYA di worker dev, bukan produksi).
+# Jangan pernah menyalin localhost ke [vars] di atas.
+[env.dev.vars]
+APP_URL = "http://localhost:5173"
 ALLOWED_ORIGINS = "https://laras.adipmusic.my.id,http://localhost:5173,http://localhost:4173"
 
 # Secrets (BUKAN di sini — via `wrangler secret put`, lihat README):
