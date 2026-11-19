@@ -16,7 +16,8 @@ import type { LibraryTab } from './components/library/LibraryPage';
 // deterministik),
 // /p5-test = halaman uji unduhan P5 (isi 10 lagu + antre unduh).
 // /p6-test = halaman uji ketahanan P6 (seed banner + snapshot).
-// Kelimanya DEV-ONLY (Red 1 H1): gerbang
+// /p7-test = halaman uji fitur Should P7 (lirik, EQ, timer tidur).
+// Ketujuhnya DEV-ONLY (Red 1 H1): gerbang
 // `import.meta.env.DEV` di bawah membuat rute + lazy import-nya
 // dihapus total dari build produksi oleh tree-shaking, sehingga
 // chunk *TestPage* tidak ada di dist/ dan pengunjung produksi
@@ -45,6 +46,9 @@ const P5TestPage = import.meta.env.DEV
 const P6TestPage = import.meta.env.DEV
   ? lazy(() => import('./test-pages/P6TestPage'))
   : null;
+const P7TestPage = import.meta.env.DEV
+  ? lazy(() => import('./test-pages/P7TestPage'))
+  : null;
 const DownloadsPage = lazy(
   () => import('./components/downloads/DownloadsPage'),
 );
@@ -71,7 +75,8 @@ type Route =
   | { name: 'library-test' }
   | { name: 'p4-test' }
   | { name: 'p5-test' }
-  | { name: 'p6-test' };
+  | { name: 'p6-test' }
+  | { name: 'p7-test' };
 
 const LIBRARY_TABS: LibraryTab[] = [
   'songs',
@@ -87,13 +92,14 @@ function parseRoute(pathname: string, search: string): Route {
   const params = new URLSearchParams(search);
   if (path === '/spike') return { name: 'spike' };
   // Rute uji hanya ada di build dev (Red 1 H1): di produksi
-  // kelimanya jatuh ke beranda di bawah.
+  // ketujuhnya jatuh ke beranda di bawah.
   if (import.meta.env.DEV) {
     if (path === '/player-test') return { name: 'player-test' };
     if (path === '/library-test') return { name: 'library-test' };
     if (path === '/p4-test') return { name: 'p4-test' };
     if (path === '/p5-test') return { name: 'p5-test' };
     if (path === '/p6-test') return { name: 'p6-test' };
+    if (path === '/p7-test') return { name: 'p7-test' };
   }
   if (path === '/downloads') return { name: 'downloads' };
   if (path === '/settings') return { name: 'settings' };
@@ -189,6 +195,22 @@ export default function App() {
         }, 20000);
       })
       .catch(() => undefined);
+    // Sinkronisasi (P7): periksa sesi + sinkron sekali di latar
+    // sesudah jeda 20 detik (tidak berebut jaringan dengan muat
+    // awal). Best-effort dan diam: gagal tidak mengganggu
+    // pemutaran; pengguna yang belum masuk tidak merasakan apa
+    // pun. Impor dinamis supaya modul sync tidak masuk bundle
+    // awal.
+    window.setTimeout(() => {
+      void import('./sync/syncStore')
+        .then(async ({ useSyncStore }) => {
+          await useSyncStore.getState().refreshAuth();
+          if (useSyncStore.getState().status === 'signed-in') {
+            void useSyncStore.getState().syncNow();
+          }
+        })
+        .catch(() => undefined);
+    }, 20000);
   }, []);
 
   const [route, navigate] = useRoute();
@@ -240,6 +262,15 @@ export default function App() {
     return (
       <Suspense fallback={<LoadingPage />}>
         <P6TestPage />
+        <MiniPlayer />
+        <FullPlayer />
+      </Suspense>
+    );
+  }
+  if (route.name === 'p7-test' && P7TestPage) {
+    return (
+      <Suspense fallback={<LoadingPage />}>
+        <P7TestPage />
         <MiniPlayer />
         <FullPlayer />
       </Suspense>

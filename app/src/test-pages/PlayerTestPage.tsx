@@ -20,8 +20,6 @@ export default function PlayerTestPage() {
   const position = usePlayerStore((s) => s.position);
   const duration = usePlayerStore((s) => s.duration);
   const audioPath = usePlayerStore((s) => s.audioPath);
-  const eqNote = usePlayerStore((s) => s.eqNote);
-  const setEqNote = usePlayerStore((s) => s.setEqNote);
   const service = getPlayerService();
 
   return (
@@ -39,14 +37,6 @@ export default function PlayerTestPage() {
           className="h-11 rounded-xl bg-white px-4 text-sm font-medium text-black"
         >
           Putar nada
-        </button>
-        <button
-          type="button"
-          onClick={() => setEqNote(service.eqInfo().note)}
-          data-testid="player-test-eq"
-          className="h-11 rounded-xl border border-white/10 px-4 text-sm font-medium"
-        >
-          Pengatur suara
         </button>
       </div>
       <dl className="mt-6 space-y-1 text-sm">
@@ -75,14 +65,6 @@ export default function PlayerTestPage() {
           </dd>
         </div>
       </dl>
-      {eqNote && (
-        <p
-          data-testid="player-test-eq-note"
-          className="mt-4 rounded-xl border border-white/10 bg-zinc-900 px-4 py-3 text-sm"
-        >
-          {eqNote}
-        </p>
-      )}
     </div>
   );
 }

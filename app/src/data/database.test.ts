@@ -26,7 +26,7 @@ afterEach(async () => {
 });
 
 describe('skema', () => {
-  it('buka segar membuat 18 store', async () => {
+  it('buka segar membuat 19 store', async () => {
     const db = new LarasDatabase(uniqueName());
     await db.open();
     expect(db.verno).toBe(LARAS_DB_VERSION);
@@ -50,10 +50,11 @@ describe('skema', () => {
         'search_history',
         'song_artists',
         'songs',
+        'sync_tombstones',
         'token_index',
       ].sort(),
     );
-    expect(names).toHaveLength(18);
+    expect(names).toHaveLength(19);
     db.close();
   });
 
@@ -90,8 +91,8 @@ describe('skema', () => {
   });
 });
 
-describe('migrasi v1 ke v2', () => {
-  it('menambah 3 store tanpa menghapus data v1', async () => {
+describe('migrasi v1 ke v3', () => {
+  it('menambah store v2+v3 tanpa menghapus data v1', async () => {
     const name = uniqueName();
     // Bangun database v1 persis dengan definisi produksi v1.
     const legacy = new Dexie(name);
@@ -126,10 +127,10 @@ describe('migrasi v1 ke v2', () => {
     });
     legacy.close();
 
-    // Buka dengan kode produksi (v2): upgrade jalan, data utuh.
+    // Buka dengan kode produksi (v3): upgrade jalan, data utuh.
     const db = new LarasDatabase(name);
     await db.open();
-    expect(db.verno).toBe(2);
+    expect(db.verno).toBe(3);
     const song = await db.songs.get('vid-lama');
     expect(song?.title).toBe('Lagu Lama');
     expect(song?.liked).toBe(1);
@@ -152,6 +153,16 @@ describe('migrasi v1 ke v2', () => {
       updatedAt: 1,
     });
     expect(await db.playback_state.get(1)).not.toBeUndefined();
+    // Store v3 ada dan bisa ditulis.
+    await db.sync_tombstones.put({
+      key: 'like:vid-lama',
+      kind: 'like',
+      ref: 'vid-lama',
+      deletedAt: 1,
+    });
+    expect(
+      (await db.sync_tombstones.get('like:vid-lama'))?.kind,
+    ).toBe('like');
     db.close();
   });
 });

@@ -39,8 +39,17 @@ import {
   type QueueStateToSave,
 } from '../data/queuePersistence';
 import { usePlayerStore, selectCurrentTrack, type PlayerState } from '../store/player';
+import { useEqualizerStore, EQ_SETTINGS_KEY } from '../store/equalizer';
 import { strings } from '../strings/id';
 import { AudioGraphManager } from './audioGraph';
+import {
+  createEndOfSongTimer,
+  createMinutesTimer,
+  fadeFactor,
+  isTimerExpired,
+  SLEEP_TIMER_MINUTES,
+} from './sleepTimer';
+import type { EqPresetName, EqSettings } from './equalizer';
 import { MediaSessionManager } from './mediaSession';
 import {
   loadPersistedPlayerState,
@@ -125,6 +134,8 @@ export class PlayerService {
   private initialized = false;
   private detachPort: Array<() => void> = [];
   private persistChain: Promise<void> = Promise.resolve();
+  /** Faktor volume fade-out timer tidur saat ini (1 = tanpa fade). */
+  private fadeFactorCurrent = 1;
   private historySession: {
     trackId: string;
     accumulatedMs: number;
@@ -160,6 +171,18 @@ export class PlayerService {
     this.watchdog = setInterval(() => void this.watchdogTick(), WATCHDOG_INTERVAL_MS);
     document.addEventListener('visibilitychange', this.onVisibilityChange);
     window.addEventListener('beforeunload', this.onBeforeUnload);
+    // Pengaturan EQ tersimpan dimuat sekali lalu diterapkan ke
+    // graph (graph dibuat malas saat lagu lokal pertama diputar;
+    // setEqGains menyimpan nilai walau graph belum ada).
+    void useEqualizerStore
+      .getState()
+      .load()
+      .then(() => {
+        this.graph.applyEqSettings(
+          useEqualizerStore.getState().settings,
+        );
+      })
+      .catch(() => undefined);
     // pagehide lebih andal dari beforeunload di mobile (tab
     // ditutup dari pengalih tugas); tulis IndexedDB bersifat
     // async, jadi ini hanya kesempatan terakhir — simpan berkala
@@ -174,6 +197,9 @@ export class PlayerService {
 
   private onVisibilityChange = (): void => {
     if (document.visibilityState === 'hidden') this.persistNow();
+    // Tab kembali terlihat: cek timer tidur (setInterval
+    // di-throttle saat tab di latar, tenggat bisa terlewat).
+    if (document.visibilityState === 'visible') this.checkSleepTimer();
   };
 
   private onBeforeUnload = (): void => {
@@ -346,12 +372,23 @@ export class PlayerService {
 
   setVolume(volume: number): void {
     const v = Math.min(1, Math.max(0, volume));
+    usePlayerStore.getState().setPlayerState({ volume: v });
+    this.applyEffectiveVolume();
+    this.persistSoon();
+  }
+
+  /**
+   * Terapkan volume efektif = volume pengguna dikali faktor fade
+   * timer tidur. Semua perubahan volume lewat sini supaya fade
+   * tidak pernah tertinggal di satu jalur (graph/stream/lokal).
+   */
+  private applyEffectiveVolume(): void {
+    const v =
+      usePlayerStore.getState().volume * this.fadeFactorCurrent;
     this.graph.setVolume(v);
     this.port.setVolume(v, 'stream');
     // Elemen lokal dijaga 1 bila graph tersambung (volume lewat gain).
     this.port.setVolume(this.graph.isAttached ? 1 : v, 'local');
-    usePlayerStore.getState().setPlayerState({ volume: v });
-    this.persistSoon();
   }
 
   // ---------- Kelola antrean ----------
@@ -425,23 +462,122 @@ export class PlayerService {
   }
 
   /**
-   * Info pengatur suara (EQ) untuk UI. EQ 10 band adalah fitur P7;
-   * P2 hanya menyampaikan keadaan dengan jujur: streaming tidak
-   * bisa masuk graph (CORS tertutup, vonis S5), lokal bisa tetapi
-   * kontrolnya belum dibangun.
+   * Info pengatur suara (EQ) untuk UI. EQ 10 band aktif hanya di
+   * jalur graph (lokal/unduhan); streaming tidak bisa masuk graph
+   * (CORS tertutup, vonis S5) sehingga kontrol menampilkan pesan
+   * jujur, bukan slider mati.
    */
   eqInfo(): { available: boolean; note: string } {
     const state = usePlayerStore.getState();
     if (state.audioPath === 'graph') {
-      return {
-        available: false,
-        note: strings.eqLocalNote,
-      };
+      return { available: true, note: '' };
     }
     return {
       available: false,
       note: strings.eqStreamingNote,
     };
+  }
+
+  /** Terapkan preset EQ + simpan + teruskan ke graph. */
+  async setEqPreset(
+    preset: Exclude<EqPresetName, 'custom'>,
+  ): Promise<void> {
+    await useEqualizerStore.getState().setPreset(preset);
+    this.graph.applyEqSettings(useEqualizerStore.getState().settings);
+  }
+
+  /** Ubah satu band EQ + simpan + teruskan ke graph. */
+  async setEqBand(index: number, db: number): Promise<void> {
+    await useEqualizerStore.getState().setBand(index, db);
+    this.graph.applyEqSettings(useEqualizerStore.getState().settings);
+  }
+
+  /** Kembalikan EQ ke rata + simpan + teruskan ke graph. */
+  async resetEq(): Promise<void> {
+    await useEqualizerStore.getState().reset();
+    this.graph.applyEqSettings(useEqualizerStore.getState().settings);
+  }
+
+  /**
+   * Terapkan pengaturan EQ dari sinkronisasi (P7): tulis store
+   * + simpan + teruskan ke graph (bila sedang memutar lokal).
+   * Dipanggil syncService sesudah menarik settings dari server;
+   * penanda "pengaturan berubah" TIDAK dicatat di sini (nilai
+   * ini asalnya dari server, bukan perubahan lokal).
+   */
+  async applySyncedEqSettings(settings: EqSettings): Promise<void> {
+    useEqualizerStore.getState().setSettingsState(settings);
+    try {
+      const library = await getLibraryService();
+      await library.setMeta(EQ_SETTINGS_KEY, JSON.stringify(settings));
+    } catch {
+      // Gagal simpan: pengaturan tetap berlaku di sesi ini.
+    }
+    this.graph.applyEqSettings(settings);
+  }
+
+  // ---------- Timer tidur (P7) ----------
+
+  /** Pasang timer menit (5/10/15/30/45/60). */
+  setSleepTimerMinutes(minutes: number): void {
+    if (
+      !(SLEEP_TIMER_MINUTES as readonly number[]).includes(minutes)
+    ) {
+      return;
+    }
+    this.fadeFactorCurrent = 1;
+    this.applyEffectiveVolume();
+    usePlayerStore.getState().setPlayerState({
+      sleepTimer: createMinutesTimer(minutes, Date.now()),
+    });
+  }
+
+  /** Pasang timer akhir-lagu, terkunci ke lagu yang sedang diputar. */
+  setSleepTimerEndOfSong(): void {
+    const track = selectCurrentTrack(usePlayerStore.getState());
+    if (!track) return;
+    this.fadeFactorCurrent = 1;
+    this.applyEffectiveVolume();
+    usePlayerStore.getState().setPlayerState({
+      sleepTimer: createEndOfSongTimer(track.id),
+    });
+  }
+
+  /** Batalkan timer tidur dan kembalikan volume penuh. */
+  clearSleepTimer(): void {
+    this.fadeFactorCurrent = 1;
+    this.applyEffectiveVolume();
+    usePlayerStore.getState().setPlayerState({ sleepTimer: null });
+  }
+
+  /**
+   * Cek timer tidur terhadap tenggat (dipanggil watchdog tiap
+   * detik, tiap timeupdate saat lagu jalan, dan saat tab kembali
+   * terlihat — tiga pemicu supaya tenggat tidak terlewat saat
+   * setInterval di-throttle di latar).
+   */
+  private checkSleepTimer(): void {
+    const timer = usePlayerStore.getState().sleepTimer;
+    if (!timer || timer.mode !== 'minutes') return;
+    const now = Date.now();
+    if (isTimerExpired(timer, now)) {
+      this.fireSleepTimer();
+      return;
+    }
+    const factor = fadeFactor(timer, now);
+    if (Math.abs(factor - this.fadeFactorCurrent) > 0.01) {
+      this.fadeFactorCurrent = factor;
+      this.applyEffectiveVolume();
+    }
+  }
+
+  /** Timer habis: jeda pemutaran, kembalikan volume, hapus timer. */
+  private fireSleepTimer(): void {
+    this.fadeFactorCurrent = 1;
+    usePlayerStore.getState().setPlayerState({ sleepTimer: null });
+    this.applyEffectiveVolume();
+    this.pause();
+    this.persistNow();
   }
 
   // ---------- Muat lagu ----------
@@ -550,6 +686,19 @@ export class PlayerService {
     this.pendingPlay = false;
     this.playingDownloadedVideoId = null;
     this.downloadFallbackUsed = false;
+    // Timer akhir-lagu terkunci ke satu lagu: ganti lagu (next,
+    // prev, hapus antrean, pilih lagu lain) membatalkannya dengan
+    // pesan (PRD B2). Muat ulang lagu yang sama (coba lagi) tidak.
+    const sleepTimer = usePlayerStore.getState().sleepTimer;
+    if (
+      sleepTimer?.mode === 'end-of-song' &&
+      sleepTimer.trackId !== track.id
+    ) {
+      usePlayerStore.getState().setPlayerState({
+        sleepTimer: null,
+        notice: strings.sleepTimerCancelledOnChange,
+      });
+    }
     // Ganti lagu: tutup sesi riwayat lagu sebelumnya, lalu mulai
     // sesi baru + simpan metadata lagu ini (bukan ke Library).
     void this.finishHistorySession(false);
@@ -594,7 +743,10 @@ export class PlayerService {
       if (token !== this.playToken) return;
       if (path === 'graph') {
         this.graph.attach(this.port.getLocalElement());
-        this.graph.setVolume(usePlayerStore.getState().volume);
+        this.graph.applyEqSettings(
+          useEqualizerStore.getState().settings,
+        );
+        this.applyEffectiveVolume();
         this.port.load(localUrl, 'local');
       } else {
         this.port.load(localUrl, 'stream');
@@ -703,6 +855,9 @@ export class PlayerService {
       duration: snap.duration > 0 ? snap.duration : usePlayerStore.getState().duration,
       bufferedEnd: snap.bufferedEnd,
     });
+    // Timer tidur dicek juga di sini: timeupdate tetap menyala
+    // saat lagu berbunyi walau setInterval di-throttle di latar.
+    this.checkSleepTimer();
     const now = Date.now();
     if (now - this.lastPositionStateAt >= 1000) {
       this.lastPositionStateAt = now;
@@ -743,6 +898,24 @@ export class PlayerService {
     await this.finishHistorySession(true);
     const queue = queueFromStore();
     const state = usePlayerStore.getState();
+    // Timer akhir-lagu: lagu yang dikunci selesai berarti timer
+    // habis — jeda di sini, jangan lanjut ke lagu berikut dan
+    // jangan ulangi lagu (repeat one kalah dari timer).
+    const timer = state.sleepTimer;
+    const track = selectCurrentTrack(state);
+    if (
+      timer?.mode === 'end-of-song' &&
+      track &&
+      timer.trackId === track.id
+    ) {
+      usePlayerStore.getState().setPlayerState({
+        sleepTimer: null,
+        status: 'paused',
+      });
+      this.mediaSession.setPlaybackState('paused');
+      this.persistNow();
+      return;
+    }
     if (state.repeat === 'one') {
       this.seek(0);
       try {
@@ -970,6 +1143,9 @@ export class PlayerService {
   // ---------- Watchdog + pra-resolve ----------
 
   private async watchdogTick(): Promise<void> {
+    // Timer tidur dicek dulu, tanpa peduli status putar: tenggat
+    // menit berjalan walau lagu dijeda.
+    this.checkSleepTimer();
     const state = usePlayerStore.getState();
     const track = selectCurrentTrack(state);
     if (!track) return;

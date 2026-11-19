@@ -158,7 +158,6 @@ export const strings = {
   autoplayBlocked: 'Ketuk tombol putar untuk melanjutkan lagu.',
   eqStreamingNote:
     'Pengatur suara hanya bisa dipakai untuk lagu yang tersimpan di perangkat.',
-  eqLocalNote: 'Pengatur suara belum tersedia di versi ini.',
   // Unduhan (P5)
   download: 'Unduh',
   downloadQualityTitle: 'Pilih kualitas unduhan',
@@ -256,6 +255,74 @@ export const strings = {
   settingsAboutSection: 'Tentang',
   settingsAppVersion: 'Versi app',
   backToHome: 'Kembali ke Beranda',
+  // Lirik (P7)
+  lyrics: 'Lirik',
+  lyricsNotAvailable: 'Lirik lagu ini belum ada.',
+  lyricsLoadFailed:
+    'Lirik belum bisa dimuat. Periksa koneksimu lalu coba lagi.',
+  lyricsOfflineNotSaved:
+    'Lirik belum tersimpan. Sambungkan internet sekali untuk mengambilnya.',
+  lyricsLoading: 'Memuat lirik.',
+  lyricsNoticeBody:
+    'Lirik diambil dari layanan luar. Layanan itu bisa melihat judul lagu yang kamu putar dan alamat internetmu.',
+  lyricsNoticeAccept: 'Mengerti',
+  lyricsByLrclib: 'Lirik oleh LRCLIB',
+  lyricsByOvh: 'Lirik oleh lyrics.ovh',
+  lyricsRateLimited:
+    'Layanan lirik sedang ramai. Coba lagi sebentar lagi.',
+  lyricsDisabledNote: 'Lirik dimatikan di Pengaturan.',
+  settingsLyricsSection: 'Lirik',
+  settingsLyricsBody:
+    'Tampilkan lirik lagu di pemutar. Lirik diambil dari layanan luar.',
+  settingsLyricsOn: 'Lirik aktif',
+  settingsLyricsOff: 'Lirik mati',
+  // Pengatur suara / EQ (P7)
+  eqTitle: 'Pengatur suara',
+  eqPresetFlat: 'Rata',
+  eqPresetBass: 'Bass',
+  eqPresetVocal: 'Vokal',
+  eqPresetAcoustic: 'Akustik',
+  eqPresetCustom: 'Atur sendiri',
+  eqReset: 'Atur ulang',
+  eqBandLabel: (freq: string) => `Nada ${freq}`,
+  // Timer tidur (P7)
+  sleepTimer: 'Timer tidur',
+  sleepTimerMinutes: (n: number) => `${n} menit`,
+  sleepTimerEndOfSong: 'Sampai lagu ini selesai',
+  sleepTimerCancel: 'Batalkan timer',
+  sleepTimerRemaining: (text: string) => `Berhenti dalam ${text}`,
+  sleepTimerEndOfSongActive: 'Berhenti sesudah lagu ini selesai.',
+  sleepTimerCancelledOnChange:
+    'Timer dibatalkan karena kamu ganti lagu.',
+  sleepTimerStopsWhenTabClosed:
+    'Timer berhenti kalau tab ini ditutup.',
+  // Akun dan sinkronisasi (P7)
+  settingsAccountSection: 'Akun',
+  settingsAccountSignedOut: 'Belum masuk',
+  settingsAccountBody:
+    'Masuk hanya perlu kalau kamu mau playlist-mu sama di HP dan laptop.',
+  settingsAccountSignInGoogle: 'Masuk dengan Google',
+  settingsAccountSignInGithub: 'Masuk dengan GitHub',
+  settingsAccountSignedInAs: (name: string) => `Masuk sebagai ${name}`,
+  settingsAccountSyncNow: 'Sinkronkan sekarang',
+  settingsAccountSyncing: 'Menyinkronkan.',
+  settingsAccountLastSync: 'Terakhir sinkron',
+  settingsAccountNeverSynced: 'Belum pernah sinkron',
+  settingsAccountSignOut: 'Keluar',
+  settingsAccountSyncError:
+    'Sinkron gagal. Periksa internet kamu, lalu coba lagi.',
+  settingsAccountRateLimited:
+    'Terlalu sering sinkron. Coba lagi sebentar lagi.',
+  settingsAccountSyncDone: 'Sinkron selesai.',
+  settingsAccountFilesNote:
+    'File lagu yang diunduh tidak ikut disinkronkan. Unduh ulang di perangkat lain.',
+  settingsAccountDelete: 'Hapus akun',
+  settingsAccountDeleteTitle: 'Hapus akun dan data sinkron?',
+  settingsAccountDeleteBody:
+    'Data di server akan dihapus. Data di perangkat ini tetap ada.',
+  settingsAccountDeleteDone: 'Akun dihapus.',
+  settingsAccountUnavailable:
+    'Sinkronisasi belum bisa dihubungi. Coba lagi nanti.',
 } as const;
 
 export type Strings = typeof strings;

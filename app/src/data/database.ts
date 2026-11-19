@@ -7,6 +7,7 @@
  * - v1: 15 tabel APK (songs sampai download_jobs).
  * - v2: 3 store tambahan web (token_index, playback_state,
  *   app_meta).
+ * - v3: 1 store sinkronisasi P7 (sync_tombstones).
  *
  * Aturan migrasi yang mengikat: upgrade TIDAK PERNAH menghapus
  * data pengguna. Versi baru hanya menambah store/indeks atau
@@ -35,11 +36,12 @@ import type {
   SearchHistoryRow,
   SongArtistRow,
   SongRow,
+  SyncTombstoneRow,
   TokenIndexRow,
 } from './types';
 
 export const LARAS_DB_NAME = 'laras';
-export const LARAS_DB_VERSION = 2;
+export const LARAS_DB_VERSION = 3;
 
 /** 15 store v1: port tabel drift APK (lihat src/data/types.ts). */
 export const V1_STORES: Record<string, string> = {
@@ -77,6 +79,11 @@ export const V2_STORES: Record<string, string> = {
   app_meta: 'key',
 };
 
+/** 1 store v3: tombstone hapus sinkronisasi (P7). */
+export const V3_STORES: Record<string, string> = {
+  sync_tombstones: 'key, kind, deletedAt',
+};
+
 export class LarasDatabase extends Dexie {
   songs!: Table<SongRow, string>;
   albums!: Table<AlbumRow, string>;
@@ -96,12 +103,15 @@ export class LarasDatabase extends Dexie {
   token_index!: Table<TokenIndexRow, number>;
   playback_state!: Table<PlaybackStateRow, number>;
   app_meta!: Table<AppMetaRow, string>;
+  sync_tombstones!: Table<SyncTombstoneRow, string>;
 
   constructor(name: string = LARAS_DB_NAME) {
     super(name);
     this.version(1).stores(V1_STORES);
     // v2 hanya menambah store; data v1 tidak disentuh.
     this.version(2).stores(V2_STORES);
+    // v3 hanya menambah store; data v1/v2 tidak disentuh.
+    this.version(3).stores(V3_STORES);
   }
 }
 

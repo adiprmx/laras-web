@@ -12,6 +12,7 @@ import type {
   RepeatMode,
   Track,
 } from '../player/types';
+import type { SleepTimerState } from '../player/sleepTimer';
 
 export interface PlayerState {
   /** Antrean (urutan asli). */
@@ -39,13 +40,12 @@ export interface PlayerState {
   notice: string | null;
   /** Layar pemutar penuh sedang terbuka. */
   fullPlayerOpen: boolean;
-  /** Pesan pengatur suara (EQ) yang sedang ditampilkan. */
-  eqNote: string | null;
+  /** Timer tidur aktif (null bila tidak ada). */
+  sleepTimer: SleepTimerState | null;
   /** Penulis state untuk service. Komponen tidak memanggil ini. */
   setPlayerState: (patch: Partial<PlayerState>) => void;
   /** Aksi UI murni (bukan pemutaran). */
   setFullPlayerOpen: (open: boolean) => void;
-  setEqNote: (note: string | null) => void;
   dismissNotice: () => void;
 }
 
@@ -65,10 +65,9 @@ export const usePlayerStore = create<PlayerState>()((set) => ({
   errorMessage: null,
   notice: null,
   fullPlayerOpen: false,
-  eqNote: null,
+  sleepTimer: null,
   setPlayerState: (patch) => set(patch),
   setFullPlayerOpen: (open) => set({ fullPlayerOpen: open }),
-  setEqNote: (note) => set({ eqNote: note }),
   dismissNotice: () => set({ notice: null }),
 }));
 

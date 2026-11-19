@@ -667,6 +667,7 @@ describe('lirik', () => {
     expect(await service.getLyrics('v1')).toEqual({
       lyrics: 'la la la',
       syncedLyrics: null,
+      source: null,
     });
   });
 

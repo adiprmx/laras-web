@@ -1,14 +1,15 @@
 /**
  * Halaman Pengaturan (P6): pembaruan config, kondisi layanan,
  * laporkan kerusakan (kode diagnostik LRS1 + snapshot pemutar),
- * tentang app.
+ * tentang app. P7 menambah Akun (masuk + sinkronisasi opsional)
+ * dan Lirik (saklar tampilkan lirik).
  *
  * Rute /settings, lazy-load (tidak masuk bundle awal). Copy
  * Bahasa Indonesia sehari-hari, tanpa jargon, tanpa em dash.
  * Kode diagnostik + snapshot TIDAK memuat URL stream, token,
  * judul lagu, atau data pribadi apa pun (PRD B9.9).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from '@phosphor-icons/react';
 import { APP_VERSION } from '../../core/version';
 import {
@@ -24,6 +25,10 @@ import {
 } from '../../resilience/playerLog';
 import { useResilienceStore } from '../../resilience/store';
 import { strings } from '../../strings/id';
+import { getLyricsService } from '../../lyrics/lyricsService';
+import { loginUrl } from '../../sync/auth';
+import { useSyncStore } from '../../sync/syncStore';
+import ConfirmDialog from '../library/ConfirmDialog';
 
 function formatTime(ms: number | null): string {
   if (ms === null) return strings.settingsConfigNever;
@@ -63,6 +68,269 @@ function Row({ label, value, testId }: { label: string; value: string; testId?: 
         {value}
       </span>
     </div>
+  );
+}
+
+/** Seksi Akun (P7): masuk opsional + sinkronisasi. */
+function AccountSection() {
+  const status = useSyncStore((s) => s.status);
+  const displayName = useSyncStore((s) => s.displayName);
+  const lastSyncAt = useSyncStore((s) => s.lastSyncAt);
+  const syncing = useSyncStore((s) => s.syncing);
+  const error = useSyncStore((s) => s.error);
+  const refreshAuth = useSyncStore((s) => s.refreshAuth);
+  const syncNow = useSyncStore((s) => s.syncNow);
+  const signOut = useSyncStore((s) => s.signOut);
+  const deleteAccount = useSyncStore((s) => s.deleteAccount);
+
+  const [authError, setAuthError] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteDone, setDeleteDone] = useState(false);
+  const [deleteFailed, setDeleteFailed] = useState(false);
+  const handledQuery = useRef(false);
+
+  // Periksa sesi saat halaman dibuka + tangani hasil redirect
+  // OAuth (?auth=ok / ?auth=error). Query dibersihkan dari URL
+  // supaya refresh halaman tidak mengulanginya.
+  useEffect(() => {
+    if (handledQuery.current) return;
+    handledQuery.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const auth = params.get('auth');
+    if (auth === 'ok' || auth === 'error') {
+      params.delete('auth');
+      params.delete('reason');
+      const next = params.toString();
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${next ? `?${next}` : ''}`,
+      );
+    }
+    if (auth === 'error') {
+      setAuthError(true);
+      void refreshAuth();
+      return;
+    }
+    void refreshAuth().then(() => {
+      // Sesudah masuk lewat redirect, langsung sinkron sekali.
+      if (auth === 'ok') void syncNow();
+    });
+  }, [refreshAuth, syncNow]);
+
+  const handleDelete = useCallback(() => {
+    setDeleteFailed(false);
+    void deleteAccount()
+      .then(() => {
+        setConfirmDelete(false);
+        setDeleteDone(true);
+      })
+      .catch(() => {
+        setConfirmDelete(false);
+        setDeleteFailed(true);
+      });
+  }, [deleteAccount]);
+
+  const errorText =
+    error === 'syncErrorRateLimited'
+      ? strings.settingsAccountRateLimited
+      : error === 'syncErrorNetwork' || error === 'syncErrorServer'
+        ? strings.settingsAccountSyncError
+        : null;
+
+  return (
+    <Section title={strings.settingsAccountSection} testId="settings-account">
+      {status === 'unknown' ? (
+        error ? (
+          <div>
+            <p
+              data-testid="settings-account-error"
+              className="text-sm text-red-300"
+            >
+              {strings.settingsAccountUnavailable}
+            </p>
+            <button
+              type="button"
+              onClick={() => void refreshAuth()}
+              data-testid="settings-account-retry"
+              className="mt-4 h-11 rounded-full border border-white/15 px-6 text-sm font-medium transition-colors hover:bg-white/5 active:scale-95"
+            >
+              {strings.retry}
+            </button>
+          </div>
+        ) : (
+          <p data-testid="settings-account-loading" className="text-sm text-zinc-400">
+            {strings.loadingLabel}
+          </p>
+        )
+      ) : status === 'signed-out' ? (
+        <div>
+          <p className="text-sm leading-relaxed text-zinc-400">
+            {strings.settingsAccountBody}
+          </p>
+          {authError || deleteFailed ? (
+            <p
+              data-testid="settings-account-error"
+              className="mt-3 text-sm text-red-300"
+            >
+              {strings.settingsAccountUnavailable}
+            </p>
+          ) : null}
+          {deleteDone ? (
+            <p
+              data-testid="settings-account-delete-done"
+              className="mt-3 text-sm text-zinc-300"
+            >
+              {strings.settingsAccountDeleteDone}
+            </p>
+          ) : null}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <a
+              href={loginUrl('google')}
+              data-testid="settings-signin-google"
+              className="flex h-11 items-center rounded-full bg-white px-6 text-sm font-medium text-black transition-transform active:scale-95"
+            >
+              {strings.settingsAccountSignInGoogle}
+            </a>
+            <a
+              href={loginUrl('github')}
+              data-testid="settings-signin-github"
+              className="flex h-11 items-center rounded-full border border-white/15 px-6 text-sm font-medium transition-colors hover:bg-white/5 active:scale-95"
+            >
+              {strings.settingsAccountSignInGithub}
+            </a>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <p data-testid="settings-account-name" className="text-sm text-zinc-100">
+            {strings.settingsAccountSignedInAs(displayName ?? '')}
+          </p>
+          <p className="mt-1 text-sm leading-relaxed text-zinc-400">
+            {strings.settingsAccountFilesNote}
+          </p>
+          {errorText ? (
+            <p
+              data-testid="settings-account-error"
+              className="mt-3 text-sm text-red-300"
+            >
+              {errorText}
+            </p>
+          ) : null}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void syncNow()}
+              disabled={syncing}
+              data-testid="settings-sync-now"
+              className="h-11 rounded-full bg-white px-6 text-sm font-medium text-black transition-transform active:scale-95 disabled:opacity-50"
+            >
+              {syncing
+                ? strings.settingsAccountSyncing
+                : strings.settingsAccountSyncNow}
+            </button>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              data-testid="settings-sign-out"
+              className="h-11 rounded-full border border-white/15 px-6 text-sm font-medium transition-colors hover:bg-white/5 active:scale-95"
+            >
+              {strings.settingsAccountSignOut}
+            </button>
+          </div>
+          <div className="mt-4">
+            <Row
+              label={strings.settingsAccountLastSync}
+              value={
+                lastSyncAt === null
+                  ? strings.settingsAccountNeverSynced
+                  : formatTime(lastSyncAt)
+              }
+              testId="settings-last-sync"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            data-testid="settings-delete-account"
+            className="mt-4 h-11 rounded-full px-3 text-sm font-medium text-red-300 transition-colors hover:bg-white/5 active:scale-95"
+          >
+            {strings.settingsAccountDelete}
+          </button>
+          {confirmDelete ? (
+            <ConfirmDialog
+              title={strings.settingsAccountDeleteTitle}
+              body={strings.settingsAccountDeleteBody}
+              confirmLabel={strings.delete}
+              onConfirm={handleDelete}
+              onCancel={() => setConfirmDelete(false)}
+              testId="settings-delete-dialog"
+            />
+          ) : null}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** Seksi Lirik (P7): saklar tampilkan lirik di pemutar. */
+function LyricsSection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getLyricsService().then((service) =>
+      service.isEnabled().then((value) => {
+        if (!cancelled) setEnabled(value);
+      }),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggle = useCallback(() => {
+    if (enabled === null) return;
+    const next = !enabled;
+    setEnabled(next);
+    void getLyricsService().then((service) =>
+      service.setEnabled(next).catch(() => setEnabled(enabled)),
+    );
+  }, [enabled]);
+
+  return (
+    <Section title={strings.settingsLyricsSection} testId="settings-lyrics">
+      <p className="text-sm leading-relaxed text-zinc-400">
+        {strings.settingsLyricsBody}
+      </p>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled === true}
+        onClick={toggle}
+        disabled={enabled === null}
+        data-testid="settings-lyrics-toggle"
+        className="mt-4 flex h-11 items-center gap-3 rounded-full border border-white/15 px-5 text-sm font-medium transition-colors hover:bg-white/5 active:scale-95 disabled:opacity-50"
+      >
+        <span
+          aria-hidden="true"
+          className={`inline-block h-5 w-9 rounded-full p-0.5 transition-colors ${
+            enabled ? 'bg-white' : 'bg-zinc-700'
+          }`}
+        >
+          <span
+            className={`block h-4 w-4 rounded-full transition-transform ${
+              enabled ? 'translate-x-4 bg-black' : 'translate-x-0 bg-zinc-300'
+            }`}
+          />
+        </span>
+        {enabled === null
+          ? strings.loadingLabel
+          : enabled
+            ? strings.settingsLyricsOn
+            : strings.settingsLyricsOff}
+      </button>
+    </Section>
   );
 }
 
@@ -174,6 +442,9 @@ export default function SettingsPage({
       <h1 className="mt-2 text-xl font-bold tracking-tight">
         {strings.settingsTitle}
       </h1>
+
+      <AccountSection />
+      <LyricsSection />
 
       <Section title={strings.settingsUpdateSection} testId="settings-update">
         <p className="text-sm leading-relaxed text-zinc-400">

@@ -1,0 +1,22 @@
+name = "laras-sync"
+main = "src/index.js"
+compatibility_date = "2025-11-01"
+workers_dev = true
+
+# D1 yang sama dengan proxy (database laras-web-sync, UUID dari
+# spike S8). Migrasi 0001 + 0002 + 0003 WAJIB diterapkan sebelum
+# deploy pertama (lihat README.md di folder ini).
+[[d1_databases]]
+binding = "DB"
+database_name = "laras-web-sync"
+database_id = "3a2cb6d6-5481-42a1-b213-070215cd2ce5"
+
+[vars]
+# Domain app produksi (tujuan redirect sesudah login + origin
+# yang diizinkan CORS). Override per environment bila perlu.
+APP_URL = "https://laras.adipmusic.my.id"
+ALLOWED_ORIGINS = "https://laras.adipmusic.my.id,http://localhost:5173,http://localhost:4173"
+
+# Secrets (BUKAN di sini — via `wrangler secret put`, lihat README):
+#   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+#   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET

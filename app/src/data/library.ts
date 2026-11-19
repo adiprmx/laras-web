@@ -36,13 +36,16 @@ import {
   type ArtistWithCount,
   type LibraryCounts,
   type LocalSearchResults,
+  type PlayEventRow,
   type PlayHistoryEntry,
   type PlaylistRow,
   type PlaylistSongEntry,
+  type PlaylistSongRow,
   type PlaylistWithCount,
   type SongImport,
   type SongRow,
   type SongView,
+  type SyncTombstoneRow,
 } from './types';
 
 /** Ukuran halaman standar semua daftar (port APK kPageSize). */
@@ -71,6 +74,13 @@ export const MAX_PLAYLIST_SONGS = 1000;
 
 /** Batas ukuran satu kolom lirik (port R3-L1 APK). */
 export const MAX_LYRICS_BYTES = 256 * 1024;
+
+/**
+ * Kunci app_meta: waktu terakhir riwayat dihapus total (P7).
+ * Sinkronisasi mengirim penanda ini supaya server ikut menghapus
+ * riwayat sampai waktu tersebut.
+ */
+export const SYNC_HISTORY_CLEARED_KEY = 'sync-history-cleared-before';
 
 /** Urutan daftar lagu (port SongSort APK). */
 export type SongSort = 'newest' | 'byName' | 'mostPlayed';
@@ -738,6 +748,8 @@ export class LibraryService {
       ...(liked === 1 ? { inLibrary: 1 } : {}),
       dateModified: now(),
     });
+    // Batal suka adalah penghapusan yang harus ikut tersinkron.
+    if (liked === 0) await this.recordTombstone('like', songId);
     this.notify();
     return liked === 1;
   }
@@ -745,9 +757,24 @@ export class LibraryService {
   /**
    * Keluarkan lagu dari Library: favorit mati, lagu keluar dari
    * semua playlist, `inLibrary` mati. Baris lagu dan riwayat
-   * putarnya tetap ada.
+   * putarnya tetap ada. Penghapusan dicatat sebagai tombstone
+   * sinkronisasi (kecuali bila `quiet`, jalur tarik server).
    */
-  async removeFromLibrary(songId: string): Promise<void> {
+  async removeFromLibrary(
+    songId: string,
+    opts: { quiet?: boolean } = {},
+  ): Promise<void> {
+    // Keanggotaan playlist + status suka dibaca dulu: sesudah
+    // transaksi, keduanya sudah tidak bisa diketahui lagi.
+    const memberships = opts.quiet
+      ? []
+      : await this.db.playlist_songs
+          .where('songId')
+          .equals(songId)
+          .toArray();
+    const wasLiked = opts.quiet
+      ? false
+      : (await this.db.songs.get(songId))?.liked === 1;
     await this.db.transaction(
       'rw',
       [this.db.playlist_songs, this.db.songs],
@@ -760,6 +787,18 @@ export class LibraryService {
         });
       },
     );
+    if (!opts.quiet) {
+      if (wasLiked) await this.recordTombstone('like', songId);
+      for (const m of memberships) {
+        const playlist = await this.db.playlists.get(m.playlistId);
+        if (playlist?.clientId) {
+          await this.recordTombstone(
+            'playlist-item',
+            `${playlist.clientId}:${songId}`,
+          );
+        }
+      }
+    }
     this.notify();
   }
 
@@ -988,9 +1027,15 @@ export class LibraryService {
 
   /**
    * Hapus playlist. Lagu di dalamnya ikut terhapus dari playlist;
-   * lagu di Library tidak ikut terhapus.
+   * lagu di Library tidak ikut terhapus. Penghapusan dicatat
+   * sebagai tombstone sinkronisasi bila playlist punya clientId
+   * (pernah disinkronkan), kecuali bila `quiet` (jalur tarik).
    */
-  async deletePlaylist(id: number): Promise<void> {
+  async deletePlaylist(
+    id: number,
+    opts: { quiet?: boolean } = {},
+  ): Promise<void> {
+    const playlist = opts.quiet ? null : await this.db.playlists.get(id);
     await this.db.transaction(
       'rw',
       [this.db.playlists, this.db.playlist_songs],
@@ -1002,6 +1047,9 @@ export class LibraryService {
         await this.db.playlists.delete(id);
       },
     );
+    if (playlist?.clientId) {
+      await this.recordTombstone('playlist', playlist.clientId);
+    }
     this.notify();
   }
 
@@ -1097,7 +1145,11 @@ export class LibraryService {
   async removeSongFromPlaylist(
     playlistId: number,
     songId: string,
+    opts: { quiet?: boolean } = {},
   ): Promise<void> {
+    const playlist = opts.quiet
+      ? null
+      : await this.db.playlists.get(playlistId);
     await this.db.transaction(
       'rw',
       [this.db.playlist_songs, this.db.playlists],
@@ -1107,6 +1159,12 @@ export class LibraryService {
         await this.touchPlaylist(playlistId, now());
       },
     );
+    if (playlist?.clientId) {
+      await this.recordTombstone(
+        'playlist-item',
+        `${playlist.clientId}:${songId}`,
+      );
+    }
     this.notify();
   }
 
@@ -1324,10 +1382,16 @@ export class LibraryService {
   /**
    * Hapus seluruh riwayat putar. Total waktu putar lagu TIDAK
    * direset (agregat seumur hidup yang menggerakkan urutan
-   * "Sering diputar").
+   * "Sering diputar"). Penanda hapus dicatat di app_meta supaya
+   * sinkronisasi ikut menghapus riwayat di server (bila tidak,
+   * riwayat server akan bangkit lagi di tarik berikutnya).
    */
   async clearHistory(): Promise<void> {
     await this.db.play_events.clear();
+    await this.setMeta(
+      SYNC_HISTORY_CLEARED_KEY,
+      String(now()),
+    );
     this.notify();
   }
 
@@ -1649,20 +1713,27 @@ export class LibraryService {
   async getLyrics(songId: string): Promise<{
     lyrics: string;
     syncedLyrics: string | null;
+    source: 'lrclib' | 'ovh' | null;
   } | null> {
     const row = await this.db.lyrics.get(songId);
     if (!row) return null;
-    return { lyrics: row.lyrics, syncedLyrics: row.syncedLyrics };
+    return {
+      lyrics: row.lyrics,
+      syncedLyrics: row.syncedLyrics,
+      source: row.source ?? null,
+    };
   }
 
   /**
    * Simpan lirik lagu (sisip atau ganti). Menolak lirik di atas
-   * 256 KB per kolom (port R3-L1 APK).
+   * 256 KB per kolom (port R3-L1 APK). `source` dicatat untuk
+   * atribusi yang jujur saat lirik dibaca dari cache.
    */
   async saveLyrics(opts: {
     songId: string;
     lyrics: string;
     syncedLyrics?: string | null;
+    source?: 'lrclib' | 'ovh';
   }): Promise<boolean> {
     const encoder = new TextEncoder();
     if (encoder.encode(opts.lyrics).length > MAX_LYRICS_BYTES) return false;
@@ -1677,6 +1748,7 @@ export class LibraryService {
       lyrics: opts.lyrics,
       syncedLyrics: opts.syncedLyrics ?? null,
       fetchedAt: now(),
+      source: opts.source ?? null,
     });
     this.notify();
     return true;
@@ -2232,6 +2304,256 @@ export class LibraryService {
 
   async setMeta(key: string, value: string): Promise<void> {
     await this.db.app_meta.put({ key, value });
+  }
+
+  // ------------------------------------------------------------------
+  // Sinkronisasi (P7): tombstone + akses baca/tulis untuk syncService
+  // ------------------------------------------------------------------
+
+  /**
+   * Catat penghapusan lokal supaya ikut terkirim ke server.
+   * Tombstone tidak dicatat untuk data yang belum pernah punya
+   * clientId (tidak pernah disinkronkan, jadi server tidak punya
+   * salinannya) — pemanggil yang memutuskan.
+   */
+  async recordTombstone(
+    kind: SyncTombstoneRow['kind'],
+    ref: string,
+  ): Promise<void> {
+    await this.db.sync_tombstones.put({
+      key: `${kind}:${ref}`,
+      kind,
+      ref,
+      deletedAt: now(),
+    });
+  }
+
+  async listTombstones(): Promise<SyncTombstoneRow[]> {
+    return this.db.sync_tombstones.toArray();
+  }
+
+  async deleteTombstones(keys: string[]): Promise<void> {
+    if (keys.length === 0) return;
+    await this.db.sync_tombstones.bulkDelete(keys);
+  }
+
+  /** Hapus tombstone lebih tua dari `beforeMs` (retensi 30 hari). */
+  async pruneTombstones(beforeMs: number): Promise<number> {
+    return this.db.sync_tombstones
+      .where('deletedAt')
+      .below(beforeMs)
+      .delete();
+  }
+
+  /** Playlist berdasarkan id client sinkronisasi (tanpa indeks; maks 100). */
+  async playlistByClientId(
+    clientId: string,
+  ): Promise<PlaylistRow | null> {
+    const found = await this.db.playlists
+      .filter((p) => p.clientId === clientId)
+      .first();
+    return found ?? null;
+  }
+
+  async setPlaylistClientId(id: number, clientId: string): Promise<void> {
+    await this.db.playlists.update(id, { clientId });
+  }
+
+  /** Semua playlist (untuk dorong sinkronisasi; maks 100). */
+  async allPlaylists(): Promise<PlaylistRow[]> {
+    return this.db.playlists.toArray();
+  }
+
+  /** Semua lagu satu playlist, urut posisi (untuk dorong sinkronisasi). */
+  async playlistSongsAll(playlistId: number): Promise<PlaylistSongRow[]> {
+    return this.db.playlist_songs
+      .where('[playlistId+position]')
+      .between([playlistId, 0], [playlistId, MAX_NUMBER])
+      .toArray();
+  }
+
+  /**
+   * Terapkan nama/deskripsi playlist dari server, dengan
+   * updatedAt server (bukan jam perangkat). Dipakai jalur tarik.
+   */
+  async applyRemotePlaylist(
+    id: number,
+    opts: { name: string; description: string | null; updatedAt: number },
+  ): Promise<void> {
+    await this.db.playlists.update(id, {
+      name: opts.name,
+      description: opts.description,
+      updatedAt: opts.updatedAt,
+    });
+    this.notify();
+  }
+
+  /**
+   * Buat playlist dari data server (clientId sudah ditentukan
+   * server). Mengembalikan id lokal baru.
+   */
+  async createPlaylistFromRemote(opts: {
+    clientId: string;
+    name: string;
+    description: string | null;
+    updatedAt: number;
+  }): Promise<number> {
+    const id = await this.db.playlists.add({
+      name: opts.name,
+      description: opts.description,
+      browseId: null,
+      thumbnailUrl: null,
+      clientId: opts.clientId,
+      createdAt: opts.updatedAt,
+      updatedAt: opts.updatedAt,
+    });
+    this.notify();
+    return id as number;
+  }
+
+  /**
+   * Atur status suka secara eksplisit (jalur tarik sinkronisasi
+   * memakai `quiet` supaya tidak mencatat tombstone untuk
+   * perubahan yang asalnya dari server).
+   */
+  async setLiked(
+    songId: string,
+    liked: boolean,
+    opts: { quiet?: boolean } = {},
+  ): Promise<void> {
+    const song = await this.db.songs.get(songId);
+    if (!song) {
+      throw new Error(`setLiked: lagu ${songId} belum ada di database`);
+    }
+    await this.db.songs.update(songId, {
+      liked: liked ? 1 : 0,
+      ...(liked ? { inLibrary: 1 } : {}),
+      dateModified: now(),
+    });
+    if (!liked && !opts.quiet) {
+      await this.recordTombstone('like', songId);
+    }
+    this.notify();
+  }
+
+  /** Semua lagu yang disukai beserta artisnya (untuk dorong). */
+  async allLikedSongs(): Promise<SongView[]> {
+    const rows = await this.db.songs.where('liked').equals(1).toArray();
+    if (rows.length === 0) return [];
+    return this.songsByIds(rows.map((r) => r.id));
+  }
+
+  /** Entri riwayat mentah, terbaru dulu (untuk dorong). */
+  async historyEvents(limit: number): Promise<PlayEventRow[]> {
+    return this.db.play_events
+      .orderBy('[timestamp+id]')
+      .reverse()
+      .limit(limit)
+      .toArray();
+  }
+
+  /** Apakah entri riwayat (lagu + waktu) sudah ada (dedup tarik). */
+  async hasPlayEvent(songId: string, timestamp: number): Promise<boolean> {
+    const count = await this.db.play_events
+      .where('songId')
+      .equals(songId)
+      .filter((e) => e.timestamp === timestamp)
+      .count();
+    return count > 0;
+  }
+
+  /**
+   * Sisipkan lagu ke playlist di posisi tertentu (jalur tarik
+   * sinkronisasi). Bila posisi sudah terisi, lagu ditaruh di
+   * ujung (maks+1) — urutan lokal tidak pernah ditimpa paksa.
+   * Mengembalikan false bila lagu sudah ada di playlist.
+   */
+  async insertPlaylistItemAt(
+    playlistId: number,
+    songId: string,
+    position: number,
+  ): Promise<boolean> {
+    return this.db.transaction(
+      'rw',
+      [this.db.playlist_songs, this.db.songs, this.db.playlists],
+      async () => {
+        const existing = await this.db.playlist_songs.get([
+          playlistId,
+          songId,
+        ]);
+        if (existing) return false;
+        const count = await this.db.playlist_songs
+          .where('[playlistId+position]')
+          .between([playlistId, 0], [playlistId, MAX_NUMBER])
+          .count();
+        if (count >= MAX_PLAYLIST_SONGS) return false;
+        const taken = await this.db.playlist_songs
+          .where('[playlistId+position]')
+          .equals([playlistId, position])
+          .count();
+        const finalPosition =
+          taken > 0
+            ? await this.nextPlaylistPosition(playlistId)
+            : position;
+        const at = now();
+        await this.db.playlist_songs.add({
+          playlistId,
+          songId,
+          position: finalPosition,
+          dateAdded: at,
+        });
+        await this.db.songs.update(songId, { inLibrary: 1 });
+        await this.touchPlaylist(playlistId, at);
+        return true;
+      },
+    ).then((added) => {
+      if (added) this.notify();
+      return added;
+    });
+  }
+
+  /**
+   * Pastikan lagu dari server ada sebagai baris lokal (jalur
+   * tarik sinkronisasi). Baris minimal: judul + artis dari
+   * metadata server apa adanya. Bila metadata tidak ada, judul
+   * memakai videoId itu sendiri — bukan karangan, melainkan id
+   * asli yang bisa dicari ulang. Lagu yang sudah ada tidak
+   * disentuh.
+   */
+  async ensureRemoteSong(
+    videoId: string,
+    title: string | null,
+    artist: string | null,
+  ): Promise<void> {
+    const existing = await this.db.songs.get(videoId);
+    if (existing) return;
+    const at = now();
+    await this.importSongs(
+      [
+        {
+          song: {
+            id: videoId,
+            title: title ?? videoId,
+            albumId: null,
+            durationSeconds: null,
+            thumbnailUrl: null,
+            liked: 0,
+            totalPlayTimeMs: 0,
+            inLibrary: 1,
+            dateAdded: at,
+            dateModified: at,
+            downloadState: DownloadState.notDownloaded,
+            filePath: null,
+            fileSizeBytes: null,
+            downloadedAt: null,
+            formatId: null,
+            unplayable: 0,
+          },
+          artistNames: artist ? [artist] : [],
+        },
+      ],
+      { addToLibrary: true },
+    );
   }
 }
 

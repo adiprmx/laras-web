@@ -367,12 +367,12 @@ test.describe('pemutar (mock resolve + nada lokal)', () => {
     await playFirstSong(page);
     await page.getByTestId('mini-open').click();
     await page.getByTestId('full-eq').click();
-    await expect(page.getByTestId('eq-note')).toContainText(
+    await expect(page.getByTestId('eq-unavailable')).toContainText(
       'Pengatur suara hanya bisa dipakai untuk lagu yang tersimpan di perangkat.',
     );
   });
 
-  test('nada lokal: jalur graph + pesan pengatur suara lokal', async ({
+  test('nada lokal: jalur graph + panel pengatur suara', async ({
     page,
   }) => {
     await mockNetwork(page);
@@ -385,10 +385,11 @@ test.describe('pemutar (mock resolve + nada lokal)', () => {
     await expect(page.getByTestId('player-test-audio-path')).toHaveText(
       'graph',
     );
-    await page.getByTestId('player-test-eq').click();
-    await expect(page.getByTestId('player-test-eq-note')).toHaveText(
-      'Pengatur suara belum tersedia di versi ini.',
-    );
+    await page.getByTestId('mini-open').click();
+    await page.getByTestId('full-eq').click();
+    await expect(page.getByTestId('eq-panel')).toBeVisible();
+    await expect(page.getByTestId('eq-preset-flat')).toBeVisible();
+    await expect(page.getByTestId('eq-band-0')).toBeVisible();
   });
 
   test('cuplikan layar pemutar penuh 360 px dan 1440 px', async ({

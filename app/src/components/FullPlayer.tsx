@@ -1,11 +1,17 @@
 /**
  * Layar pemutar penuh: sampul, judul, bilah cari, kontrol putar,
- * kecepatan, volume, pengatur suara, panel galat, dan antrean.
+ * kecepatan, volume, pengatur suara, lirik, timer tidur, panel
+ * galat, dan antrean.
  * Desain: hitam murni, aksen putih, warna hanya untuk status.
+ *
+ * Panel Lirik/EQ/Timer di-lazy-load: kode ketiganya tidak masuk
+ * bundle awal (anggaran 200 KB gzip).
  */
-import { useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import {
   CaretDown,
+  Moon,
+  MusicNotes,
   Pause,
   Play,
   Repeat,
@@ -21,9 +27,16 @@ import { selectCurrentTrack, usePlayerStore } from '../store/player';
 import { getPlayerService } from '../player/service';
 import { formatTime } from '../player/format';
 import { PLAYBACK_RATES } from '../player/types';
+import { sleepTimerText } from '../player/sleepTimer';
 import { strings } from '../strings/id';
 import QueueList from './QueueList';
 import FavoriteButton from './library/FavoriteButton';
+
+const LyricsPanel = lazy(() => import('../lyrics/LyricsPanel'));
+const EqPanel = lazy(() => import('./EqPanel'));
+const SleepTimerPanel = lazy(() => import('./SleepTimerPanel'));
+
+type OpenPanel = 'eq' | 'lyrics' | 'timer' | null;
 
 function formatRate(rate: number): string {
   return `${rate}x`.replace('.0x', 'x');
@@ -41,14 +54,29 @@ export default function FullPlayer() {
   const volume = usePlayerStore((s) => s.volume);
   const errorMessage = usePlayerStore((s) => s.errorMessage);
   const notice = usePlayerStore((s) => s.notice);
-  const eqNote = usePlayerStore((s) => s.eqNote);
+  const audioPath = usePlayerStore((s) => s.audioPath);
+  const sleepTimer = usePlayerStore((s) => s.sleepTimer);
   const setFullPlayerOpen = usePlayerStore((s) => s.setFullPlayerOpen);
-  const setEqNote = usePlayerStore((s) => s.setEqNote);
   const dismissNotice = usePlayerStore((s) => s.dismissNotice);
 
   const [dragValue, setDragValue] = useState<number | null>(null);
   const [speedOpen, setSpeedOpen] = useState(false);
+  const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const draggingRef = useRef(false);
+
+  // Detak tiap detik hanya saat timer menit aktif, supaya sisa
+  // waktu di pemutar diperbarui. `now` disegarkan SEGERA saat
+  // timer aktif: nilai state lama (sejak mount, bisa menit lebih
+  // tua dari timer) + pembulatan ke atas membuat timer 30 menit
+  // tampil sebagai "31 menit" di render pertama (ditemukan di
+  // screenshot P7).
+  useEffect(() => {
+    if (sleepTimer?.mode !== 'minutes') return;
+    setNowTick(Date.now());
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [sleepTimer?.mode]);
 
   // Kunci scroll latar saat layar penuh terbuka.
   useEffect(() => {
@@ -248,8 +276,8 @@ export default function FullPlayer() {
           </button>
         </div>
 
-        {/* Kecepatan + pengatur suara */}
-        <div className="relative mt-6 flex items-center justify-center gap-3">
+        {/* Kecepatan + pengatur suara + lirik + timer tidur */}
+        <div className="relative mt-6 flex flex-wrap items-center justify-center gap-3">
           <button
             type="button"
             onClick={() => setSpeedOpen((v) => !v)}
@@ -262,13 +290,54 @@ export default function FullPlayer() {
           </button>
           <button
             type="button"
-            onClick={() => setEqNote(service.eqInfo().note)}
+            onClick={() =>
+              setOpenPanel((p) => (p === 'eq' ? null : 'eq'))
+            }
             aria-label={strings.sound}
+            aria-expanded={openPanel === 'eq'}
             data-testid="full-eq"
-            className="flex h-11 items-center gap-2 rounded-full border border-white/10 px-4 text-sm font-medium text-zinc-100 transition-colors hover:bg-white/10 active:scale-95"
+            className={`flex h-11 items-center gap-2 rounded-full border border-white/10 px-4 text-sm font-medium transition-colors hover:bg-white/10 active:scale-95 ${
+              openPanel === 'eq'
+                ? 'bg-white text-black'
+                : 'text-zinc-100'
+            }`}
           >
             <SlidersHorizontal size={18} />
             {strings.sound}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setOpenPanel((p) => (p === 'lyrics' ? null : 'lyrics'))
+            }
+            aria-label={strings.lyrics}
+            aria-expanded={openPanel === 'lyrics'}
+            data-testid="full-lyrics"
+            className={`flex h-11 items-center gap-2 rounded-full border border-white/10 px-4 text-sm font-medium transition-colors hover:bg-white/10 active:scale-95 ${
+              openPanel === 'lyrics'
+                ? 'bg-white text-black'
+                : 'text-zinc-100'
+            }`}
+          >
+            <MusicNotes size={18} />
+            {strings.lyrics}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setOpenPanel((p) => (p === 'timer' ? null : 'timer'))
+            }
+            aria-label={strings.sleepTimer}
+            aria-expanded={openPanel === 'timer'}
+            data-testid="full-sleep-timer"
+            className={`flex h-11 items-center gap-2 rounded-full border border-white/10 px-4 text-sm font-medium transition-colors hover:bg-white/10 active:scale-95 ${
+              openPanel === 'timer' || sleepTimer
+                ? 'bg-white text-black'
+                : 'text-zinc-100'
+            }`}
+          >
+            <Moon size={18} />
+            {strings.sleepTimer}
           </button>
           {speedOpen && (
             <div
@@ -298,6 +367,42 @@ export default function FullPlayer() {
             </div>
           )}
         </div>
+
+        {/* Sisa waktu timer tidur */}
+        {sleepTimer && (
+          <p
+            data-testid="sleep-remaining"
+            className="mt-3 text-center text-sm text-zinc-400"
+          >
+            {sleepTimerText(sleepTimer, nowTick)}
+          </p>
+        )}
+
+        {/* Panel lirik / pengatur suara / timer tidur (lazy) */}
+        {openPanel && (
+          <Suspense
+            fallback={
+              <p className="mt-6 text-center text-sm text-zinc-400">
+                {strings.loadingLabel}
+              </p>
+            }
+          >
+            {openPanel === 'lyrics' && (
+              <LyricsPanel
+                songId={track.id}
+                title={track.title}
+                artist={track.artist}
+                durationSeconds={track.durationSeconds}
+                position={position}
+                onSeek={(seconds) => service.seek(seconds)}
+              />
+            )}
+            {openPanel === 'eq' && (
+              <EqPanel available={audioPath === 'graph'} />
+            )}
+            {openPanel === 'timer' && <SleepTimerPanel />}
+          </Suspense>
+        )}
 
         {/* Volume */}
         <div className="mt-6 flex items-center gap-3">
@@ -351,23 +456,6 @@ export default function FullPlayer() {
               className="mt-3 h-11 rounded-xl bg-white px-4 text-sm font-medium text-black transition-transform duration-150 active:scale-95"
             >
               {strings.retry}
-            </button>
-          </div>
-        )}
-
-        {/* Catatan pengatur suara */}
-        {eqNote && (
-          <div
-            data-testid="eq-note"
-            className="mt-6 rounded-xl border border-white/10 bg-zinc-900 px-4 py-3"
-          >
-            <p className="text-sm leading-relaxed text-zinc-100">{eqNote}</p>
-            <button
-              type="button"
-              onClick={() => setEqNote(null)}
-              className="mt-2 text-sm font-medium text-zinc-400 underline-offset-2 hover:underline"
-            >
-              {strings.close}
             </button>
           </div>
         )}

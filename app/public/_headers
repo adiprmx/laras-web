@@ -14,12 +14,13 @@
 # atribut style={{...}} (mis. lebar slider); Tailwind sendiri
 # dikompilasi ke file CSS, bukan inline.
 # img-src memuat blob: (arsitektur §6.2) untuk sampul lokal;
-# connect-src HARUS ditambah https://lrclib.net saat P7 (lirik)
-# mendarat — saat ini belum ada fetch LRCLIB di kode.
+# connect-src memuat https://lrclib.net + https://api.lyrics.ovh
+# (lirik P7) + https://laras-sync.hiroohengkerr.workers.dev
+# (sinkronisasi P7; utang Blue 1 ditutup saat P7 mendarat).
 # frame-ancestors 'none' menutup clickjacking (relevan dengan H1:
 # tombol destruktif tidak bisa di-iframe situs lain).
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' https://laras-proxy-spike.hiroohengkerr.workers.dev https://raw.githubusercontent.com; img-src 'self' https://*.ytimg.com https://*.googleusercontent.com https://*.ggpht.com blob: data:; media-src 'self' https://*.googlevideo.com blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' https://laras-proxy-spike.hiroohengkerr.workers.dev https://laras-sync.hiroohengkerr.workers.dev https://raw.githubusercontent.com https://lrclib.net https://api.lyrics.ovh; img-src 'self' https://*.ytimg.com https://*.googleusercontent.com https://*.ggpht.com blob: data:; media-src 'self' https://*.googlevideo.com blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer

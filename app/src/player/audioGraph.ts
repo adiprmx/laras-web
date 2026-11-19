@@ -13,12 +13,25 @@
  * destination. Simpul EQ 10 band (P7, Should) disisipkan di antara
  * source dan gain tanpa mengubah struktur ini.
  *
+ * Rantai P7: MediaElementSource -> 10x BiquadFilter (peaking,
+ * frekuensi ISO 31 Hz-16 kHz, Q 1) -> GainNode (volume app) ->
+ * destination. Gain EQ disimpan di manager dan diterapkan ke
+ * filter saat graph dibuat maupun saat diubah; stream TIDAK
+ * PERNAH masuk graph (vonis S5), jadi EQ tidak pernah
+ * membisukan streaming.
+ *
  * Deteksi runtime (arsitektur §3.4): satu fetch CORS Range kecil
  * sebelum menyambung graph, hasil di-cache per host. Cache
  * di-seed dengan vonis S5: host googlevideo selalu tertutup,
  * sehingga stream tidak pernah membayar satu request probe pun.
  */
 import type { AudioPath } from './types';
+import {
+  clampGain,
+  EQ_FILTER_Q,
+  EQ_FREQUENCIES,
+  type EqSettings,
+} from './equalizer';
 
 const PROBE_TIMEOUT_MS = 5000;
 const PROBE_RANGE_BYTES = 1023;
@@ -27,6 +40,8 @@ export class AudioGraphManager {
   private ctx: AudioContext | null = null;
   private source: MediaElementAudioSourceNode | null = null;
   private gain: GainNode | null = null;
+  private eqFilters: BiquadFilterNode[] = [];
+  private eqGains: number[] = new Array(EQ_FREQUENCIES.length).fill(0);
   private attachedElement: HTMLAudioElement | null = null;
   private volume = 1;
   private corsCache = new Map<string, boolean>();
@@ -101,14 +116,55 @@ export class AudioGraphManager {
       this.ctx = new Ctor();
       this.gain = this.ctx.createGain();
       this.gain.gain.value = this.volume;
+      // Rantai EQ: 10 filter peaking seri di depan gain. Source
+      // disambung ke filter pertama saat attach (di bawah).
+      let prev: AudioNode | null = null;
+      for (let i = 0; i < EQ_FREQUENCIES.length; i += 1) {
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = 'peaking';
+        filter.frequency.value = EQ_FREQUENCIES[i];
+        filter.Q.value = EQ_FILTER_Q;
+        filter.gain.value = this.eqGains[i] ?? 0;
+        this.eqFilters.push(filter);
+        if (prev) prev.connect(filter);
+        prev = filter;
+      }
+      if (prev) prev.connect(this.gain);
       this.gain.connect(this.ctx.destination);
     }
     if (!this.source || this.attachedElement !== element) {
       this.source = this.ctx.createMediaElementSource(element);
-      this.source.connect(this.gain as GainNode);
+      // Source masuk ke filter EQ pertama; bila filter belum ada
+      // (graph lama), langsung ke gain.
+      const head = this.eqFilters[0] ?? this.gain;
+      if (head) this.source.connect(head);
       this.attachedElement = element;
     }
     element.volume = 1;
+  }
+
+  /** Terapkan gain EQ (dB) ke 10 filter; tersimpan walau graph belum dibuat. */
+  setEqGains(gains: readonly number[]): void {
+    this.eqGains = EQ_FREQUENCIES.map((_, i) =>
+      clampGain(gains[i] ?? 0),
+    );
+    if (!this.ctx) return;
+    for (let i = 0; i < this.eqFilters.length; i += 1) {
+      this.eqFilters[i].gain.setTargetAtTime(
+        this.eqGains[i],
+        this.ctx.currentTime,
+        0.01,
+      );
+    }
+  }
+
+  /** Terapkan satu pengaturan EQ lengkap (preset + gain). */
+  applyEqSettings(settings: EqSettings): void {
+    this.setEqGains(settings.gains);
+  }
+
+  get currentEqGains(): number[] {
+    return [...this.eqGains];
   }
 
   /** Lanjutkan AudioContext yang tertunda (kebijakan autoplay). */

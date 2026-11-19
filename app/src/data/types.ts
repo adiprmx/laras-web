@@ -133,6 +133,13 @@ export interface PlaylistRow {
   /** browseId bila playlist berasal dari YouTube Music. */
   browseId: string | null;
   thumbnailUrl: string | null;
+  /**
+   * Id client sinkronisasi (P7, web): identitas stabil playlist di
+   * server sync (`<deviceId>:<id lokal>`). Kolom opsional tanpa
+   * indeks — Dexie menyimpan properti tambahan tanpa perubahan
+   * skema versi.
+   */
+  clientId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -162,6 +169,13 @@ export interface LyricsRow {
   lyrics: string;
   syncedLyrics: string | null;
   fetchedAt: number;
+  /**
+   * Asal lirik (P7, opsional tanpa indeks — Dexie menyimpan
+   * properti ekstra tanpa perubahan skema). Dipakai atribusi
+   * "Lirik oleh ..." di panel; baris tanpa sumber (dibuat
+   * sebelum kolom ini ada) dianggap dari LRCLIB.
+   */
+  source?: 'lrclib' | 'ovh' | null;
 }
 
 export interface PlayEventRow {
@@ -248,6 +262,23 @@ export interface PlaybackStateRow {
 export interface AppMetaRow {
   key: string;
   value: string;
+}
+
+/**
+ * Tombstone hapus lokal untuk sinkronisasi (P7, store v3).
+ * Dicatat saat pengguna menghapus playlist, mengeluarkan lagu
+ * dari playlist, atau membatalkan suka — supaya penghapusan
+ * ikut terkirim ke server dan ke perangkat lain (tanpa ini,
+ * data yang dihapus akan bangkit lagi dari tarik berikutnya).
+ * Dibersihkan sesudah terkirim + berumur 30 hari.
+ */
+export interface SyncTombstoneRow {
+  /** Kunci: `<kind>:<ref>` (mis. `playlist:pl-abc:3`). */
+  key: string;
+  kind: 'playlist' | 'playlist-item' | 'like';
+  /** Referensi yang dihapus (clientId playlist / videoId / gabungan). */
+  ref: string;
+  deletedAt: number;
 }
 
 /** Satu lagu beserta nama-nama artisnya, siap tampil di daftar. */
