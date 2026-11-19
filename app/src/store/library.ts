@@ -14,7 +14,8 @@ import {
   type SongSort,
 } from '../data/library';
 
-const SORT_META_KEY = 'songSort';
+/** Kunci app_meta untuk urutan daftar lagu (dipakai ekspor backup P8). */
+export const SORT_META_KEY = 'songSort';
 
 interface LibraryUiState {
   version: number;

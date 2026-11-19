@@ -12,6 +12,12 @@ youtubei 403 tanpa header CORS; base.js 200 tanpa header CORS).
 - Melayani byte audio untuk UNDUHAN saja (`/api/media`) dengan Range
   passthrough dan streaming bercap 100 MB. Streaming pemutaran TIDAK
   lewat proxy (langsung elemen audio ke googlevideo).
+- Mengambil halaman PUBLIK playlist Spotify (`/api/spotify-page`,
+  P8): browser tidak bisa langsung (tanpa header CORS). Hanya
+  `open.spotify.com/playlist/<id 22 karakter>`; redirect manual
+  maks 2 hop dalam host/path yang sama; cap 2 MB; timeout 15 dtk;
+  rate limit 10/menit per IP. api.spotify.com dan
+  accounts.spotify.com TIDAK PERNAH disentuh (larangan permanen).
 
 ## Yang TIDAK dilakukan worker
 
@@ -20,9 +26,10 @@ youtubei 403 tanpa header CORS; base.js 200 tanpa header CORS).
 
 ## Batas
 
-- JSON youtubei 10 MB, script player 8 MB, body POST 1 MB, media 100 MB.
-- Timeout: InnerTube 30 dtk, base.js 90 dtk, media 120 dtk.
-- Rate limit: 60/menit endpoint InnerTube, 10/menit media, per IP,
+- JSON youtubei 10 MB, script player 8 MB, body POST 1 MB, media 100 MB,
+  halaman Spotify 2 MB.
+- Timeout: InnerTube 30 dtk, base.js 90 dtk, media 120 dtk, Spotify 15 dtk.
+- Rate limit: 60/menit endpoint InnerTube, 10/menit media, 10/menit Spotify, per IP,
   disimpan di D1 (tabel `rate_limits`, migrasi
   `workers/sync/0002_ratelimit.sql`). Fail-open: bila D1 tidak
   terikat atau gagal, request diizinkan dan kegagalan dicatat di

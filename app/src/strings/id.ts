@@ -97,6 +97,8 @@ export const strings = {
   save: 'Simpan',
   cancel: 'Batal',
   delete: 'Hapus',
+  done: 'Selesai',
+  back: 'Kembali',
   deletePlaylistTitle: 'Hapus playlist ini?',
   deletePlaylistBody:
     'Playlist akan dihapus. Lagu-lagunya tetap ada di Library kamu.',
@@ -323,6 +325,105 @@ export const strings = {
   settingsAccountDeleteDone: 'Akun dihapus.',
   settingsAccountUnavailable:
     'Sinkronisasi belum bisa dihubungi. Coba lagi nanti.',
+  // Salinan data + impor Spotify (P8)
+  settingsBackupSection: 'Salinan data',
+  settingsBackupBody:
+    'Simpan salinan datamu sebagai file, pulihkan di HP lain, atau impor playlist dari Spotify. Semua ini jalan tanpa akun.',
+  backupExport: 'Simpan salinan',
+  backupExporting: 'Menyimpan salinan.',
+  backupExported: 'Salinan tersimpan. Simpan file-nya baik-baik.',
+  backupExportFailed:
+    'Salinan gagal disimpan. Periksa pengaturan unduhan browser-mu, lalu coba lagi.',
+  backupTooLarge:
+    'Datamu terlalu besar untuk satu salinan. Hapus sebagian riwayat putar atau playlist, lalu coba lagi.',
+  backupImport: 'Pulihkan dari salinan',
+  backupImportTitle: 'Pulihkan dari salinan',
+  backupImportBody:
+    'Pilih file salinan dari perangkatmu. Data dari file ditambahkan ke yang sudah ada, bukan menggantikan.',
+  backupChooseFile: 'Pilih file',
+  backupPreviewTitle: 'Isi salinan',
+  backupPreviewMade: (date: string) => `Dibuat ${date}`,
+  backupPreviewSongs: 'Lagu',
+  backupPreviewPlaylists: 'Playlist',
+  backupPreviewHistory: 'Riwayat putar',
+  backupPreviewQueue: 'Antrean',
+  backupPreviewSearches: 'Riwayat pencarian',
+  backupPreviewSettings: 'Pengaturan ikut dipulihkan',
+  backupImportApplySettings: 'Pakai juga pengaturan dari file',
+  backupRestore: 'Pulihkan',
+  backupImporting: 'Memulihkan.',
+  backupImportDoneTitle: 'Salinan dipulihkan',
+  backupImportAdded: (n: number) => `${n} hal baru ditambahkan.`,
+  backupImportExisted: (n: number) => `${n} hal sudah ada, dilewati.`,
+  backupImportFailedCount: (n: number) => `${n} hal tidak bisa masuk.`,
+  backupErrorTooLarge: 'File ini terlalu besar (lebih dari 10 MB).',
+  backupErrorInvalidJson: 'File ini bukan file salinan yang bisa dibaca.',
+  backupErrorNotBackup: 'File ini bukan file salinan Laras.',
+  backupErrorNewerVersion:
+    'File ini dibuat app yang lebih baru. Perbarui app ini dulu.',
+  backupErrorInvalidStructure:
+    'Isi file salinan ini tidak lengkap atau rusak.',
+  backupErrorUnknown: 'File ini tidak bisa dipakai.',
+  backupRedownload: 'Unduh ulang lagu yang dulu terunduh',
+  backupRedownloadDone: 'Lagu masuk antrean unduhan.',
+  backupRedownloadNote:
+    'File lagunya tidak ikut tersimpan di salinan, jadi perlu diunduh ulang.',
+  importFailureNotFound: 'tidak ketemu di YouTube Music',
+  importFailureSkipped: 'dilewati',
+  importFailureCancelled: 'dibatalkan',
+  importFailureQueueFull: 'antrean sudah penuh',
+  importFailureSearchFailed: 'pencarian gagal',
+  importFailureNetwork: 'internet putus',
+  // Hapus semua data (P8)
+  backupWipe: 'Hapus semua data',
+  backupWipeTitle1: 'Hapus semua data?',
+  backupWipeBody1:
+    'Semua lagu, playlist, favorit, riwayat, dan file unduhan akan dihapus dari perangkat ini. Tindakan ini tidak bisa dibatalkan.',
+  backupWipeSaveFirst: 'Simpan salinan dulu',
+  backupWipeSaved: 'Salinan tersimpan. Kamu bisa lanjut menghapus.',
+  backupWipeTitle2: 'Yakin hapus semuanya?',
+  backupWipeBody2:
+    'Sesudah ini, app kembali kosong seperti baru dipasang. Salinan yang sudah tersimpan tetap bisa dipulihkan nanti.',
+  backupWipeConfirm: 'Ya, hapus semuanya',
+  backupWiping: 'Menghapus.',
+  // Impor Spotify (P8)
+  spotifyImport: 'Impor dari Spotify',
+  spotifyImportTitle: 'Impor playlist Spotify',
+  spotifyImportBody:
+    'Tanpa masuk Spotify. Tempel daftar lagu atau tautan playlist publik, lalu tiap lagu dicocokkan ke YouTube Music satu per satu.',
+  spotifyTabFile: 'Dari file',
+  spotifyTabLink: 'Dari tautan',
+  spotifyPasteHint:
+    'Tempel daftar lagu di sini, satu lagu per baris: Artis - Judul',
+  spotifyChooseFile: 'Pilih file',
+  spotifyReadFile: 'Baca daftar',
+  spotifyLinkHint: 'Tempel tautan playlist publik Spotify',
+  spotifyLinkPlaceholder: 'https://open.spotify.com/playlist/...',
+  spotifyFetchLink: 'Ambil daftar',
+  spotifyFetching: 'Mengambil daftar.',
+  spotifyLinkLimit:
+    'Dari tautan, hanya 30 lagu pertama yang terbaca. Untuk playlist panjang, pakai file.',
+  spotifyLinkTruncated:
+    'Hanya 30 lagu pertama yang terbaca dari tautan ini.',
+  spotifyNameLabel: 'Nama playlist baru',
+  spotifyNameDefault: 'Impor Spotify',
+  spotifyTrackCount: (n: number) => `${n} lagu`,
+  spotifyStart: 'Mulai impor',
+  spotifyProgress: (done: number, total: number) =>
+    `${done} dari ${total} lagu`,
+  spotifyCancel: 'Berhenti',
+  spotifyDoneTitle: 'Impor selesai',
+  spotifyNoMatch:
+    'Tidak ada lagu yang cocok, jadi playlist tidak dibuat. Coba cari lagu-lagu itu manual di tab Cari.',
+  spotifyErrorInvalidUrl: 'Tautan ini bukan tautan playlist Spotify.',
+  spotifyErrorUnreadable:
+    'Halaman playlist tidak bisa dibuka. Coba lagi, atau pakai file.',
+  spotifyErrorEmpty:
+    'Tidak ada lagu yang terbaca dari tautan ini. Spotify mungkin mengubah halamannya, coba pakai file.',
+  spotifyErrorFile:
+    'File ini tidak berisi daftar lagu yang bisa dibaca. Pastikan formatnya teks "Artis - Judul", CSV, atau JSON ekspor Spotify.',
+  spotifyErrorPasted:
+    'Tidak ada lagu yang terbaca. Pastikan tiap baris berisi Artis - Judul.',
 } as const;
 
 export type Strings = typeof strings;

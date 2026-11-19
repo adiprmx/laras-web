@@ -2,6 +2,9 @@
 //
 // Peran: memindah byte antara browser dan YouTube/googlevideo karena
 // fetch langsung dari browser diblokir CORS (vonis spike S2).
+// Plus satu rute P8: /api/spotify-page mengambil halaman PUBLIK
+// playlist Spotify (open.spotify.com, tanpa login/API) karena halaman
+// itu juga tanpa header CORS — api.spotify.com tidak pernah disentuh.
 // Worker ini TIDAK mengeksekusi base.js, TIDAK memecahkan cipher,
 // TIDAK menyimpan data pengguna, TIDAK mencatat body/URL stream.
 // Pekerjaan CPU per request: validasi allowlist + parsing header saja.
@@ -39,6 +42,20 @@ const MEDIA_CAP = 100 * 1024 * 1024;
 const MEDIA_TIMEOUT_MS = 120000;
 const RATE_INNERTUBE_PER_MIN = 60;
 const RATE_MEDIA_PER_MIN = 10;
+const RATE_SPOTIFY_PER_MIN = 10;
+// /api/spotify-page (P8): halaman playlist publik Spotify, diambil
+// worker karena browser tidak bisa langsung (tanpa header CORS).
+// Ukuran nyata ~515 KB (probe 19 Nov 2026); cap 2 MB + timeout
+// 15 dtk + redirect manual maks 2 hop dalam open.spotify.com
+// (port aturan APK spotify_import.dart).
+const SPOTIFY_PAGE_CAP = 2 * 1024 * 1024;
+const SPOTIFY_PAGE_TIMEOUT_MS = 15000;
+const SPOTIFY_MAX_REDIRECTS = 2;
+const SPOTIFY_PLAYLIST_ID = /^[A-Za-z0-9]{22}$/;
+const SPOTIFY_UA =
+  'Mozilla/5.0 (Linux; Android 13; Pixel 7) ' +
+  'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/120.0 Mobile Safari/537.36';
 // Redirect /api/media diikuti manual maks 3 hop (Red 1 R1).
 const MEDIA_MAX_REDIRECTS = 3;
 // Content-Type upstream yang boleh diteruskan /api/media (Red 1 R1).
@@ -275,6 +292,105 @@ export default {
           upstream.body ? upstream.body.pipeThrough(counting) : null,
           { status: upstream.status, headers: resHeaders },
         ));
+      }
+
+      // ---- /api/spotify-page: halaman playlist publik Spotify (P8) ----
+      // Satu-satunya rute yang menyentuh domain Spotify — dan hanya
+      // halaman PUBLIK open.spotify.com/playlist/<id> (tanpa login,
+      // tanpa API). api.spotify.com / accounts.spotify.com TIDAK
+      // PERNAH disentuh (larangan permanen PRD B10.2). HTML
+      // diteruskan sebagai TEKS untuk di-parse client (fetch +
+      // readCappedText); tidak pernah dieksekusi/dinavigasi, jadi
+      // bukan vektor XSS — ditambah nosniff untuk jaga-jaga.
+      if (url.pathname === '/api/spotify-page') {
+        if (request.method !== 'GET') {
+          mark(t0);
+          return withCpu(jsonError(405, 'METHOD_NOT_ALLOWED', 'Metode tidak diizinkan', cors));
+        }
+        const id = url.searchParams.get('id') || '';
+        if (!SPOTIFY_PLAYLIST_ID.test(id)) {
+          mark(t0);
+          return withCpu(jsonError(400, 'BAD_ID', 'Id playlist tidak valid (22 karakter)', cors));
+        }
+        if (await checkRateLimit(env, `spotify:${ip}`, RATE_SPOTIFY_PER_MIN)) {
+          mark(t0);
+          const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak permintaan, coba lagi sebentar', cors);
+          r.headers.set('Retry-After', '60');
+          return withCpu(r);
+        }
+        mark(t0);
+        // Redirect manual maks 2 hop, hanya dalam
+        // open.spotify.com/playlist/<id> (mis. penambahan locale).
+        // Redirect ke host/path lain (termasuk halaman login) = tolak.
+        let upstream = null;
+        {
+          let current = `https://open.spotify.com/playlist/${id}`;
+          const deadline = Date.now() + SPOTIFY_PAGE_TIMEOUT_MS;
+          for (let hop = 0; hop <= SPOTIFY_MAX_REDIRECTS; hop++) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) {
+              mark(t0);
+              return withCpu(jsonError(502, 'UPSTREAM_ERROR', 'Timeout ke upstream', cors));
+            }
+            const res = await fetch(current, {
+              headers: {
+                'User-Agent': SPOTIFY_UA,
+                'Accept-Language': 'id-ID,id;q=0.9,en;q=0.8',
+              },
+              signal: AbortSignal.timeout(remaining),
+              redirect: 'manual',
+            });
+            t0 = performance.now();
+            const loc = res.headers.get('Location');
+            if (res.status < 300 || res.status >= 400 || !loc) {
+              upstream = res;
+              break;
+            }
+            if (hop === SPOTIFY_MAX_REDIRECTS) {
+              mark(t0);
+              return withCpu(jsonError(502, 'TOO_MANY_REDIRECTS', 'Upstream redirect terlalu banyak', cors));
+            }
+            let next;
+            try {
+              next = new URL(loc, current);
+            } catch {
+              mark(t0);
+              return withCpu(jsonError(502, 'BAD_REDIRECT', 'Location redirect upstream tidak valid', cors));
+            }
+            const segs = next.pathname.split('/').filter((s) => s !== '');
+            if (
+              next.protocol !== 'https:' ||
+              next.hostname !== 'open.spotify.com' ||
+              segs.length !== 2 ||
+              segs[0] !== 'playlist' ||
+              !SPOTIFY_PLAYLIST_ID.test(segs[1])
+            ) {
+              mark(t0);
+              return withCpu(jsonError(502, 'REDIRECT_NOT_ALLOWED', 'Redirect upstream ke luar halaman playlist', cors));
+            }
+            current = next.href;
+          }
+        }
+        t0 = performance.now();
+        if (upstream.status !== 200) {
+          mark(t0);
+          return withCpu(jsonError(502, 'UPSTREAM_ERROR', `Upstream mengembalikan HTTP ${upstream.status}`, cors));
+        }
+        const declared = Number(upstream.headers.get('Content-Length') || 0);
+        if (declared > SPOTIFY_PAGE_CAP) {
+          mark(t0);
+          return withCpu(jsonError(502, 'UPSTREAM_TOO_BIG', 'Respons upstream melewati cap', cors));
+        }
+        const capped = await readCapped(upstream.body, SPOTIFY_PAGE_CAP);
+        if (capped.tooBig) {
+          mark(t0);
+          return withCpu(jsonError(502, 'UPSTREAM_TOO_BIG', 'Respons upstream melewati cap', cors));
+        }
+        const resHeaders = new Headers(cors);
+        resHeaders.set('Content-Type', 'text/html; charset=utf-8');
+        resHeaders.set('X-Content-Type-Options', 'nosniff');
+        mark(t0);
+        return withCpu(new Response(capped.bytes, { status: 200, headers: resHeaders }));
       }
 
       // ---- /api/player-script: base.js, gerbang hash SEBELUM fetch ----

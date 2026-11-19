@@ -14,6 +14,10 @@
  */
 import { LarasDatabase, openDatabase } from './database';
 import {
+  MAX_BACKUP_QUEUE_ITEMS,
+  type BackupData,
+} from '../backup/format';
+import {
   fillForYou,
   FOR_YOU_LIMIT,
   FOR_YOU_WINDOW_MS,
@@ -36,16 +40,21 @@ import {
   type ArtistWithCount,
   type LibraryCounts,
   type LocalSearchResults,
+  type PlaybackStateRow,
   type PlayEventRow,
   type PlayHistoryEntry,
   type PlaylistRow,
   type PlaylistSongEntry,
   type PlaylistSongRow,
   type PlaylistWithCount,
+  type QueueItemRow,
+  type SearchHistoryRow,
+  type SongArtistRow,
   type SongImport,
   type SongRow,
   type SongView,
   type SyncTombstoneRow,
+  type TokenIndexRow,
 } from './types';
 
 /** Ukuran halaman standar semua daftar (port APK kPageSize). */
@@ -84,6 +93,72 @@ export const SYNC_HISTORY_CLEARED_KEY = 'sync-history-cleared-before';
 
 /** Urutan daftar lagu (port SongSort APK). */
 export type SongSort = 'newest' | 'byName' | 'mostPlayed';
+
+/**
+ * Isi database mentah untuk ekspor backup (P8). Pemetaan ke
+ * BackupData tinggal di `backup/service.ts` (seperti APK: snapshot
+ * di LibraryService, pemetaan di BackupService).
+ */
+export interface BackupSnapshot {
+  songs: SongRow[];
+  songArtists: SongArtistRow[];
+  albums: AlbumRow[];
+  artists: ArtistRow[];
+  playlists: PlaylistRow[];
+  playlistSongs: PlaylistSongRow[];
+  playEvents: PlayEventRow[];
+  searchHistory: SearchHistoryRow[];
+  queue: QueueItemRow[];
+  playbackState: PlaybackStateRow | null;
+}
+
+/** Hitungan hasil merge impor backup (P8), per jenis data. */
+export interface BackupMergeResult {
+  songsAdded: number;
+  songsExisted: number;
+  playlistsCreated: number;
+  playlistSongsAdded: number;
+  playlistSongsExisted: number;
+  /** Lagu playlist yang tidak masuk karena playlist sudah 1.000 lagu (batas web; file dari app yang sama tidak pernah memicu ini). */
+  playlistSongsSkippedFull: number;
+  eventsAdded: number;
+  eventsExisted: number;
+  queriesAdded: number;
+  queriesExisted: number;
+  queueAdded: number;
+  queueExisted: number;
+  /** Item antrean backup yang tidak masuk karena antrean sudah penuh (200 item). */
+  queueSkippedFull: number;
+  /** Id lagu antrean yang tidak masuk karena antrean penuh (untuk laporan hasil impor). */
+  queueSkippedSongIds: string[];
+  /** Id lagu yang dulu terunduh (menurut file) tapi belum terunduh di perangkat ini — penggerak tombol "Unduh ulang" (PRD B7.5). */
+  downloadedSongIds: string[];
+  /** True bila posisi pemutar dari file dipulihkan (hanya bila antrean perangkat tujuan kosong sebelum impor). */
+  playbackStateRestored: boolean;
+}
+
+/** Jumlah item baru yang masuk (untuk angka "berhasil" di laporan). */
+export function mergeTotalAdded(r: BackupMergeResult): number {
+  return (
+    r.songsAdded +
+    r.playlistsCreated +
+    r.playlistSongsAdded +
+    r.eventsAdded +
+    r.queriesAdded +
+    r.queueAdded
+  );
+}
+
+/** Jumlah item yang dilewati karena sudah ada. */
+export function mergeTotalExisted(r: BackupMergeResult): number {
+  return (
+    r.songsExisted +
+    r.playlistSongsExisted +
+    r.eventsExisted +
+    r.queriesExisted +
+    r.queueExisted
+  );
+}
 
 /** Batas atas string untuk rentang kunci (lebih besar dari teks nyata). */
 const MAX_STRING = '\uffff';
@@ -2304,6 +2379,548 @@ export class LibraryService {
 
   async setMeta(key: string, value: string): Promise<void> {
     await this.db.app_meta.put({ key, value });
+  }
+
+  // ------------------------------------------------------------------
+  // Backup dan impor (P8): snapshot + merge satu transaksi
+  // ------------------------------------------------------------------
+
+  /**
+   * Baca seluruh isi database untuk ekspor backup. Pembacaan
+   * berurutan tanpa transaksi (port APK): event putar yang
+   * tercatat di tengah ekspor boleh masuk atau tidak — merge di
+   * perangkat tujuan men-dedup, jadi tidak ada data ganda.
+   */
+  async backupSnapshot(): Promise<BackupSnapshot> {
+    const songs = await this.db.songs.toArray();
+    const songArtists = await this.db.song_artists.toArray();
+    const albums = await this.db.albums.toArray();
+    const artists = await this.db.artists.toArray();
+    const playlists = await this.db.playlists.toArray();
+    const playlistSongs = await this.db.playlist_songs
+      .orderBy('[playlistId+position]')
+      .toArray();
+    const playEvents = await this.db.play_events
+      .orderBy('[timestamp+id]')
+      .toArray();
+    const searchHistory = await this.db.search_history.toArray();
+    const queue = await this.db.queue_items.orderBy('position').toArray();
+    const playbackState = (await this.db.playback_state.get(1)) ?? null;
+    return {
+      songs,
+      songArtists,
+      albums,
+      artists,
+      playlists,
+      playlistSongs,
+      playEvents,
+      searchHistory,
+      queue,
+      playbackState,
+    };
+  }
+
+  /**
+   * Gabungkan isi file salinan ke database dalam SATU transaksi
+   * Dexie (PRD B10.1): gagal di tengah berarti TIDAK ADA yang
+   * berubah.
+   *
+   * Aturan merge (port APK `mergeBackupData`, B4.8 menang atas
+   * B10.3 soal nama playlist):
+   * - Lagu: dicocokkan berdasarkan id. Lagu baru disisip dengan
+   *   nilai dari file (favorit, total waktu putar, tanggal
+   *   tambah). Lagu yang sudah ada hanya diperbarui metadata-nya
+   *   (judul, album, durasi, sampul); favorit dan total waktu
+   *   putar TIDAK PERNAH diturunkan (favorit dari file hanya
+   *   bisa menambah, bukan mencabut), dan status unduhan tidak
+   *   disentuh. Artis lagu yang sudah ada tidak ditulis ulang
+   *   (database lokal adalah otoritasnya).
+   * - Album dan artis: disisip bila belum ada (berdasarkan id).
+   * - Playlist: dicocokkan berdasarkan NAMA persis. Nama sama
+   *   berarti lagunya yang belum ada ditambahkan ke playlist
+   *   yang sama (BUKAN membuat salinan "(salinan)"); nama baru
+   *   berarti playlist baru. Nama dipotong ke batas PRD
+   *   (100 karakter) dan deskripsi ke 500 karakter bila file
+   *   membawanya lebih panjang.
+   * - Riwayat putar: dedup (lagu, detik putar, durasi); batas
+   *   10.000 entri tetap ditegakkan (yang tertua dihapus).
+   *   Dedup memakai DETIK (bukan milidetik) supaya file yang
+   *   sempat melewati APK — drift menyimpan DateTime sebagai
+   *   detik — tidak menghasilkan duplikat saat kembali ke web.
+   * - Riwayat pencarian: dedup query tanpa membedakan
+   *   kapitalisasi; batas 100 query tetap ditegakkan.
+   * - Antrean: ditambahkan di BELAKANG antrean yang ada (bukan
+   *   menimpa); duplikat videoId dilewati; total dibatasi
+   *   200 item. Item dari file selalu `kind: 'stream'` (file
+   *   tidak membawa lagu lokal).
+   * - Posisi pemutar: dipulihkan hanya bila antrean perangkat
+   *   tujuan kosong sebelum impor (dan file membawa antrean —
+   *   posisi tanpa antrean tidak berarti). Urutan putar web
+   *   (`order`) diisi urutan identitas, kecepatan dan volume
+   *   memakai nilai bawaan 1 (file tidak membawanya).
+   * - Lagu yang dulu terunduh (menurut file) TIDAK ditandai
+   *   terunduh di sini — filenya tidak ada di perangkat ini.
+   *   Id-nya dikembalikan di `downloadedSongIds` untuk tombol
+   *   "Unduh ulang".
+   *
+   * Penyimpangan web dari APK (dicatat, bukan disembunyikan):
+   * - Judul lagu yang berubah pada lagu yang sudah ada membuat
+   *   indeks token lagu itu disinkronkan ulang (APK tidak
+   *   menyentuh FTS untuk lagu lama; di web, tanpa ini pencarian
+   *   lokal akan memakai judul lama).
+   * - Batas 1.000 lagu per playlist ditegakkan (dihitung di
+   *   `playlistSongsSkippedFull`); file dari app yang sama tidak
+   *   pernah memicu ini karena batasnya sama di kedua platform.
+   *
+   * `data` WAJIB sudah lewat `parseBackupText` (tervalidasi +
+   * termigrasi). Pemanggil TIDAK boleh membangun BackupData dari
+   * JSON mentah tanpa validasi.
+   */
+  async mergeBackupData(data: BackupData): Promise<BackupMergeResult> {
+    const at = now();
+    const result = await this.db.transaction(
+      'rw',
+      [
+        this.db.songs,
+        this.db.albums,
+        this.db.artists,
+        this.db.song_artists,
+        this.db.token_index,
+        this.db.playlists,
+        this.db.playlist_songs,
+        this.db.play_events,
+        this.db.search_history,
+        this.db.queue_items,
+        this.db.playback_state,
+      ],
+      async () => {
+        let songsAdded = 0;
+        let songsExisted = 0;
+        let playlistsCreated = 0;
+        let playlistSongsAdded = 0;
+        let playlistSongsExisted = 0;
+        let playlistSongsSkippedFull = 0;
+        let eventsAdded = 0;
+        let eventsExisted = 0;
+        let queriesAdded = 0;
+        let queriesExisted = 0;
+        let queueAdded = 0;
+        let queueExisted = 0;
+        let queueSkippedFull = 0;
+        const queueSkippedSongIds: string[] = [];
+        const downloadedSongIds: string[] = [];
+
+        // Album dulu (lagu menunjuk album), insert-or-ignore.
+        if (data.albums.length > 0) {
+          const keys = data.albums.map((a) => a.id);
+          const existing = await this.db.albums.bulkGet(keys);
+          const missing: AlbumRow[] = [];
+          data.albums.forEach((album, i) => {
+            if (existing[i] === undefined) {
+              missing.push({
+                id: album.id,
+                title: album.title,
+                titleKey: titleKeyOf(album.title),
+                year: album.year,
+                thumbnailUrl: album.thumbnailUrl,
+                liked: album.liked ? 1 : 0,
+                dateAdded: album.dateAdded ?? at,
+              });
+            }
+          });
+          if (missing.length > 0) await this.db.albums.bulkAdd(missing);
+        }
+
+        // Artis: dari data.artists + dari referensi artis di lagu
+        // (file bisa membawa ref tanpa baris artis — APK membuat
+        // barisnya dari ref, dan web melakukan hal yang sama).
+        const artistNames = new Map<string, string>();
+        for (const artist of data.artists) {
+          artistNames.set(artist.id, artist.name);
+        }
+        for (const song of data.songs) {
+          for (const ref of song.artists) {
+            if (!artistNames.has(ref.id)) {
+              artistNames.set(ref.id, ref.name);
+            }
+          }
+        }
+        const artistsById = new Map(data.artists.map((a) => [a.id, a]));
+        const newArtistIds: string[] = [];
+        if (artistNames.size > 0) {
+          const keys = [...artistNames.keys()];
+          const existing = await this.db.artists.bulkGet(keys);
+          const missing: ArtistRow[] = [];
+          keys.forEach((key, i) => {
+            if (existing[i] === undefined) {
+              const fromFile = artistsById.get(key);
+              const name = artistNames.get(key) ?? '';
+              missing.push({
+                id: key,
+                name,
+                nameKey: name.toLowerCase(),
+                thumbnailUrl: fromFile?.thumbnailUrl ?? null,
+                liked: fromFile?.liked ? 1 : 0,
+                dateAdded: fromFile?.dateAdded ?? at,
+              });
+              newArtistIds.push(key);
+            }
+          });
+          if (missing.length > 0) {
+            await this.db.artists.bulkAdd(missing);
+          }
+        }
+
+        // Lagu: satu baca untuk seluruh tabel supaya merge
+        // 10.000 lagu tidak memakai N+1 query.
+        const ids = data.songs.map((s) => s.id);
+        const existingSongs =
+          ids.length > 0 ? await this.db.songs.bulkGet(ids) : [];
+        const rowsToPut: SongRow[] = [];
+        const newSongIds = new Set<string>();
+        const retitledSongIds: string[] = [];
+        data.songs.forEach((song, i) => {
+          const existing = existingSongs[i];
+          if (!existing) {
+            rowsToPut.push({
+              id: song.id,
+              title: song.title,
+              titleKey: titleKeyOf(song.title),
+              albumId: song.albumId,
+              durationSeconds: song.durationSeconds,
+              thumbnailUrl: song.thumbnailUrl,
+              liked: song.liked ? 1 : 0,
+              totalPlayTimeMs: song.totalPlayTimeMs,
+              inLibrary: song.inLibrary ? 1 : 0,
+              dateAdded: song.dateAdded ?? at,
+              dateModified: at,
+              // Status unduhan selalu 0 untuk lagu baru: file
+              // audio tidak ikut di file salinan (PRD B7.6).
+              downloadState: DownloadState.notDownloaded,
+              filePath: null,
+              fileSizeBytes: null,
+              downloadedAt: null,
+              formatId: null,
+              unplayable: song.unplayable ? 1 : 0,
+            });
+            newSongIds.add(song.id);
+            songsAdded++;
+          } else {
+            songsExisted++;
+            if (existing.title !== song.title) {
+              retitledSongIds.push(song.id);
+            }
+            // Metadata dari file menang; favorit/inLibrary hanya
+            // bisa naik (tidak pernah mencabut yang sudah ada);
+            // total waktu putar dan status unduhan dipertahankan.
+            rowsToPut.push({
+              ...existing,
+              title: song.title,
+              titleKey: titleKeyOf(song.title),
+              albumId: song.albumId,
+              durationSeconds: song.durationSeconds,
+              thumbnailUrl: song.thumbnailUrl,
+              liked: song.liked && existing.liked === 0 ? 1 : existing.liked,
+              inLibrary:
+                song.inLibrary && existing.inLibrary === 0
+                  ? 1
+                  : existing.inLibrary,
+              dateModified: at,
+            });
+          }
+          if (song.downloaded) {
+            const alreadyDownloaded =
+              existing?.downloadState === DownloadState.downloaded;
+            if (!alreadyDownloaded) downloadedSongIds.push(song.id);
+          }
+        });
+        if (rowsToPut.length > 0) {
+          await this.db.songs.bulkPut(rowsToPut);
+        }
+
+        // Pemetaan artis hanya untuk lagu BARU (lagu lama memakai
+        // pemetaan lokalnya sendiri, port APK).
+        const mappings: SongArtistRow[] = [];
+        for (const song of data.songs) {
+          if (!newSongIds.has(song.id)) continue;
+          song.artists.forEach((ref, position) => {
+            mappings.push({ songId: song.id, artistId: ref.id, position });
+          });
+        }
+        if (mappings.length > 0) {
+          await this.db.song_artists.bulkAdd(mappings);
+        }
+
+        // Token: lagu baru + artis baru langsung disisip; lagu
+        // yang judulnya berubah dihapus token lamanya dulu
+        // (penyimpangan web, lihat dokstring di atas).
+        const retitledSet = new Set(retitledSongIds);
+        if (retitledSongIds.length > 0) {
+          await this.db.token_index
+            .where('[kind+refId]')
+            .anyOf(
+              retitledSongIds.map((id) => ['song', id] as [string, string]),
+            )
+            .delete();
+        }
+        const tokenRows: TokenIndexRow[] = [];
+        for (const song of data.songs) {
+          if (!newSongIds.has(song.id) && !retitledSet.has(song.id)) {
+            continue;
+          }
+          for (const token of uniqueTokens(
+            `${song.title} ${song.artists.map((a) => a.name).join(' ')}`,
+          )) {
+            tokenRows.push({ token, kind: 'song', refId: song.id });
+          }
+        }
+        for (const id of newArtistIds) {
+          for (const token of uniqueTokens(artistNames.get(id) ?? '')) {
+            tokenRows.push({ token, kind: 'artist', refId: id });
+          }
+        }
+        if (tokenRows.length > 0) {
+          await this.db.token_index.bulkAdd(tokenRows);
+        }
+
+        // Playlist: cocokkan berdasarkan nama persis (B4.8).
+        const existingPlaylists = await this.db.playlists.toArray();
+        const byName = new Map<string, PlaylistRow>();
+        for (const p of existingPlaylists) {
+          if (!byName.has(p.name)) byName.set(p.name, p);
+        }
+        for (const bp of data.playlists) {
+          const name = bp.name.trim();
+          if (name.length === 0) continue;
+          const safeName =
+            name.length > MAX_PLAYLIST_NAME_LENGTH
+              ? name.slice(0, MAX_PLAYLIST_NAME_LENGTH)
+              : name;
+          const descTrimmed = bp.description?.trim() ?? null;
+          const safeDescription =
+            descTrimmed !== null &&
+            descTrimmed.length > MAX_PLAYLIST_DESCRIPTION_LENGTH
+              ? descTrimmed.slice(0, MAX_PLAYLIST_DESCRIPTION_LENGTH)
+              : descTrimmed;
+          let target = byName.get(safeName);
+          if (!target) {
+            const id = await this.db.playlists.add({
+              name: safeName,
+              description: safeDescription,
+              browseId: null,
+              thumbnailUrl: null,
+              createdAt: bp.createdAt ?? at,
+              updatedAt: at,
+            });
+            target = {
+              id: id as number,
+              name: safeName,
+              description: safeDescription,
+              browseId: null,
+              thumbnailUrl: null,
+              createdAt: bp.createdAt ?? at,
+              updatedAt: at,
+            };
+            byName.set(safeName, target);
+            playlistsCreated++;
+          }
+          const members = await this.db.playlist_songs
+            .where('[playlistId+position]')
+            .between([target.id, 0], [target.id, MAX_NUMBER])
+            .toArray();
+          const memberIds = new Set(members.map((m) => m.songId));
+          let position =
+            members.length > 0
+              ? Math.max(...members.map((m) => m.position)) + 1
+              : 0;
+          const toAdd: PlaylistSongRow[] = [];
+          const markLibrary: string[] = [];
+          for (const songId of bp.songIds) {
+            if (memberIds.has(songId)) {
+              playlistSongsExisted++;
+              continue;
+            }
+            if (memberIds.size >= MAX_PLAYLIST_SONGS) {
+              playlistSongsSkippedFull++;
+              continue;
+            }
+            toAdd.push({
+              playlistId: target.id,
+              songId,
+              position,
+              dateAdded: at,
+            });
+            memberIds.add(songId);
+            position++;
+            playlistSongsAdded++;
+            markLibrary.push(songId);
+          }
+          if (toAdd.length > 0) {
+            await this.db.playlist_songs.bulkAdd(toAdd);
+          }
+          if (markLibrary.length > 0) {
+            await this.db.songs
+              .where('id')
+              .anyOf(markLibrary)
+              .modify({ inLibrary: 1 });
+          }
+          await this.touchPlaylist(target.id, at);
+        }
+
+        // Riwayat putar: dedup (lagu, detik, durasi). Batas
+        // 10.000 entri tetap ditegakkan (yang tertua dihapus).
+        const existingEvents = await this.db.play_events.toArray();
+        const eventKeys = new Set(
+          existingEvents.map(
+            (e) =>
+              `${e.songId}|${Math.floor(e.timestamp / 1000)}|${e.playTimeMs}`,
+          ),
+        );
+        const newEvents: Array<{
+          songId: string;
+          timestamp: number;
+          playTimeMs: number;
+        }> = [];
+        for (const event of data.playEvents) {
+          const key = `${event.songId}|${Math.floor(event.timestamp / 1000)}|${event.playTimeMs}`;
+          if (eventKeys.has(key)) {
+            eventsExisted++;
+            continue;
+          }
+          newEvents.push({
+            songId: event.songId,
+            timestamp: event.timestamp,
+            playTimeMs: event.playTimeMs,
+          });
+          eventKeys.add(key);
+          eventsAdded++;
+        }
+        if (newEvents.length > 0) {
+          await this.db.play_events.bulkAdd(newEvents);
+        }
+        const eventCount = await this.db.play_events.count();
+        if (eventCount > MAX_PLAY_EVENTS) {
+          const excess = eventCount - MAX_PLAY_EVENTS;
+          const oldest = await this.db.play_events
+            .orderBy('[timestamp+id]')
+            .limit(excess)
+            .toArray();
+          await this.db.play_events.bulkDelete(oldest.map((e) => e.id));
+        }
+
+        // Riwayat pencarian: dedup tanpa membedakan kapitalisasi.
+        const existingQueries = await this.db.search_history.toArray();
+        const queryKeys = new Set(
+          existingQueries.map((q) => q.query.toLowerCase()),
+        );
+        const newQueries: SearchHistoryRow[] = [];
+        for (const q of data.searchHistory) {
+          if (queryKeys.has(q.query.toLowerCase())) {
+            queriesExisted++;
+            continue;
+          }
+          newQueries.push({
+            query: q.query,
+            queryLower: q.query.toLowerCase(),
+            timestamp: q.timestamp,
+          });
+          queryKeys.add(q.query.toLowerCase());
+          queriesAdded++;
+        }
+        if (newQueries.length > 0) {
+          await this.db.search_history.bulkAdd(newQueries);
+        }
+        const queryCount = await this.db.search_history.count();
+        if (queryCount > MAX_SEARCH_HISTORY) {
+          const excess = queryCount - MAX_SEARCH_HISTORY;
+          const oldest = await this.db.search_history
+            .orderBy('[timestamp+query]')
+            .limit(excess)
+            .toArray();
+          await this.db.search_history.bulkDelete(
+            oldest.map((q) => q.query),
+          );
+        }
+
+        // Antrean: ditambahkan di belakang antrean yang ada.
+        const existingQueue = await this.db.queue_items
+          .orderBy('position')
+          .toArray();
+        const queuedIds = new Set(existingQueue.map((q) => q.songId));
+        let queuePosition =
+          existingQueue.length > 0
+            ? (existingQueue[existingQueue.length - 1]?.position ?? -1) + 1
+            : 0;
+        const queueToAdd: QueueItemRow[] = [];
+        for (const item of data.queue) {
+          if (queuedIds.has(item.songId)) {
+            queueExisted++;
+            continue;
+          }
+          if (queuePosition >= MAX_BACKUP_QUEUE_ITEMS) {
+            queueSkippedFull++;
+            queueSkippedSongIds.push(item.songId);
+            continue;
+          }
+          queueToAdd.push({
+            position: queuePosition,
+            songId: item.songId,
+            source: item.source,
+            kind: 'stream',
+          });
+          queuedIds.add(item.songId);
+          queuePosition++;
+          queueAdded++;
+        }
+        if (queueToAdd.length > 0) {
+          await this.db.queue_items.bulkAdd(queueToAdd);
+        }
+
+        // Posisi pemutar: hanya bila antrean tujuan kosong sebelum
+        // impor (dan file membawa antrean — posisi tanpa antrean
+        // tidak berarti).
+        let playbackStateRestored = false;
+        const ps = data.playbackState;
+        if (existingQueue.length === 0 && ps !== null && queuePosition > 0) {
+          await this.db.playback_state.put({
+            id: 1,
+            currentIndex: Math.min(
+              Math.max(0, ps.currentIndex),
+              queuePosition - 1,
+            ),
+            positionMs: ps.positionMs,
+            shuffleEnabled: ps.shuffleEnabled ? 1 : 0,
+            repeatMode: ps.repeatMode,
+            order: Array.from({ length: queuePosition }, (_, i) => i),
+            rate: 1,
+            volume: 1,
+            updatedAt: at,
+          });
+          playbackStateRestored = true;
+        }
+
+        return {
+          songsAdded,
+          songsExisted,
+          playlistsCreated,
+          playlistSongsAdded,
+          playlistSongsExisted,
+          playlistSongsSkippedFull,
+          eventsAdded,
+          eventsExisted,
+          queriesAdded,
+          queriesExisted,
+          queueAdded,
+          queueExisted,
+          queueSkippedFull,
+          queueSkippedSongIds,
+          downloadedSongIds,
+          playbackStateRestored,
+        };
+      },
+    );
+    this.notify();
+    return result;
   }
 
   // ------------------------------------------------------------------

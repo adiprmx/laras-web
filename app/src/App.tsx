@@ -17,7 +17,8 @@ import type { LibraryTab } from './components/library/LibraryPage';
 // /p5-test = halaman uji unduhan P5 (isi 10 lagu + antre unduh).
 // /p6-test = halaman uji ketahanan P6 (seed banner + snapshot).
 // /p7-test = halaman uji fitur Should P7 (lirik, EQ, timer tidur).
-// Ketujuhnya DEV-ONLY (Red 1 H1): gerbang
+// /p8-test = halaman uji Backup dan Ekspor P8 (seed data contoh).
+// Kedelapannya DEV-ONLY (Red 1 H1): gerbang
 // `import.meta.env.DEV` di bawah membuat rute + lazy import-nya
 // dihapus total dari build produksi oleh tree-shaking, sehingga
 // chunk *TestPage* tidak ada di dist/ dan pengunjung produksi
@@ -49,6 +50,9 @@ const P6TestPage = import.meta.env.DEV
 const P7TestPage = import.meta.env.DEV
   ? lazy(() => import('./test-pages/P7TestPage'))
   : null;
+const P8TestPage = import.meta.env.DEV
+  ? lazy(() => import('./test-pages/P8TestPage'))
+  : null;
 const DownloadsPage = lazy(
   () => import('./components/downloads/DownloadsPage'),
 );
@@ -76,7 +80,8 @@ type Route =
   | { name: 'p4-test' }
   | { name: 'p5-test' }
   | { name: 'p6-test' }
-  | { name: 'p7-test' };
+  | { name: 'p7-test' }
+  | { name: 'p8-test' };
 
 const LIBRARY_TABS: LibraryTab[] = [
   'songs',
@@ -100,6 +105,7 @@ function parseRoute(pathname: string, search: string): Route {
     if (path === '/p5-test') return { name: 'p5-test' };
     if (path === '/p6-test') return { name: 'p6-test' };
     if (path === '/p7-test') return { name: 'p7-test' };
+    if (path === '/p8-test') return { name: 'p8-test' };
   }
   if (path === '/downloads') return { name: 'downloads' };
   if (path === '/settings') return { name: 'settings' };
@@ -271,6 +277,15 @@ export default function App() {
     return (
       <Suspense fallback={<LoadingPage />}>
         <P7TestPage />
+        <MiniPlayer />
+        <FullPlayer />
+      </Suspense>
+    );
+  }
+  if (route.name === 'p8-test' && P8TestPage) {
+    return (
+      <Suspense fallback={<LoadingPage />}>
+        <P8TestPage />
         <MiniPlayer />
         <FullPlayer />
       </Suspense>

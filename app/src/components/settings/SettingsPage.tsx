@@ -2,7 +2,8 @@
  * Halaman Pengaturan (P6): pembaruan config, kondisi layanan,
  * laporkan kerusakan (kode diagnostik LRS1 + snapshot pemutar),
  * tentang app. P7 menambah Akun (masuk + sinkronisasi opsional)
- * dan Lirik (saklar tampilkan lirik).
+ * dan Lirik (saklar tampilkan lirik). P8 menambah Salinan data
+ * (ekspor/impor backup, impor Spotify, hapus semua data).
  *
  * Rute /settings, lazy-load (tidak masuk bundle awal). Copy
  * Bahasa Indonesia sehari-hari, tanpa jargon, tanpa em dash.
@@ -29,6 +30,7 @@ import { getLyricsService } from '../../lyrics/lyricsService';
 import { loginUrl } from '../../sync/auth';
 import { useSyncStore } from '../../sync/syncStore';
 import ConfirmDialog from '../library/ConfirmDialog';
+import BackupSection from './BackupSection';
 
 function formatTime(ms: number | null): string {
   if (ms === null) return strings.settingsConfigNever;
@@ -445,6 +447,7 @@ export default function SettingsPage({
 
       <AccountSection />
       <LyricsSection />
+      <BackupSection />
 
       <Section title={strings.settingsUpdateSection} testId="settings-update">
         <p className="text-sm leading-relaxed text-zinc-400">

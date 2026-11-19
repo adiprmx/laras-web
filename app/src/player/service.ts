@@ -452,6 +452,37 @@ export class PlayerService {
     this.persistSoon();
   }
 
+  /**
+   * Hentikan pemutar TOTAL untuk hapus data (P8): jeda, kosongkan
+   * antrean SEPENUHNYA (termasuk lagu yang sedang diputar — beda
+   * dengan clearQueue() yang mempertahankan lagu saat ini),
+   * batalkan timer tidur, batalkan persist tertunda, lalu tulis
+   * keadaan kosong dan TUNGGU sampai rantai tulis IndexedDB
+   * selesai.
+   *
+   * Penantian ini penting: tanpa itu, tulis debounce 500 ms dari
+   * clearQueue() bisa mendarat SESUDAH database dihapus dan
+   * membangkitkan antrean (bug yang ditemukan E2E P8: antrean
+   * tersisa 1 lagu sesudah wipe). Rantai persist mengevaluasi
+   * state saat eksekusi, jadi mengosongkan store sebelum menunggu
+   * rantai membuat tulis tertunda apa pun menjadi no-op.
+   */
+  async stopForWipe(): Promise<void> {
+    this.pause();
+    this.clearSleepTimer();
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    usePlayerStore.getState().setPlayerState({
+      queue: [],
+      order: [],
+      orderPos: 0,
+    });
+    this.persistNow();
+    await this.persistChain;
+  }
+
   /** Coba lagi lagu yang gagal (tombol "Coba lagi"). */
   async retry(): Promise<void> {
     const track = selectCurrentTrack(usePlayerStore.getState());
