@@ -1,13 +1,21 @@
-# Egress Ketiga: Proxy InnerTube via Render, Draf (19 Nov 2026)
+# Egress Ketiga: Proxy InnerTube via Render (19 Nov 2026)
 
-**Status: BLOCKED_NO_API_KEY.** Tidak ada API key Render di mana
-pun (dicek 19:55 WIB): tidak ada connector Render, tidak ada
-`custom.render`, Secure Vault tidak menyimpan login render.com.
-Kode proxy SIAP dan TERUJI LOKAL, skrip deploy + probe SIAP,
-kerangka failover SIAP (tes 13/13). Yang kurang hanya key +
-push kode ke GitHub. **Belum ada vonis egress:** layanan Render
-belum dibuat, belum ada satu pun probe dari IP Render. Dokumen
-ini draf fase 1; tabel bukti diisi fase 2 sesudah key ada.
+**Status: PROBE SELESAI 22:33 WIB, VONIS DITOLAK.**
+API key + Workspace ID sudah ada (parent via browser 21:22–21:27
+WIB; disimpan di secrets/ 0600, BUKAN Secure Vault). Layanan
+`laras-proxy-render` DIBUAT + LIVE 21:41 WIB
+(id srv-dbvgjoks728c73e4l8v0,
+https://laras-proxy-render.onrender.com; /healthz 200).
+Probe egress siklus 4 jalan 22:32-22:33 WIB (koordinator #7),
+tanpa kartu persetujuan (host Render sudah "always allow"
+sejak siklus 3). Hasil: CF sebelum 2/2 LOGIN_REQUIRED,
+Render 9/9 LOGIN_REQUIRED, CF sesudah 2/2 LOGIN_REQUIRED
+(jendela buruk bertahan sepanjang uji). Vonis: DITOLAK
+(lihat §4). Siklus 3 (22:28-22:30 WIB) TAK MEYAKINKAN
+(CF sesudah 1 OK, kedipan <1 menit). Total lintas siklus:
+Render 0 OK / 18 ditolak. Failover TIDAK di-wire. Bukti
+lengkap di §3. Langkah berikut: keputusan parent soal
+trial Fly.io (§7).
 
 Semua jam WIB, 19 Nov 2026. Aturan penulisan dokumen ini: tanpa
 em dash.
@@ -24,15 +32,32 @@ pertama skrip deploy fase 2.
 | Akun | GitHub adiprmx, email adiprmx@gmail.com |
 | Tier | Hobby (GRATIS), tanpa kartu |
 | Git Deployment Credentials | GitHub adiprmx terhubung, termasuk repo laras-web |
-| API key | TIDAK ADA (lihat §1.1) |
-| Workspace ID (`ownerId`) | BELUM DIKETAHUI (dari Settings workspace, format `tea_...`) |
+| API key | ADA, "laras-render-deploy", dibuat parent via browser
+21:22–21:27 WIB; disimpan di secrets/ 0600 (render-api-key),
+BUKAN Secure Vault |
+| Workspace ID (`ownerId`) | tea-da6kt1142hec73dgi6i0
+("My Workspace", adiprmx@gmail.com), terverifikasi via
+GET /v1/owners 21:37 WIB |
 
-Layanan YANG SUDAH ADA, JANGAN SENTUH SAMA SEKALI:
+Layanan YANG SUDAH ADA, JANGAN SENTUH SAMA SEKALI (terverifikasi
+via GET /v1/services 21:37 WIB, SEMUA di workspace
+"My Workspace"):
 
-| Grup | Layanan |
+| Layanan | Tipe |
 |---|---|
-| My project | laras-backend, laras-frontend, laras-backend-db, laras-frontend-c1 |
-| Ungrouped | adip-cinema-web, adip-cinema-terabox-node |
+| adip-cinema-web | static_site |
+| adip-cinema-terabox-node | web_service |
+| bot | web_service |
+| adiprmxshop | web_service |
+| adipmusicrmx | web_service |
+
+KOREKSI 21:37 WIB: keempat laras-* (laras-backend,
+laras-frontend, laras-backend-db, laras-frontend-c1) yang
+tercantum di draf fase 1 dari laporan browser 19:51 WIB TIDAK
+ditemukan via API (services + postgres kosong) dan URL
+publiknya 404, kemungkinan dihapus owner atau ada di workspace
+lain yang tak terlihat key ini. Detail investigasi di log
+koordinator (Koordinator #4, 19 Nov 2026 ~21:30 WIB).
 
 ### 1.1 Bukti tidak ada API key (19:55 WIB)
 
@@ -107,9 +132,107 @@ hanya dari probe fase 2 lewat layanan Render live.
 
 ## 3. Tabel bukti uji egress
 
-BELUM ADA. Layanan Render belum dibuat (terblokir key), jadi
-belum ada satu pun probe dari egress Render. Tabel ini diisi
-fase 2 dengan protokol berikut (sama seperti Vercel,
+Siklus probe 3 (terakhir), 22:28-22:30 WIB, koordinator #6,
+lagu kanari `hhn-nGSuenM`. Warm-up GET `/healthz` 200
+percobaan pertama. Kartu persetujuan ke-3 disetujui owner
+saat POST Render pertama. Run log:
+`hidden_files/koordinator/render-probe-run-cycle3-20261119T152856Z.jsonl`,
+verdict:
+`hidden_files/koordinator/render-probe-verdict-cycle3-20261119T152856Z.txt`,
+stdout lengkap:
+`hidden_files/koordinator/render-probe-cycle3-stdout.log`.
+
+Siklus probe 4, 22:32-22:33 WIB, koordinator #7, lagu kanari
+`hhn-nGSuenM` (tabel 3.5-3.7). Warm-up GET `/healthz` 200
+percobaan pertama. Tanpa kartu persetujuan (host Render sudah
+"always allow" sejak siklus 3). Run log:
+`hidden_files/koordinator/render-probe-run-cycle4-20261119T153253Z.jsonl`,
+verdict:
+`hidden_files/koordinator/render-probe-verdict-cycle4-20261119T153253Z.txt`,
+stdout lengkap:
+`hidden_files/koordinator/render-probe-cycle4-stdout.log`.
+
+### 3.1 CF SEBELUM (jendela buruk terkonfirmasi)
+
+| Waktu WIB | Klien | HTTP | Detik | Byte | Playability | Format audio |
+|---|---|---|---|---|---|---|
+| 22:29:15 | WEB_REMIX | 200 | 7,8 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:29:23 | ANDROID_VR | 200 | 7,51 | 987 | LOGIN_REQUIRED | 0 |
+
+### 3.2 Render 3x per klien (9 sel, semua LOGIN_REQUIRED)
+
+| Waktu WIB | Klien | Ulangan | HTTP | Detik | Byte | Playability | Format audio |
+|---|---|---|---|---|---|---|---|
+| 22:29:37 | WEB_REMIX | r1 | 200 | 13,75 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:29:42 | WEB_REMIX | r2 | 200 | 4,41 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:29:51 | WEB_REMIX | r3 | 200 | 7,96 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:29:58 | MWEB | r1 | 200 | 7,49 | 3.421 | LOGIN_REQUIRED | 0 |
+| 22:30:05 | MWEB | r2 | 200 | 6,76 | 3.421 | LOGIN_REQUIRED | 0 |
+| 22:30:13 | MWEB | r3 | 200 | 7,0 | 3.421 | LOGIN_REQUIRED | 0 |
+| 22:30:19 | ANDROID_VR | r1 | 200 | 5,92 | 985 | LOGIN_REQUIRED | 0 |
+| 22:30:25 | ANDROID_VR | r2 | 200 | 5,69 | 979 | LOGIN_REQUIRED | 0 |
+| 22:30:30 | ANDROID_VR | r3 | 200 | 5,0 | 987 | LOGIN_REQUIRED | 0 |
+
+Semua sel Render beralasan "Sign in to confirm you're not a
+bot", visitorData ada, 0 format audio. Sel Render OK
+independen: 0.
+
+### 3.3 CF SESUDAH (jendela berubah di tengah uji)
+
+| Waktu WIB | Klien | HTTP | Detik | Byte | Playability | Format audio |
+|---|---|---|---|---|---|---|
+| 22:30:39 | WEB_REMIX | 200 | 8,2 | 228.197 | OK | 4 |
+| 22:30:46 | ANDROID_VR | 200 | 7,17 | 985 | LOGIN_REQUIRED | 0 |
+
+### 3.4 Konfirmasi sesudah uji (koordinator #6, ~22:31 WIB)
+
+| Klien | Playability | Format audio |
+|---|---|---|
+| WEB_REMIX via CF | LOGIN_REQUIRED | 0 |
+| ANDROID_VR via CF | LOGIN_REQUIRED | 0 |
+
+Satu-satunya OK (CF sesudah WEB_REMIX 22:30:39) adalah
+kedipan satu request: satu menit kemudian kedua klien CF
+kembali LOGIN_REQUIRED. Jendela terbuka kurang dari satu
+menit, bukan jendela terbuka yang bertahan.
+
+### 3.5 CF SEBELUM siklus 4 (jendela buruk terkonfirmasi)
+
+| Waktu WIB | Klien | HTTP | Detik | Byte | Playability | Format audio |
+|---|---|---|---|---|---|---|
+| 22:32:58 | WEB_REMIX | 200 | 2,41 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:33:00 | ANDROID_VR | 200 | 2,18 | 981 | LOGIN_REQUIRED | 0 |
+
+### 3.6 Render 3x per klien siklus 4 (9 sel, semua LOGIN_REQUIRED)
+
+| Waktu WIB | Klien | Ulangan | HTTP | Detik | Byte | Playability | Format audio |
+|---|---|---|---|---|---|---|---|
+| 22:33:03 | WEB_REMIX | r1 | 200 | 2,86 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:33:08 | WEB_REMIX | r2 | 200 | 5,02 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:33:13 | WEB_REMIX | r3 | 200 | 5,26 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:33:17 | MWEB | r1 | 200 | 4,27 | 3.421 | LOGIN_REQUIRED | 0 |
+| 22:33:20 | MWEB | r2 | 200 | 2,46 | 3.421 | LOGIN_REQUIRED | 0 |
+| 22:33:22 | MWEB | r3 | 200 | 2,48 | 3.421 | LOGIN_REQUIRED | 0 |
+| 22:33:25 | ANDROID_VR | r1 | 200 | 2,13 | 979 | LOGIN_REQUIRED | 0 |
+| 22:33:27 | ANDROID_VR | r2 | 200 | 2,58 | 985 | LOGIN_REQUIRED | 0 |
+| 22:33:29 | ANDROID_VR | r3 | 200 | 1,99 | 983 | LOGIN_REQUIRED | 0 |
+
+Semua sel Render beralasan "Sign in to confirm you're not a
+bot", visitorData ada, 0 format audio. Sel Render OK
+independen: 0.
+
+### 3.7 CF SESUDAH siklus 4 (jendela buruk bertahan)
+
+| Waktu WIB | Klien | HTTP | Detik | Byte | Playability | Format audio |
+|---|---|---|---|---|---|---|
+| 22:33:32 | WEB_REMIX | 200 | 2,64 | 1.838 | LOGIN_REQUIRED | 0 |
+| 22:33:35 | ANDROID_VR | 200 | 3,2 | 987 | LOGIN_REQUIRED | 0 |
+
+Jendela buruk bertahan sepanjang uji (43 detik, 22:32:58
+sampai 22:33:35 WIB); tidak ada kedipan OK seperti di
+siklus 3.
+
+Protokol yang dipakai (sama seperti Vercel,
 `docs/vercel-egress.md` §3):
 
 1. Warm-up `/healthz` sampai 200 stabil (layanan gratis tidur
@@ -136,13 +259,38 @@ min 2 sel independen (pasangan lagu x klien berbeda) SAAT CF
 ditolak di jendela yang sama. DITOLAK = semua LOGIN_REQUIRED
 seperti Vercel.
 
-## 4. Vonis: BELUM ADA VONIS
+## 4. Vonis: DITOLAK (siklus 4, jendela buruk penuh)
 
-Bukan BERSIH, bukan DITOLAK. Terblokir di key. Failover
-`proxyFailover.ts` ditulis sebagai KERANGKA DRAFT (saklar
+Vonis otomatis runner:
+`DITOLAK`
+(`render-probe-verdict-cycle4-20261119T153253Z.txt`).
+
+Syarat vonis DITOLAK terpenuhi penuh di siklus 4: CF sebelum
+2/2 LOGIN_REQUIRED, Render 9/9 LOGIN_REQUIRED (0 sel OK
+independen), CF sesudah 2/2 LOGIN_REQUIRED. Jendela buruk
+bertahan sepanjang uji (43 detik), tanpa kedipan OK.
+
+Siklus 3 (22:28-22:30 WIB) TAK MEYAKINKAN karena CF sesudah
+WEB_REMIX lolos (OK, 4 format audio), kedipan satu request
+(<1 menit, konfirmasi ~22:31 WIB: kedua klien CF kembali
+LOGIN_REQUIRED). Siklus 4 menyelesaikan keraguan itu: di
+jendela buruk yang bertahan penuh, Render ditolak 9/9.
+
+Agregat lintas siklus: Render 0 OK / 18 ditolak (siklus 3:
+9x ditolak; siklus 4: 9x ditolak). Pola menguat: YouTube
+menolak IP pusat data secara luas di jendela buruk (CF,
+Vercel/AWS, GitHub Actions, kini Render/Oregon).
+
+Failover `proxyFailover.ts` tetap KERANGKA DRAFT (saklar
 `RENDER_FAILOVER_ENABLED = false`, tidak diimpor modul mana
-pun) dan TIDAK di-wire ke `resolve.ts`. Wiring hanya sesudah
-vonis BERSIH, oleh koordinator.
+pun) dan TIDAK di-wire ke `resolve.ts`. Layanan
+`laras-proxy-render` tetap live ($0) untuk uji ulang.
+
+Langkah berikut: keputusan parent (dan owner bila perlu)
+soal trial Fly.io (§7) sebagai kandidat egress berikutnya.
+TIDAK ADA akun Fly.io dibuat. Trial tanpa kartu, 7 hari,
+cukup untuk protokol probe lengkap; kartu HANYA bila owner
+setuju SESUDAH probe BERSIH.
 
 ## 5. Yang dibutuhkan untuk fase 2
 
@@ -255,12 +403,14 @@ persetujuan owner.
    `custom.render` di Secure Vault.
 2. Push artefak paket ini ke GitHub, lalu luncurkan fase 2
    (deploy + probe) sesuai §5.2.
-3. Bila vonis BERSIH: wiring failover + keep-alive (§5.2
-   langkah 5). Bila DITOLAK: putuskan soal trial Fly.io (§7)
-   dengan owner.
+3. Vonis 22:33 WIB DITOLAK (§4, siklus 4): Render 0/18 OK
+   lintas siklus 3+4. Failover TIDAK di-wire. Keputusan
+   parent/owner soal trial Fly.io (§7, tanpa kartu, 7 hari)
+   masih menunggu; TIDAK ADA akun Fly.io dibuat koordinator.
 4. Perbarui `docs/spikes/egress-dan-opsi-resolve.md` §3.3 bila
-   koordinator mau: Render kini berstatus TERBLOKIR KEY
-   (bukan "BELUM DIUJI" tanpa kualifikasi).
+   koordinator mau: Render kini berstatus DITOLAK (0/18 OK
+   lintas siklus 3+4, jendela buruk penuh di siklus 4).
+   SELESAI koordinator #7, 22:35 WIB.
 
 ## 9. Artefak
 

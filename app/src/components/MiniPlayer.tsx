@@ -1,11 +1,16 @@
 /**
  * Bar putar bawah (64 px + garis progres). Titik fokus: tombol
  * putar/jeda. Bar ini tidak ditampilkan bila antrean kosong.
+ * Juga me-mount IframeFallbackPlayer (P3): MiniPlayer dirender
+ * di semua rute, jadi pemutar iframe hanya mount sekali dan
+ * tidak ikut terbuang saat pindah halaman. Saat mode fallback
+ * aktif, bar ini diganti panel fallback.
  */
 import { Pause, Play } from '@phosphor-icons/react';
 import { selectCurrentTrack, usePlayerStore } from '../store/player';
 import { getPlayerService } from '../player/service';
 import { strings } from '../strings/id';
+import IframeFallbackPlayer from '../player/IframeFallbackPlayer';
 
 export default function MiniPlayer({
   withNav = false,
@@ -17,6 +22,7 @@ export default function MiniPlayer({
   const status = usePlayerStore((s) => s.status);
   const position = usePlayerStore((s) => s.position);
   const duration = usePlayerStore((s) => s.duration);
+  const fallbackMode = usePlayerStore((s) => s.fallbackMode);
   const setFullPlayerOpen = usePlayerStore((s) => s.setFullPlayerOpen);
 
   if (!track) return null;
@@ -24,7 +30,14 @@ export default function MiniPlayer({
   const playing = status === 'playing';
   const progress = duration > 0 ? (position / duration) * 100 : 0;
 
+  // Satu tree stabil: panel fallback SELALU mount di sini (ia
+  // mengembalikan null saat tidak aktif), bar biasa disembunyikan
+  // kondisional saat mode fallback aktif. Dua cabang return yang
+  // berbeda akan me-remount panel saat mode berubah.
   return (
+    <>
+    <IframeFallbackPlayer withNav={withNav} />
+    {fallbackMode !== 'iframe' && (
     <div
       data-testid="mini-player"
       className={`fixed inset-x-0 z-40 border-t border-white/10 bg-black/95 backdrop-blur-md ${
@@ -87,5 +100,7 @@ export default function MiniPlayer({
         </button>
       </div>
     </div>
+    )}
+    </>
   );
 }

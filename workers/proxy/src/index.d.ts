@@ -4,6 +4,8 @@
 export interface ProxyWorkerEnv {
   DB?: unknown;
   ALLOWED_ORIGINS?: string;
+  /** Secret tulis /api/resolve-cache (P3). Tidak ada = tulis ditolak. */
+  RESOLVE_CACHE_KEY?: string;
 }
 
 declare const worker: {

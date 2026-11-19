@@ -70,6 +70,10 @@ import {
 } from './persistence';
 import { HtmlAudioPort, isSafeLocalUrl, type AudioPlayerPort } from './port';
 import {
+  getIframeController,
+  shouldEnterIframeFallback,
+} from './iframeFallback';
+import {
   decideOnError,
   decideRestorePosition,
   FailureCounter,
@@ -308,7 +312,17 @@ export class PlayerService {
     const state = usePlayerStore.getState();
     const track = selectCurrentTrack(state);
     if (!track) return;
-    // Lagu sudah dimuat (status paused): lanjutkan saja.
+    // Mode fallback: tombol putar mengarah ke pemutar YouTube
+    // (cek ini WAJIB pertama — currentKind sudah 'stream' dan
+    // status 'paused' akan salah mengarah ke elemen audio).
+    if (state.fallbackMode === 'iframe') {
+      usePlayerStore.getState().setPlayerState({
+        errorMessage: null,
+        notice: null,
+      });
+      getIframeController()?.play();
+      return;
+    }
     if (state.status === 'paused' && this.currentKind !== null) {
       usePlayerStore.getState().setPlayerState({
         errorMessage: null,
@@ -337,6 +351,17 @@ export class PlayerService {
     // Pengguna mengambil alih (jeda): tangga retry latar berhenti,
     // supaya lagu tidak mulai sendiri sesudah pengguna menjeda.
     this.cancelBackgroundRetry();
+    // Mode fallback: jeda pemutar YouTube, bukan elemen audio.
+    if (usePlayerStore.getState().fallbackMode === 'iframe') {
+      getIframeController()?.pause();
+      const state = usePlayerStore.getState();
+      if (state.status === 'playing' || state.status === 'loading') {
+        usePlayerStore.getState().setPlayerState({ status: 'paused' });
+        this.mediaSession.setPlaybackState('paused');
+        this.persistNow();
+      }
+      return;
+    }
     this.port.pause();
     // Event 'pause' juga memperbarui state; setel eksplisit supaya
     // UI merespons seketika tanpa menunggu event.
@@ -382,6 +407,18 @@ export class PlayerService {
     const state = usePlayerStore.getState();
     if (state.status === 'idle') return;
     this.stallTracker.reset();
+    // Mode fallback: geser posisi di pemutar YouTube.
+    if (state.fallbackMode === 'iframe') {
+      getIframeController()?.seekTo(seconds);
+      usePlayerStore.getState().setPlayerState({ position: seconds });
+      this.mediaSession.setPositionState(
+        seconds,
+        state.duration,
+        state.rate,
+      );
+      this.persistSoon();
+      return;
+    }
     this.port.seek(seconds);
     usePlayerStore.getState().setPlayerState({ position: seconds });
     this.mediaSession.setPositionState(
@@ -390,6 +427,116 @@ export class PlayerService {
       state.rate,
     );
     this.persistSoon();
+  }
+
+  // ---------- Fallback pemutar YouTube (P3) ----------
+
+  /**
+   * Masuk mode fallback: lagu diputar pemutar resmi YouTube di
+   * iframe (komponen IframeFallbackPlayer mount dari store).
+   * Elemen audio dijeda supaya tidak ada suara ganda; tangga
+   * retry latar dibatalkan (fallback ADALAH jalur pemulihannya).
+   */
+  private enterIframeFallback(videoId: string): void {
+    this.cancelBackgroundRetry();
+    this.port.pause();
+    logPlayer('masuk mode pemutar YouTube (fallback)');
+    usePlayerStore.getState().setPlayerState({
+      fallbackMode: 'iframe',
+      fallbackVideoId: videoId,
+      status: 'loading',
+      errorMessage: null,
+      notice: strings.fallbackNotice,
+    });
+  }
+
+  /**
+   * Keluar dari mode fallback (resolve pulih, atau lagu lokal,
+   * atau pengguna kembali ke cara biasa). No-op bila tidak
+   * sedang dalam mode fallback. Komponen iframe unmount dari
+   * perubahan store ini.
+   */
+  private exitIframeFallback(): void {
+    if (usePlayerStore.getState().fallbackMode === null) return;
+    usePlayerStore.getState().setPlayerState({
+      fallbackMode: null,
+      fallbackVideoId: null,
+      notice: null,
+    });
+  }
+
+  /**
+   * Coba cara biasa lagi dari mode fallback (tombol di panel
+   * fallback). Keluar dari mode fallback lalu muat ulang lagu
+   * saat ini dari posisi terakhir: bila resolve kini berhasil,
+   * pemutaran normal berlanjut; bila masih gagal, onResolveFailed
+   * mengembalikan lagu ke mode fallback.
+   */
+  async retryNormalPlayback(): Promise<void> {
+    const state = usePlayerStore.getState();
+    const track = selectCurrentTrack(state);
+    if (!track) return;
+    this.exitIframeFallback();
+    await this.loadTrack(track, {
+      autoplay: true,
+      startPosition: state.position,
+    });
+  }
+
+  /**
+   * Notifikasi dari komponen iframe (satu-satunya penulis state
+   * untuk mode fallback — komponen tidak menulis store langsung).
+   * Masing-masing no-op bila mode fallback sudah berakhir
+   * (balapan dengan unmount komponen).
+   */
+  notifyFallbackPlaying(): void {
+    if (usePlayerStore.getState().fallbackMode !== 'iframe') return;
+    usePlayerStore.getState().setPlayerState({
+      status: 'playing',
+      notice: null,
+    });
+    this.mediaSession.setPlaybackState('playing');
+    // Riwayat: mulai hitung waktu putar (cermin event 'play'
+    // elemen audio di onPlay).
+    if (this.historySession && this.historySession.countingSince === null) {
+      this.historySession.countingSince = Date.now();
+    }
+  }
+
+  notifyFallbackPaused(): void {
+    if (usePlayerStore.getState().fallbackMode !== 'iframe') return;
+    usePlayerStore.getState().setPlayerState({ status: 'paused' });
+    this.mediaSession.setPlaybackState('paused');
+    this.accumulateHistory();
+    this.persistNow();
+  }
+
+  notifyFallbackBuffering(): void {
+    if (usePlayerStore.getState().fallbackMode !== 'iframe') return;
+    usePlayerStore.getState().setPlayerState({ status: 'loading' });
+  }
+
+  notifyFallbackProgress(position: number, duration: number): void {
+    if (usePlayerStore.getState().fallbackMode !== 'iframe') return;
+    const patch: Partial<PlayerState> = { position };
+    if (duration > 0) patch.duration = duration;
+    usePlayerStore.getState().setPlayerState(patch);
+  }
+
+  /** Lagu selesai di pemutar YouTube: jalur lanjut yang sama. */
+  async notifyFallbackEnded(): Promise<void> {
+    if (usePlayerStore.getState().fallbackMode !== 'iframe') return;
+    await this.onEnded();
+  }
+
+  /**
+   * Pemutar YouTube melaporkan galat (mis. video tidak bisa
+   * diputar): keluar dari mode fallback dan gagalkan lagu
+   * seperti biasa (pindah ke lagu berikut).
+   */
+  notifyFallbackError(): void {
+    this.exitIframeFallback();
+    void this.failCurrentTrack(strings.resolveFailed);
   }
 
   // ---------- Pengaturan putar ----------
@@ -778,6 +925,11 @@ export class PlayerService {
     // Ganti lagu (apa pun pemicunya: skip, pilih lagu, coba lagi,
     // hapus dari antrean): tangga retry lagu lama berhenti.
     this.cancelBackgroundRetry();
+    // Ganti lagu SELALU keluar dari mode fallback dulu (lagu baru
+    // mencoba cara biasa; masuk fallback lagi hanya bila resolve
+    // + cache gagal). Tanpa ini, lagu lokal/unduhan akan berbunyi
+    // bersamaan dengan pemutar YouTube lagu lama.
+    this.exitIframeFallback();
     this.stallTracker.reset();
     this.reResolveCount = 0;
     this.preResolvedUrl = null;
@@ -1035,6 +1187,13 @@ export class PlayerService {
     }
     if (state.repeat === 'one') {
       this.seek(0);
+      // Mode fallback: putar ulang pemutar YouTube (seek di atas
+      // sudah mengarah ke iframe; port.play akan memutar elemen
+      // audio basi yang tidak bersuara).
+      if (state.fallbackMode === 'iframe') {
+        getIframeController()?.play();
+        return;
+      }
       try {
         await this.port.play();
       } catch (error) {
@@ -1332,7 +1491,7 @@ export class PlayerService {
           this.armBackgroundRetryTimer();
           return;
         }
-        this.exhaustBackgroundRetry();
+        this.exhaustBackgroundRetry(attempts);
         return;
       }
       // Bukan mayoritas LOGIN_REQUIRED lagi (internet putus,
@@ -1350,18 +1509,36 @@ export class PlayerService {
   }
 
   /**
-   * Tangga habis: berhenti DI LAGU INI dengan pesan akhir yang
-   * jujur ("YouTube masih membatasi. Coba lagi nanti.") — TIDAK
+   * Tangga habis: resolve gagal TOTAL (langsung + cache + dua
+   * percobaan latar selama ~6 menit). Perilaku P3: masuk mode
+   * fallback pemutar YouTube supaya lagu tetap bisa diputar,
+   * bukan berhenti diam — dengan gerbang yang sama dengan
+   * tangga (mayoritas LOGIN_REQUIRED + pengguna belum menjeda;
+   * jeda manual membatalkan tangga, jadi kasus jeda praktis
+   * tidak sampai ke sini, tapi gerbang tetap dicek eksplisit).
+   * Bila gerbang tidak lolos, perilaku lama yang berlaku:
+   * berhenti DI LAGU INI dengan pesan akhir yang jujur
+   * ("YouTube masih membatasi. Coba lagi nanti.") — TIDAK
    * pindah otomatis ke lagu berikut. Selama jendela buruk semua
    * lagu gagal; pindah otomatis hanya membakar antrean dan
    * menyembunyikan pesan akhir. Pengguna bisa menekan "Coba
    * lagi" atau skip sendiri.
    */
-  private exhaustBackgroundRetry(): void {
+  private exhaustBackgroundRetry(attempts: string[]): void {
     this.cancelBackgroundRetry();
     logPlayer('tangga retry habis, YouTube masih membatasi');
     void persistPlayerLog();
     this.failures.recordFailure();
+    const state = usePlayerStore.getState();
+    const track = selectCurrentTrack(state);
+    if (
+      track &&
+      track.source.kind === 'stream' &&
+      shouldEnterIframeFallback({ attempts, status: state.status })
+    ) {
+      this.enterIframeFallback(track.source.videoId);
+      return;
+    }
     usePlayerStore.getState().setPlayerState({
       status: 'error',
       errorMessage: strings.retryExhausted,

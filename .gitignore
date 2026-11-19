@@ -1,4 +1,5 @@
 hidden_files/
+secrets/
 node_modules/
 app/dist/
 app/coverage/

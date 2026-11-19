@@ -37,6 +37,10 @@ import {
 } from './innertube';
 import { fetchRemoteConfigText } from './fetchConfig';
 import {
+  fetchCachedStream,
+  type CachedStream,
+} from './resolveCache';
+import {
   BASE_JS_MAX_BYTES,
   BASE_JS_TIMEOUT_MS,
   BUILTIN_CLIENTS,
@@ -77,6 +81,11 @@ export interface ResolvedTrack {
   /** Hash base.js yang dipakai solver, bila ada. */
   hash: string | null;
   resolveMs: number;
+  /**
+   * True bila URL berasal dari cache D1 (P3), bukan resolve
+   * langsung. Dipakai diagnostik; tidak mengubah pemutaran.
+   */
+  fromCache?: boolean;
 }
 
 /** Galat resolve dengan pesan yang bisa tampil ke pengguna. */
@@ -412,15 +421,22 @@ export class StreamResolver {
   private scriptByHash = new Map<string, PlayerScript>();
   private configLoader: ConfigLoader | null;
   private lastSnapshot: LastResolveSnapshot | null = null;
+  private cacheLookup: (videoId: string) => Promise<CachedStream | null>;
 
   /**
    * `configLoader` bisa diinjeksi (tes memakai loader dengan jam
    * dan storage palsu); tanpa injeksi, loader bersama TTL 6 jam
    * dipakai (impor dinamis supaya tidak ada siklus statis dengan
-   * resilience/configStore).
+   * resilience/configStore). `cacheLookup` juga bisa diinjeksi
+   * (tes memakai lookup palsu); tanpa injeksi, baca cache D1
+   * lewat worker proxy dipakai.
    */
-  constructor(opts: { configLoader?: ConfigLoader } = {}) {
+  constructor(opts: {
+    configLoader?: ConfigLoader;
+    cacheLookup?: (videoId: string) => Promise<CachedStream | null>;
+  } = {}) {
     this.configLoader = opts.configLoader ?? null;
+    this.cacheLookup = opts.cacheLookup ?? fetchCachedStream;
   }
 
   /** Muat config + visitorData. Dipanggil sekali sebelum lagu pertama. */
@@ -757,6 +773,27 @@ export class StreamResolver {
       break;
     }
     this.recordSnapshot(allAttempts, playabilityByClient, roundsRun);
+    // Cadangan cache D1 (P3): resolve langsung gagal di semua
+    // putaran — coba simpanan dari jendela terbuka terakhir.
+    // Entri kedaluwarsa sudah disaring worker + parse client;
+    // yang kembali ke sini dijamin masih berlaku. Cache tidak
+    // pernah melempar (null = tidak ada simpanan), jadi kegagalan
+    // di sini tidak menutupi penyebab asli di bawah.
+    const cached = await this.tryCache(song);
+    if (cached) {
+      return {
+        videoId: song.videoId,
+        title: song.title,
+        url: cached.url,
+        itag: cached.itag,
+        bitrate: cached.bitrate,
+        client: cached.client,
+        usedSolver: false,
+        hash: null,
+        resolveMs: Math.round(performance.now() - t0),
+        fromCache: true,
+      };
+    }
     if (lastProxyError) {
       throw new ResolveError(
         `resolve gagal untuk ${song.videoId}: ${allAttempts.join(', ')}; ` +
@@ -770,6 +807,19 @@ export class StreamResolver {
       'Lagu tidak bisa ditemukan di semua jalur. Coba lagi nanti.',
       allAttempts,
     );
+  }
+
+  /**
+   * Baca cache D1 untuk satu lagu. Mengembalikan null bila tidak
+   * ada simpanan atau lookup gagal dengan cara apa pun — cache
+   * adalah cadangan best-effort, bukan jalur yang boleh melempar.
+   */
+  private async tryCache(song: SongRef): Promise<CachedStream | null> {
+    try {
+      return await this.cacheLookup(song.videoId);
+    } catch {
+      return null;
+    }
   }
 
   /** Simpan snapshot resolve terakhir untuk diagnostik LRS1. */

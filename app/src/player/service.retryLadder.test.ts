@@ -262,6 +262,8 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
       rate: 1,
       volume: 1,
       audioPath: null,
+      fallbackMode: null,
+      fallbackVideoId: null,
       errorMessage: null,
       notice: null,
       fullPlayerOpen: false,
@@ -402,7 +404,7 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
     expect(service.debugState().retryLadder).toBeNull();
   }, 20000);
 
-  it('tangga habis sesudah +5 mnt gagal: pesan akhir jujur, lagu TIDAK pindah', async () => {
+  it('tangga habis sesudah +5 mnt gagal: masuk mode fallback, lagu TIDAK pindah (P3)', async () => {
     await playQueue([TRACK_1, TRACK_2]);
     await vi.advanceTimersByTimeAsync(61_000);
     expect(callsFor('vid11111111')).toHaveLength(12);
@@ -410,16 +412,24 @@ describe('PlayerService tangga retry latar (hotfix resolve)', () => {
     // Total maks 15 request/lagu (9 cepat + 3 + 3 latar).
     expect(callsFor('vid11111111')).toHaveLength(15);
     const state = usePlayerStore.getState();
-    expect(state.status).toBe('error');
-    expect(state.errorMessage).toBe(strings.retryExhausted);
-    expect(state.notice).toBeNull();
+    // P3: tangga habis berarti resolve gagal total — lagu masuk
+    // mode fallback pemutar YouTube, bukan berhenti dengan pesan
+    // galat. Pesan akhir lama (retryExhausted) hanya muncul bila
+    // gerbang fallback tidak lolos.
+    expect(state.fallbackMode).toBe('iframe');
+    expect(state.fallbackVideoId).toBe('vid11111111');
+    expect(state.status).toBe('loading');
+    expect(state.notice).toBe(strings.fallbackNotice);
+    expect(state.errorMessage).toBeNull();
     // TIDAK pindah otomatis: lagu yang sama tetap di depan.
     expect(state.orderPos).toBe(0);
     expect(state.queue).toHaveLength(2);
     expect(service.debugState().retryLadder).toBeNull();
-    // "Coba lagi" manual tetap jalan sesudah jendela pulih.
+    // "Coba cara biasa lagi" tetap jalan sesudah jendela pulih:
+    // keluar dari mode fallback, pemutaran normal berlanjut.
     behavior = () => ({ playability: 'OK', withUrl: true });
-    await drive(service.retry(), 30_000);
+    await drive(service.retryNormalPlayback(), 30_000);
+    expect(usePlayerStore.getState().fallbackMode).toBeNull();
     expect(usePlayerStore.getState().status).toBe('playing');
     expect(port.loadedUrls).toEqual([STREAM_URL]);
     // I27: batas 60 dtk (tes ini memajukan ~400 dtk jam palsu +

@@ -43,6 +43,19 @@ const MEDIA_TIMEOUT_MS = 120000;
 const RATE_INNERTUBE_PER_MIN = 60;
 const RATE_MEDIA_PER_MIN = 10;
 const RATE_SPOTIFY_PER_MIN = 10;
+// /api/resolve-cache (P3): GET dibaca app saat resolve langsung
+// gagal (batas sama dengan innertube: 60/menit/IP); POST hanya
+// dari populator koordinator (kunci rahasia + 10/menit/IP).
+const RATE_CACHE_READ_PER_MIN = 60;
+const RATE_CACHE_WRITE_PER_MIN = 10;
+// Cap body POST cache: satu entri (URL googlevideo + metadata)
+// tidak pernah sebesar ini; 8 KB sudah longgar.
+const CACHE_BODY_CAP = 8 * 1024;
+// Umur maksimum entri yang diterima POST: 24 jam. URL googlevideo
+// biasanya berlaku ~6 jam; batas ini hanya jaring pengaman
+// terhadap nilai expire yang ngawur.
+const CACHE_MAX_TTL_S = 24 * 60 * 60;
+const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // /api/spotify-page (P8): halaman playlist publik Spotify, diambil
 // worker karena browser tidak bisa langsung (tanpa header CORS).
 // Ukuran nyata ~515 KB (probe 19 Nov 2026); cap 2 MB + timeout
@@ -99,6 +112,19 @@ function corsHeaders(env, request) {
   const h = { 'Vary': 'Origin' };
   if (allowed.includes(origin)) h['Access-Control-Allow-Origin'] = origin;
   return h;
+}
+
+// Bandingkan dua string dalam waktu yang tidak bergantung pada
+// posisi beda pertama (menghindari tebakan kunci lewat timing).
+// Dipakai untuk X-Cache-Key (POST /api/resolve-cache).
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 function jsonError(status, code, message, extraHeaders = {}) {
@@ -167,7 +193,7 @@ export default {
           headers: {
             ...cors,
             'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, X-YouTube-Client-Name, X-YouTube-Client-Version, Range',
+            'Access-Control-Allow-Headers': 'Content-Type, X-YouTube-Client-Name, X-YouTube-Client-Version, X-Cache-Key, Range',
             'Access-Control-Max-Age': '86400',
           },
         }));
@@ -485,6 +511,179 @@ export default {
         resHeaders.set('Content-Type', 'application/json');
         mark(t0);
         return withCpu(new Response(read.bytes, { status: upstream.status, headers: resHeaders }));
+      }
+
+      // ---- /api/resolve-cache: cache URL stream di D1 (P3) ----
+      // Mengapa di worker proxy, bukan sync: proxy SUDAH memegang
+      // binding D1 + rate limit + validasi Origin yang sama, dan
+      // cache adalah bagian dari jalur resolve (yang dilayani
+      // proxy). Worker sync adalah soal akun/sinkronisasi; cache
+      // URL publik tidak ada hubungannya dengan akun.
+      //
+      // GET ?videoId=... : dibaca app saat resolve langsung gagal.
+      // Hanya entri yang BELUM kedaluwarsa yang dilayani
+      // (expires_at > sekarang, difilter di SQL); app memeriksa
+      // lagi di sisi client sebelum memutar. Entri hilang atau
+      // kedaluwarsa -> 404 CACHE_MISS (bukan galat).
+      // POST: hanya populator koordinator. Wajib header
+      // X-Cache-Key == secret RESOLVE_CACHE_KEY (wrangler secret;
+      // bila secret belum disetel, SEMUA tulis ditolak 503).
+      // Body JSON: { videoId, streamUrl, itag, bitrate?, client,
+      // title?, expiresAt, resolvedAt } (epoch detik). streamUrl
+      // WAJIB https + *.googlevideo.com; expiresAt wajib di masa
+      // depan dan <= 24 jam dari sekarang. Hasil gagal TIDAK
+      // PERNAH di-cache (populator hanya mengirim hasil resolve
+      // yang berhasil membawa format audio).
+      if (url.pathname === '/api/resolve-cache') {
+        if (request.method === 'GET') {
+          const videoId = url.searchParams.get('videoId') || '';
+          if (!VIDEO_ID_RE.test(videoId)) {
+            mark(t0);
+            return withCpu(jsonError(400, 'BAD_VIDEO_ID', 'videoId tidak valid (11 karakter)', cors));
+          }
+          if (await checkRateLimit(env, `cache:${ip}`, RATE_CACHE_READ_PER_MIN)) {
+            mark(t0);
+            const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak permintaan, coba lagi sebentar', cors);
+            r.headers.set('Retry-After', '60');
+            return withCpu(r);
+          }
+          if (!env.DB) {
+            mark(t0);
+            return withCpu(jsonError(503, 'CACHE_UNAVAILABLE', 'Cache belum tersedia', cors));
+          }
+          mark(t0);
+          const nowS = Math.floor(Date.now() / 1000);
+          let row = null;
+          try {
+            row = await env.DB.prepare(
+              'SELECT video_id, stream_url, itag, bitrate, client, title, expires_at, resolved_at ' +
+              'FROM resolve_cache WHERE video_id = ? AND expires_at > ?',
+            ).bind(videoId, nowS).first();
+          } catch (e) {
+            console.warn('resolve-cache GET: D1 gagal:', e instanceof Error ? e.message : 'unknown');
+            mark(t0);
+            return withCpu(jsonError(503, 'CACHE_UNAVAILABLE', 'Cache belum tersedia', cors));
+          }
+          t0 = performance.now();
+          if (!row) {
+            mark(t0);
+            return withCpu(jsonError(404, 'CACHE_MISS', 'Tidak ada simpanan untuk lagu ini', cors));
+          }
+          const resHeaders = new Headers(cors);
+          resHeaders.set('Content-Type', 'application/json');
+          mark(t0);
+          return withCpu(new Response(JSON.stringify({
+            success: true,
+            data: {
+              videoId: row.video_id,
+              streamUrl: row.stream_url,
+              itag: row.itag,
+              bitrate: row.bitrate,
+              client: row.client,
+              title: row.title,
+              expiresAt: row.expires_at,
+              resolvedAt: row.resolved_at,
+            },
+          }), { status: 200, headers: resHeaders }));
+        }
+        if (request.method === 'POST') {
+          const secret = env.RESOLVE_CACHE_KEY || '';
+          if (!secret) {
+            mark(t0);
+            return withCpu(jsonError(503, 'CACHE_WRITE_DISABLED', 'Tulis cache belum dikonfigurasi', cors));
+          }
+          if (!safeEqual(request.headers.get('X-Cache-Key') || '', secret)) {
+            mark(t0);
+            return withCpu(jsonError(401, 'UNAUTHORIZED', 'Kunci cache tidak valid', cors));
+          }
+          if (await checkRateLimit(env, `cache-write:${ip}`, RATE_CACHE_WRITE_PER_MIN)) {
+            mark(t0);
+            const r = jsonError(429, 'RATE_LIMITED', 'Terlalu banyak permintaan, coba lagi sebentar', cors);
+            r.headers.set('Retry-After', '60');
+            return withCpu(r);
+          }
+          if (!env.DB) {
+            mark(t0);
+            return withCpu(jsonError(503, 'CACHE_UNAVAILABLE', 'Cache belum tersedia', cors));
+          }
+          const declaredLen = Number(request.headers.get('Content-Length') || 0);
+          if (declaredLen > CACHE_BODY_CAP) {
+            mark(t0);
+            return withCpu(jsonError(413, 'BODY_TOO_BIG', 'Body request melewati 8 KB', cors));
+          }
+          let bodyBytes;
+          if (request.body) {
+            const read = await readCapped(request.body, CACHE_BODY_CAP);
+            t0 = performance.now();
+            if (read.tooBig) {
+              mark(t0);
+              return withCpu(jsonError(413, 'BODY_TOO_BIG', 'Body request melewati 8 KB', cors));
+            }
+            bodyBytes = read.bytes;
+          } else {
+            bodyBytes = new Uint8Array(0);
+          }
+          let body;
+          try {
+            body = JSON.parse(new TextDecoder().decode(bodyBytes));
+          } catch {
+            mark(t0);
+            return withCpu(jsonError(400, 'BAD_JSON', 'Body bukan JSON yang valid', cors));
+          }
+          const nowS = Math.floor(Date.now() / 1000);
+          const videoId = typeof body?.videoId === 'string' ? body.videoId : '';
+          const streamUrl = typeof body?.streamUrl === 'string' ? body.streamUrl : '';
+          const itag = body?.itag;
+          const bitrate = body?.bitrate ?? null;
+          const client = typeof body?.client === 'string' ? body.client : '';
+          const title = typeof body?.title === 'string' ? body.title : '';
+          const expiresAt = body?.expiresAt;
+          const resolvedAt = body?.resolvedAt;
+          let urlOk = false;
+          try {
+            const dest = new URL(streamUrl);
+            urlOk = dest.protocol === 'https:' && dest.hostname.endsWith('.googlevideo.com');
+          } catch {
+            urlOk = false;
+          }
+          if (
+            !VIDEO_ID_RE.test(videoId) ||
+            !urlOk ||
+            !Number.isInteger(itag) || itag < 0 || itag > 9999 ||
+            (bitrate !== null && (!Number.isInteger(bitrate) || bitrate < 0)) ||
+            client.length === 0 || client.length > 32 ||
+            title.length > 200 ||
+            !Number.isInteger(expiresAt) || expiresAt <= nowS || expiresAt > nowS + CACHE_MAX_TTL_S ||
+            !Number.isInteger(resolvedAt) || resolvedAt <= 0 || resolvedAt > nowS + 60
+          ) {
+            mark(t0);
+            return withCpu(jsonError(400, 'BAD_ENTRY', 'Entri cache tidak valid', cors));
+          }
+          mark(t0);
+          try {
+            await env.DB.prepare(
+              'INSERT OR REPLACE INTO resolve_cache ' +
+              '(video_id, stream_url, itag, bitrate, client, title, expires_at, resolved_at) ' +
+              'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            ).bind(videoId, streamUrl, itag, bitrate, client, title, expiresAt, resolvedAt).run();
+            // Sapu oportunistik: hapus entri kedaluwarsa tiap
+            // tulis (satu pernyataan, tabel kecil).
+            await env.DB.prepare(
+              'DELETE FROM resolve_cache WHERE expires_at <= ?',
+            ).bind(nowS).run();
+          } catch (e) {
+            console.warn('resolve-cache POST: D1 gagal:', e instanceof Error ? e.message : 'unknown');
+            mark(t0);
+            return withCpu(jsonError(503, 'CACHE_UNAVAILABLE', 'Cache belum tersedia', cors));
+          }
+          t0 = performance.now();
+          const resHeaders = new Headers(cors);
+          resHeaders.set('Content-Type', 'application/json');
+          mark(t0);
+          return withCpu(new Response(JSON.stringify({ success: true }), { status: 200, headers: resHeaders }));
+        }
+        mark(t0);
+        return withCpu(jsonError(405, 'METHOD_NOT_ALLOWED', 'Metode tidak diizinkan', cors));
       }
 
       mark(t0);

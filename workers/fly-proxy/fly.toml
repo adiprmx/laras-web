@@ -1,0 +1,33 @@
+# Laras Web — proxy InnerTube player via Fly.io (egress keempat).
+# Cermin byte-only workers/render-proxy/server.js, diadaptasi ke
+# Fly Machines. Free tier: 1 machine shared-cpu-1x 256MB,
+# auto-stop saat idle (min_machines_running = 0), region sin
+# (Singapura, terdekat). App: laras-proxy-fly.
+app = "laras-proxy-fly"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  path = "/healthz"
+  timeout = "5s"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1

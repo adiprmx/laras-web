@@ -22,6 +22,11 @@ ALLOWED_ORIGINS = "https://laras.adipmusic.my.id,https://preview.laras-web.pages
 # tabel rate_limits dari workers/sync/0002_ratelimit.sql. Redeploy
 # via API WAJIB membawa binding ini di metadata (lihat README) —
 # tanpa binding, rate limit nonaktif (fail-open + warning di log).
+#
+# Secret (BUKAN di sini — via `wrangler secret put` atau API):
+#   RESOLVE_CACHE_KEY — kunci tulis POST /api/resolve-cache (P3).
+#   Tanpa secret ini, SEMUA tulis cache ditolak 503; GET tetap jalan.
+#   Nilai yang sama dipakai populator cache (koordinator yang pegang).
 [[d1_databases]]
 binding = "DB"
 database_name = "laras-web-sync"

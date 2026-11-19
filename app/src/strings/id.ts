@@ -209,6 +209,20 @@ export const strings = {
   // menolak + pesan akhir sesudah tangga habis (tanpa janji).
   retryLimitingAuto: 'YouTube sedang membatasi, mencoba lagi otomatis.',
   retryExhausted: 'YouTube masih membatasi. Coba lagi nanti.',
+  seek: 'Geser posisi lagu',
+  // Fallback pemutar YouTube (P3): dipakai hanya sesudah cara
+  // biasa + simpanan gagal. Bahasa sehari-hari, tanpa jargon.
+  fallbackNotice:
+    'Lagu diputar lewat pemutar YouTube karena cara biasa sedang tidak bisa.',
+  fallbackTitle: 'Memutar dengan cara lain',
+  fallbackPlayingVia: 'Diputar lewat pemutar YouTube',
+  fallbackLimits:
+    'Selama pakai cara ini, lagu berhenti kalau layar dikunci atau app ditutup, tidak bisa diunduh, dan pengatur suara tidak bisa dipakai.',
+  fallbackRetryNormal: 'Coba cara biasa lagi',
+  fallbackLoading: 'Memuat pemutar YouTube…',
+  fallbackFailed:
+    'Pemutar YouTube tidak bisa dimuat. Periksa koneksi internet kamu, lalu coba lagi.',
+  fallbackExpand: 'Lihat pemutar lebih besar',
   // Banner status (P6)
   statusInfoTitle: 'Pengaturan lagu memakai cadangan',
   statusInfoBody: 'App belum bisa mengambil pengaturan terbaru. Lagu tetap bisa diputar.',

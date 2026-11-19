@@ -34,6 +34,15 @@ export interface PlayerState {
   volume: number;
   /** Jalur audio lagu saat ini (null bila belum ada lagu). */
   audioPath: AudioPath | null;
+  /**
+   * Mode fallback pemutar YouTube (P3): 'iframe' bila lagu
+   * diputar lewat pemutar YouTube karena cara biasa + simpanan
+   * gagal; null bila pemutaran normal. Komponen
+   * IframeFallbackPlayer mount hanya saat ini 'iframe'.
+   */
+  fallbackMode: 'iframe' | null;
+  /** videoId yang diputar pemutar YouTube (null bila tidak ada). */
+  fallbackVideoId: string | null;
   /** Pesan galat untuk pengguna (null bila tidak ada). */
   errorMessage: string | null;
   /** Pesan info singkat (mis. putar otomatis diblokir browser). */
@@ -62,6 +71,8 @@ export const usePlayerStore = create<PlayerState>()((set) => ({
   rate: 1,
   volume: 1,
   audioPath: null,
+  fallbackMode: null,
+  fallbackVideoId: null,
   errorMessage: null,
   notice: null,
   fullPlayerOpen: false,

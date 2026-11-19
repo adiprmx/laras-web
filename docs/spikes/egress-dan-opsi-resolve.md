@@ -96,12 +96,19 @@ vonis live-nya lolos.
   `docs/vercel-egress.md`. Jebakan: Deployment Protection SSO aktif
   default untuk proyek baru via API (dimatikan via PATCH hanya untuk
   proyek ini); egress VM → Vercel lambat + flapping (15–23 dtk).
-- **Netlify / Render / Fly.io / Deno Deploy**: BELUM DIUJI —
+- **Render**: DITOLAK (19 Nov 2026, 22:33 WIB) — 0 OK / 18
+  ditolak lintas dua siklus probe (siklus 3 tak meyakinkan
+  karena kedipan jendela; siklus 4 jendela buruk penuh:
+  CF sebelum 2/2 ditolak, Render 9/9 LOGIN_REQUIRED,
+  CF sesudah 2/2 ditolak). Layanan `laras-proxy-render`
+  tetap live ($0) untuk uji ulang. Bukti lengkap:
+  `docs/render-egress.md`. Failover TIDAK dibangun.
+- **Netlify / Fly.io / Deno Deploy**: BELUM DIUJI —
   Deno Deploy dievaluasi (riset saja, `docs/vercel-egress.md`):
   plausibel tapi BELUM TERBUKTI (jaringan edge sendiri, 35+ region);
   butuh akun owner via GitHub + verifikasi laporan "Deno joining
   Cloudflare" (Okt 2026) dan outbound allowlist tier gratis untuk
-  youtube.com. Netlify/Render/Fly.io belum dievaluasi.
+  youtube.com. Netlify/Fly.io belum dievaluasi.
 - **Firebase Functions (proyek adip-promo, sudah ada)**: BELUM
   TERUJI — percobaan 18 Nov 2026 dibatasi waktu: CLI `firebase`
   tidak terinstal di VM; instalasi via npm/npx terblokir gelombang
