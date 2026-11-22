@@ -438,7 +438,14 @@ export default {
         }
         mark(t0);
         const upstream = await fetch(
-          `${YT_HOST}/s/player/${hash}/player_ias.vflset/en_US/base.js`,
+          // WAJIB player_es6: ekstraktor (playerScript.ts) + semua tes
+          // + fixture hanya mengenal pola varian es6. Varian lain
+          // (yang dulu dipakai di sini) punya struktur berbeda (tabel
+          // `aa` bukan `w`, call site multi-deklarator, kelas URL
+          // berupa fungsi) dan membuat buildPlayerScript gagal
+          // unknownPlayerHash di 5/5 lagu (22 Nov 2026). Jangan ganti
+          // varian tanpa menyesuaikan ekstraktor + tes regresi.
+          `${YT_HOST}/s/player/${hash}/player_es6.vflset/en_US/base.js`,
           { signal: AbortSignal.timeout(PLAYER_SCRIPT_TIMEOUT_MS) },
         );
         const read = await readCapped(upstream.body, PLAYER_SCRIPT_CAP);
