@@ -26,6 +26,7 @@ import {
 } from '../../backup/service';
 import { getDownloadManager } from '../../downloads/downloadManager';
 import { strings } from '../../strings/id';
+import Dialog from '../Dialog';
 import ImportReportView from './ImportReportView';
 
 function errorText(error: unknown): string {
@@ -136,18 +137,12 @@ export default function ImportBackupDialog({
   const done = report !== null;
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={strings.backupImportTitle}
-      data-testid="import-backup-dialog"
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center"
-      onClick={onClose}
+    <Dialog
+      title={strings.backupImportTitle}
+      onClose={onClose}
+      testId="import-backup-dialog"
+      maxHeight="85vh"
     >
-      <div
-        className="max-h-[85vh] w-full max-w-sm overflow-y-auto rounded-2xl border border-white/10 bg-zinc-900 p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
         <h2 className="text-base font-semibold text-zinc-100">
           {done ? strings.backupImportDoneTitle : strings.backupImportTitle}
         </h2>
@@ -301,7 +296,6 @@ export default function ImportBackupDialog({
             </div>
           </div>
         ) : null}
-      </div>
-    </div>
+    </Dialog>
   );
 }

@@ -19,7 +19,7 @@ ALLOWED_ORIGINS = "https://laras.adipmusic.my.id,https://preview.laras-web.pages
 
 # Rate limit D1 (Red 1 S3): binding `DB` dipakai checkRateLimit di
 # src/index.js. Database laras-web-sync sudah ada (migrasi 0001);
-# tabel rate_limits dari workers/sync/0002_ratelimit.sql. Redeploy
+# tabel rate_limits dari workers/sync/migrations/0002_ratelimit.sql. Redeploy
 # via API WAJIB membawa binding ini di metadata (lihat README) —
 # tanpa binding, rate limit nonaktif (fail-open + warning di log).
 #

@@ -13,6 +13,8 @@
 import { useState } from 'react';
 import { formatTime } from '../player/format';
 import { strings } from '../strings/id';
+import AppLink from './AppLink';
+import { coverSrcSet } from './coverSrc';
 
 interface TrackRowProps {
   title: string;
@@ -22,7 +24,11 @@ interface TrackRowProps {
   durationSeconds?: number;
   /** Tampilkan penanda "Tersimpan" (lagu sudah di Library/unduhan). */
   saved?: boolean;
-  onClick: () => void;
+  /** Aksi ketuk (putar). Bila `to` diisi, baris adalah tautan. */
+  onClick?: () => void;
+  /** P-Links: tujuan tautan (album/artis/playlist hasil cari). */
+  to?: string;
+  onNavigate?: (path: string) => void;
   testId?: string;
 }
 
@@ -33,58 +39,78 @@ export default function TrackRow({
   durationSeconds,
   saved,
   onClick,
+  to,
+  onNavigate,
   testId,
 }: TrackRowProps) {
   const [imgFailed, setImgFailed] = useState(false);
   const showImg = thumbnailUrl != null && !imgFailed;
-  return (
-    <li>
-      <button
-        type="button"
-        onClick={onClick}
-        data-testid={testId}
-        className="flex w-full items-center gap-3 py-2 text-left transition-colors hover:bg-white/5 active:bg-white/10"
-      >
-        {showImg ? (
-          <img
-            src={thumbnailUrl}
-            alt=""
-            width={48}
-            height={48}
-            loading="lazy"
-            decoding="async"
-            onError={() => setImgFailed(true)}
-            className="h-12 w-12 shrink-0 rounded-lg object-cover"
-          />
-        ) : (
-          <span
-            aria-hidden="true"
-            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-zinc-900 text-sm text-zinc-400"
-          >
-            {title.charAt(0)}
-          </span>
-        )}
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium text-zinc-100">
-            {title}
-          </span>
-          {subtitle ? (
-            <span className="block truncate text-xs text-zinc-400">
-              {subtitle}
-            </span>
-          ) : null}
-          {saved ? (
-            <span className="mt-0.5 inline-block rounded-full border border-white/15 px-2 py-px text-[11px] text-zinc-400">
-              {strings.savedLabel}
-            </span>
-          ) : null}
+  const cover = coverSrcSet(thumbnailUrl, '48px');
+  const rowClass =
+    'flex w-full items-center gap-3 py-2 text-left transition-colors hover:bg-white/5 active:bg-white/10';
+  // P-Links: baris tautan memakai AppLink (<a href> semantik);
+  // baris aksi tetap <button>. Isi di dalam identik.
+  const inner = (
+    <>
+      {showImg ? (
+        <img
+          src={thumbnailUrl}
+          srcSet={cover?.srcSet}
+          sizes={cover?.sizes}
+          alt=""
+          width={48}
+          height={48}
+          loading="lazy"
+          decoding="async"
+          onError={() => setImgFailed(true)}
+          className="h-12 w-12 shrink-0 rounded-lg object-cover"
+        />
+      ) : (
+        <span
+          aria-hidden="true"
+          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-zinc-900 text-sm text-zinc-400"
+        >
+          {title.charAt(0)}
         </span>
-        {durationSeconds != null && durationSeconds > 0 ? (
-          <span className="shrink-0 text-xs tabular-nums text-zinc-400">
-            {formatTime(durationSeconds)}
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-zinc-100">
+          {title}
+        </span>
+        {subtitle ? (
+          <span className="block truncate text-xs text-zinc-400">
+            {subtitle}
           </span>
         ) : null}
-      </button>
+        {saved ? (
+          <span className="mt-0.5 inline-block rounded-full border border-white/15 px-2 py-px text-[11px] text-zinc-400">
+            {strings.savedLabel}
+          </span>
+        ) : null}
+      </span>
+      {durationSeconds != null && durationSeconds > 0 ? (
+        <span className="shrink-0 text-xs tabular-nums text-zinc-400">
+          {formatTime(durationSeconds)}
+        </span>
+      ) : null}
+    </>
+  );
+  return (
+    <li>
+      {to && onNavigate ? (
+        <AppLink to={to} onNavigate={onNavigate} testId={testId} className={rowClass}>
+          {inner}
+        </AppLink>
+      ) : (
+        <button
+          type="button"
+          onClick={onClick}
+          data-testid={testId}
+          className={rowClass}
+        >
+          {inner}
+        </button>
+      )}
     </li>
   );
 }

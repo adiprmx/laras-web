@@ -4,6 +4,7 @@
  * hanya label sehari-hari + perkiraan ukuran.
  */
 import { strings } from '../../strings/id';
+import Dialog from '../Dialog';
 import {
   estimateDownloadBytes,
   formatBytes,
@@ -50,18 +51,12 @@ export default function DownloadQualityDialog({
   onCancel,
 }: DownloadQualityDialogProps) {
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={strings.downloadQualityTitle}
-      data-testid="download-quality-dialog"
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center"
-      onClick={onCancel}
+    <Dialog
+      title={strings.downloadQualityTitle}
+      onClose={onCancel}
+      testId="download-quality-dialog"
+      padding="sm"
     >
-      <div
-        className="w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900 p-3"
-        onClick={(e) => e.stopPropagation()}
-      >
         <h2 className="px-3 pb-1 pt-2 text-base font-semibold text-zinc-100">
           {strings.downloadQualityTitle}
         </h2>
@@ -103,7 +98,6 @@ export default function DownloadQualityDialog({
         >
           {strings.cancel}
         </button>
-      </div>
-    </div>
+    </Dialog>
   );
 }

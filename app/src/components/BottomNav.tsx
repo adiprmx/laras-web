@@ -8,6 +8,7 @@
  */
 import { Books, Download, House, MagnifyingGlass } from '@phosphor-icons/react';
 import { strings } from '../strings/id';
+import AppLink from './AppLink';
 
 export type NavCurrent =
   | 'home'
@@ -84,12 +85,12 @@ export default function BottomNav({ current, onNavigate }: BottomNavProps) {
         {ITEMS.map((item) => {
           const active = current === item.id;
           return (
-            <button
+            <AppLink
               key={item.id}
-              type="button"
-              onClick={() => onNavigate(item.path)}
-              aria-current={active ? 'page' : undefined}
-              data-testid={item.testId}
+              to={item.path}
+              onNavigate={onNavigate}
+              ariaCurrent={active ? 'page' : undefined}
+              testId={item.testId}
               className={`flex min-w-[64px] flex-1 flex-col items-center justify-center gap-0.5 transition-colors active:scale-95 min-[840px]:h-14 min-[840px]:w-14 min-[840px]:flex-none min-[840px]:rounded-xl ${
                 active
                   ? 'text-zinc-100 min-[840px]:bg-white/10'
@@ -106,7 +107,7 @@ export default function BottomNav({ current, onNavigate }: BottomNavProps) {
                   active ? 'opacity-100' : 'opacity-0'
                 }`}
               />
-            </button>
+            </AppLink>
           );
         })}
       </div>

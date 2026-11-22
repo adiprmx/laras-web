@@ -151,7 +151,7 @@ export function extractSignatureTimestamp(baseJs: string): number | null {
 }
 
 /**
- * Ekstrak tabel string `w` dari base.js.
+ * Ekstrak tabel string dari base.js beserta nama variabelnya.
  *
  * Bentuk lama (s.d. fad7e4e9): `w='...'.split(";");` - kutip tunggal,
  * delimiter `;`. Bentuk baru (17 Nov 2026): `w="...".split("X");` -
@@ -159,14 +159,31 @@ export function extractSignatureTimestamp(baseJs: string): number | null {
  * b559f50c). Kedua bentuk diterima (lama dulu). Isi minimal 100 karakter
  * supaya tidak salah cocok dengan string pendek lain; `\"` di dalam isi
  * ditangani. Bila tidak ada yang cocok, kembalikan null.
+ *
+ * Nama variabel TIDAK diasumsikan `w`: varian build `player_ias`
+ * (b559f50c, live 22 Nov 2026) memakai `aa`, dan seluruh pola turunan
+ * (`aa[N]`) memakai nama yang dikembalikan di sini.
  */
-export function extractStringTable(baseJs: string): string | null {
-  const legacy = /w='[^']*'\.split\(";"\);/.exec(baseJs);
-  if (legacy) return legacy[0];
-  const current = /w="(?:\\.|[^"\\]){100,}"\.split\("[^"]{1,3}"\);/.exec(
+export function extractStringTableInfo(baseJs: string): {
+  statement: string;
+  varName: string;
+} | null {
+  const legacy = /([A-Za-z_$][A-Za-z0-9_$]*)='[^']*'\.split\(";"\);/.exec(
     baseJs,
   );
-  return current ? current[0] : null;
+  if (legacy) return { statement: legacy[0], varName: legacy[1] };
+  const current =
+    /([A-Za-z_$][A-Za-z0-9_$]*)="(?:\\.|[^"\\]){100,}"\.split\("[^"]{1,3}"\);/.exec(
+      baseJs,
+    );
+  return current
+    ? { statement: current[0], varName: current[1] }
+    : null;
+}
+
+export function extractStringTable(baseJs: string): string | null {
+  const info = extractStringTableInfo(baseJs);
+  return info ? info.statement : null;
 }
 
 /**
@@ -178,12 +195,14 @@ export function extractStringTable(baseJs: string): string | null {
 export function parseStringTable(
   tableStatement: string,
 ): string[] | null {
-  if (!tableStatement.startsWith('w=')) return null;
-  if (tableStatement.length < 3) return null;
-  const quote = tableStatement[2];
+  // Nama variabel boleh apa saja (w/aa/...).
+  const head = /^([A-Za-z_$][A-Za-z0-9_$]*)=/.exec(tableStatement);
+  if (!head) return null;
+  if (tableStatement.length < head[0].length + 1) return null;
+  const quote = tableStatement[head[0].length];
   if (quote !== '"' && quote !== "'") return null;
   let content = '';
-  let i = 3;
+  let i = head[0].length + 1;
   while (i < tableStatement.length) {
     const ch = tableStatement[i];
     if (ch === '\\') {
@@ -288,9 +307,13 @@ function extractBraced(source: string, start: number): string | null {
   return null;
 }
 
-/** Pola rantai signature di call site: `TEMP = TENGAH(a,b,DALAM(a,b,X.s))`. */
+/** Pola rantai signature di call site: `TEMP = TENGAH(a,b,DALAM(a,b,X.s))`.
+ *
+ * Temp boleh dideklarasi lewat koma-deklarator
+ * (`var m=l,n=h.sp,p=Go(...)` di player_ias) dan spasi sesudah koma
+ * di argumen numerik ditoleransi. Grup tangkap 1-7 tidak berubah. */
 const kSigChainPattern =
-  /(?:var|let|const)\s+([A-Za-z0-9_$]+)\s*=\s*([A-Za-z0-9_$]+)\((\d+),(\d+),([A-Za-z0-9_$]+)\((\d+),(\d+),[A-Za-z0-9_$]+\.s\)\)/;
+  /(?:var|let|const)\s+(?:[A-Za-z0-9_$]+\s*=\s*[^,;]+,\s*)*([A-Za-z0-9_$]+)\s*=\s*([A-Za-z0-9_$]+)\(\s*(\d+)\s*,\s*(\d+)\s*,\s*([A-Za-z0-9_$]+)\(\s*(\d+)\s*,\s*(\d+)\s*,\s*[A-Za-z0-9_$]+\.s\s*\)\s*\)/;
 
 /**
  * Ekstrak rantai signature dari call site di base.js.
@@ -302,7 +325,10 @@ const kSigChainPattern =
  * ```
  * Mengembalikan null bila pola tidak cocok (player berubah).
  */
-export function extractSigCallSite(baseJs: string): SigCallSite | null {
+export function extractSigCallSite(
+  baseJs: string,
+  tableVar = 'w',
+): SigCallSite | null {
   // Langkah 1: temp = TENGAH(a,b,DALAM(a,b,X.s))
   const chain = kSigChainPattern.exec(baseJs);
   if (!chain) return null;
@@ -330,7 +356,7 @@ export function extractSigCallSite(baseJs: string): SigCallSite | null {
   const searchEnd = Math.min(chain.index + chain[0].length + 500, baseJs.length);
   const windowText = baseJs.substring(chain.index + chain[0].length, searchEnd);
   const outerPattern = new RegExp(
-    `[A-Za-z0-9_$]+\\[w\\[(\\d+)\\]\\]\\([A-Za-z0-9_$]+,` +
+    `[A-Za-z0-9_$]+\\[${escapeRegExp(tableVar)}\\[(\\d+)\\]\\]\\([A-Za-z0-9_$]+,` +
       `([A-Za-z0-9_$]+)\\((\\d+),(\\d+),${escapeRegExp(tempVar)}\\)\\)`,
   );
   const outer = outerPattern.exec(windowText);
@@ -347,7 +373,7 @@ export function extractSigCallSite(baseJs: string): SigCallSite | null {
   // dipakai sebagai `IDENT[w[...]]` dan bukan parameter/lokal.
   const middleBody = extractFunction(baseJs, middleName);
   if (middleBody === null) return null;
-  const helper = findHelperObject(middleBody);
+  const helper = findHelperObject(middleBody, tableVar);
   if (helper === null) return null;
 
   return {
@@ -371,10 +397,16 @@ export function extractSigCallSite(baseJs: string): SigCallSite | null {
  * deklarator `var`/`let`/`const` termasuk yang sesudah koma, parameter
  * `catch`/arrow).
  */
-function findHelperObject(functionBody: string): string | null {
+function findHelperObject(
+  functionBody: string,
+  tableVar = 'w',
+): string | null {
   const blanked = blankJsCode(functionBody);
   const locals = collectJsLocals(blanked);
-  const usePattern = /([A-Za-z0-9_$]+)\[w\[/g;
+  const usePattern = new RegExp(
+    '([A-Za-z0-9_$]+)\\[' + escapeRegExp(tableVar) + '\\[',
+    'g',
+  );
   for (const m of blanked.matchAll(usePattern)) {
     const name = m[1];
     if (!locals.has(name)) return name;
@@ -887,19 +919,28 @@ function collectJsLocals(blanked: string): Set<string> {
  * jalur hidup - mengejarnya menggelembungkan prelude dari 20 menjadi
  * 95 definisi (terukur di ad8d59ae) tanpa manfaat.
  */
-function findJsReferences(definition: string): Set<string> {
+function findJsReferences(
+  definition: string,
+  tableVar = 'w',
+): Set<string> {
   const blanked = blankJsCode(definition);
   const locals = collectJsLocals(blanked);
   const refs = new Set<string>();
-  const usePattern =
-    /([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:\[w\[|\?\.\[w\[|\(|\?\.\()/g;
+  const usePattern = new RegExp(
+    '([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?:\\[' +
+      escapeRegExp(tableVar) +
+      '\\[|\\?\\.\\[' +
+      escapeRegExp(tableVar) +
+      '\\[|\\(|\\?\\.\\()',
+    'g',
+  );
   for (const m of blanked.matchAll(usePattern)) {
     const name = m[1];
     if (
       kJsKeywords.has(name) ||
       kJsBuiltinGlobals.has(name) ||
       locals.has(name) ||
-      name === 'w'
+      name === tableVar
     ) {
       continue;
     }
@@ -970,6 +1011,7 @@ function collectTransitiveDependencies(
   baseJs: string,
   seeds: Map<string, string>,
   initialBytes = 0,
+  tableVar = 'w',
 ): Map<string, string> {
   const collected = new Map<string, string>(seeds);
   let totalBytes = initialBytes;
@@ -990,7 +1032,7 @@ function collectTransitiveDependencies(
   let head = 0;
   while (head < queue.length && collected.size < kMaxPreludeDependencies) {
     const definition = collected.get(queue[head++]) as string;
-    for (const ref of findJsReferences(definition)) {
+    for (const ref of findJsReferences(definition, tableVar)) {
       if (collected.has(ref)) continue;
       const refDef = extractDefinition(baseJs, ref);
       if (refDef === null) continue;
@@ -1029,11 +1071,14 @@ export function extractClassDefinition(
  * Cadangan: satu-satunya metode di luar {constructor, set, get, clone,
  * ...} - nama-nama yang sudah pasti bukan serializer.
  */
-function findUrlSerializeMethod(classBody: string): string | null {
-  const cached =
-    /([A-Za-z0-9_$]+)\(\)\{this\[w\[(\d+)\]\]\|\|\(this\[w\[\2\]\]=[A-Za-z0-9_$]+\(\d+,\d+,this\)\);return this\[w\[\2\]\]\}/.exec(
-      classBody,
-    );
+function findUrlSerializeMethod(
+  classBody: string,
+  tableVar = 'w',
+): string | null {
+  const tv = escapeRegExp(tableVar);
+  const cached = new RegExp(
+    `([A-Za-z0-9_$]+)\\(\\)\\{this\\[${tv}\\[(\\d+)\\]\\]\\|\\|\\(this\\[${tv}\\[\\2\\]\\]=[A-Za-z0-9_$]+\\(\\d+,\\d+,this\\)\\);return this\\[${tv}\\[\\2\\]\\]\\}`,
+  ).exec(classBody);
   if (cached) return cached[1];
   const notSerializer = new Set([
     'constructor',
@@ -1088,6 +1133,7 @@ function extractUrlInfo(
   baseJs: string,
   callSite: SigCallSite,
   table: string[],
+  tableVar = 'w',
 ): UrlInfo | null {
   const setIndex = callSite.setMethodTableIndex;
   if (setIndex < 0 || setIndex >= table.length) return null;
@@ -1113,8 +1159,41 @@ function extractUrlInfo(
     return null;
   }
   const classBody = extractClassDefinition(baseJs, className);
-  if (classBody === null) return null;
-  const serializeMethod = findUrlSerializeMethod(classBody);
+  let serializeMethod: string | null = null;
+  if (classBody !== null) {
+    serializeMethod = findUrlSerializeMethod(classBody, tableVar);
+  } else {
+    // Fallback player_ias: tidak ada `g.X=class` sama sekali di build
+    // ini - metode dilekatkan ke prototipe:
+    // `g.Rs[aa[21]][aa[71]]=function(){this[aa[25]]||(...);...}`.
+    // Nama metode dibaca dari tabel (indeks grup 2).
+    const tv = escapeRegExp(tableVar);
+    const proto = new RegExp(
+      'g\\.' +
+        escapeRegExp(className) +
+        '\\[' +
+        tv +
+        '\\[(\\d+)\\]\\]\\[' +
+        tv +
+        '\\[(\\d+)\\]\\]=function\\(\\)\\{this\\[' +
+        tv +
+        '\\[(\\d+)\\]\\]\\|\\|\\(this\\[' +
+        tv +
+        '\\[\\3\\]\\]=[A-Za-z0-9_$]+\\(\\d+,\\d+,this\\)\\);return this\\[' +
+        tv +
+        '\\[\\3\\]\\]\\}',
+    ).exec(baseJs);
+    if (proto) {
+      const methodIndex = tryParseInt64(proto[2]);
+      if (
+        methodIndex !== null &&
+        methodIndex >= 0 &&
+        methodIndex < table.length
+      ) {
+        serializeMethod = table[methodIndex];
+      }
+    }
+  }
   if (serializeMethod === null) return null;
   if (!kJsIdentifierFullPattern.test(serializeMethod)) {
     return null;
@@ -1138,8 +1217,10 @@ export function buildPlayerScript(
 ): PlayerScript {
   const hash = extractPlayerHash(jsUrl);
   const sts = extractSignatureTimestamp(baseJs);
-  const callSite = extractSigCallSite(baseJs);
-  const table = extractStringTable(baseJs);
+  const tableInfo = extractStringTableInfo(baseJs);
+  const table = tableInfo === null ? null : tableInfo.statement;
+  const tableVar = tableInfo === null ? 'w' : tableInfo.varName;
+  const callSite = extractSigCallSite(baseJs, tableVar);
   const tableTokens = table === null ? null : parseStringTable(table);
   if (
     hash === null ||
@@ -1173,7 +1254,7 @@ export function buildPlayerScript(
         'tidak ketemu di base.js',
     );
   }
-  const urlInfo = extractUrlInfo(baseJs, callSite, tableTokens);
+  const urlInfo = extractUrlInfo(baseJs, callSite, tableTokens, tableVar);
   if (urlInfo === null) {
     throw new ExtractorException(
       'unknownPlayerHash',
@@ -1198,6 +1279,7 @@ export function buildPlayerScript(
     // Cap byte mengukur TOTAL prelude: pernyataan tabel dihitung
     // sebagai byte awal (alias `g` + pemisah < 200 byte, diabaikan).
     utf8ByteLength(table),
+    tableVar,
   );
   const preludeParts: string[] = [table];
   // Alias parameter IIFE: base.js berjalan sebagai

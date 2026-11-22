@@ -214,7 +214,7 @@ class FakeD1 {
 
   runSql(sql: string, v: unknown[]): void {
     this.lastChanges = 0;
-    // Rate limit (proxy rateLimit.js).
+    // Rate limit (shared rateLimit.js).
     if (sql.startsWith('INSERT INTO rate_limits')) {
       const k = `${String(v[0])}|${Number(v[1])}`;
       this.rateLimits.set(k, (this.rateLimits.get(k) ?? 0) + 1);
@@ -505,6 +505,30 @@ class FakeD1 {
       let n = 0;
       for (const [id, s] of [...this.sessions]) {
         if (s.user_id === String(v[0])) {
+          this.sessions.delete(id);
+          n++;
+        }
+      }
+      this.lastChanges = n;
+      return;
+    }
+    // P-Auth: rotasi sesi (hapus berdasarkan hash token).
+    if (sql.startsWith('DELETE FROM sessions WHERE token_hash = ?')) {
+      let n = 0;
+      for (const [id, s] of [...this.sessions]) {
+        if (s.token_hash === String(v[0])) {
+          this.sessions.delete(id);
+          n++;
+        }
+      }
+      this.lastChanges = n;
+      return;
+    }
+    // P-Auth: sapu malas sesi kedaluwarsa.
+    if (sql.startsWith('DELETE FROM sessions WHERE expires_at < ?')) {
+      let n = 0;
+      for (const [id, s] of [...this.sessions]) {
+        if (s.expires_at < Number(v[0])) {
           this.sessions.delete(id);
           n++;
         }
@@ -887,6 +911,8 @@ class FakeD1 {
   }
 
   firstSql(sql: string, v: unknown[]): unknown {
+    // P-Health: cek /health.
+    if (sql.startsWith('SELECT 1')) return { ok: 1 };
     if (sql.startsWith('SELECT count FROM rate_limits')) {
       const count = this.rateLimits.get(`${String(v[0])}|${Number(v[1])}`);
       return count === undefined ? null : { count };
@@ -1330,6 +1356,17 @@ async function sha256Hex(text: string): Promise<string> {
     .join('');
 }
 
+/** Challenge PKCE S256 yang diharapkan dari satu verifier (P-Auth). */
+async function pkceChallengeOf(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(verifier),
+  );
+  let s = '';
+  for (const b of new Uint8Array(digest)) s += String.fromCharCode(b);
+  return btoa(s).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+}
+
 /** Buat pengguna + sesi langsung di D1 palsu; kembalikan header Cookie. */
 async function seedSession(
   db: FakeD1,
@@ -1511,6 +1548,77 @@ describe('Worker sync: /api/auth/me', () => {
     expect(body.data.provider).toBe('google');
   });
 
+  it('P-SameSite: rate limit /me memakai IP terusan bila secret cocok', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db, { PROXY_SECRET: 'rahasia-uji' });
+    const { cookie } = await seedSession(db);
+    const me = (forwardedIp: string, secret?: string) =>
+      call(env, '/api/auth/me', {
+        headers: {
+          Cookie: cookie,
+          // Semua request datang dari SATU IP egress proxy.
+          'CF-Connecting-IP': '192.0.2.1',
+          'X-Laras-Forwarded-IP': forwardedIp,
+          ...(secret ? { 'X-Laras-Proxy-Secret': secret } : {}),
+        },
+      });
+    // 60 request dari IP terusan A -> semua 200.
+    for (let i = 0; i < 60; i++) {
+      expect((await me('203.0.113.10', 'rahasia-uji')).status).toBe(200);
+    }
+    // Ke-61 dari A -> 429.
+    expect((await me('203.0.113.10', 'rahasia-uji')).status).toBe(429);
+    // IP terusan B (egress proxy sama) -> masih 200: bucket
+    // dihitung per IP terusan, bukan per IP egress.
+    expect((await me('203.0.113.11', 'rahasia-uji')).status).toBe(200);
+  });
+
+  it('P-SameSite: IP terusan diabaikan tanpa secret yang cocok', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db, { PROXY_SECRET: 'rahasia-uji' });
+    const { cookie } = await seedSession(db);
+    const me = (forwardedIp: string, secret?: string) =>
+      call(env, '/api/auth/me', {
+        headers: {
+          Cookie: cookie,
+          'CF-Connecting-IP': '192.0.2.1',
+          'X-Laras-Forwarded-IP': forwardedIp,
+          ...(secret ? { 'X-Laras-Proxy-Secret': secret } : {}),
+        },
+      });
+    // 60 request dengan IP terusan BERBEDA-BEDA tapi tanpa
+    // secret (lalu dengan secret SALAH) -> semuanya masuk
+    // bucket IP egress yang sama.
+    for (let i = 0; i < 30; i++) {
+      expect((await me(`203.0.113.${i + 1}`)).status).toBe(200);
+    }
+    for (let i = 30; i < 60; i++) {
+      expect((await me(`203.0.113.${i + 1}`, 'rahasia-salah')).status).toBe(
+        200,
+      );
+    }
+    expect((await me('203.0.113.200')).status).toBe(429);
+  });
+
+  it('P-SameSite: tanpa PROXY_SECRET terpasang, IP terusan diabaikan', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie } = await seedSession(db);
+    const me = (forwardedIp: string) =>
+      call(env, '/api/auth/me', {
+        headers: {
+          Cookie: cookie,
+          'CF-Connecting-IP': '192.0.2.1',
+          'X-Laras-Forwarded-IP': forwardedIp,
+          'X-Laras-Proxy-Secret': 'apa-pun',
+        },
+      });
+    for (let i = 0; i < 60; i++) {
+      expect((await me(`203.0.113.${i + 1}`)).status).toBe(200);
+    }
+    expect((await me('203.0.113.200')).status).toBe(429);
+  });
+
   it('401 bila sesi kedaluwarsa', async () => {
     const db = new FakeD1();
     const env = makeEnv(db);
@@ -1551,6 +1659,49 @@ describe('Worker sync: /api/auth/login', () => {
     const res = await call(env, '/api/auth/login?provider=facebook');
     expect(res.status).toBe(400);
   });
+
+  it('P-Auth: login mengirim challenge PKCE S256 + cookie verifier', async () => {
+    const env = makeEnv(new FakeD1());
+    const res = await call(env, '/api/auth/login?provider=google');
+    expect(res.status).toBe(302);
+    const cookies = res.headers.getSetCookie();
+    const verifierCookie = cookies.find((c) =>
+      c.startsWith('laras_oauth_verifier='),
+    ) as string;
+    expect(verifierCookie).toBeDefined();
+    expect(verifierCookie).toContain('HttpOnly');
+    expect(verifierCookie).toContain('SameSite=Lax');
+    expect(verifierCookie).toContain('Path=/api/auth');
+    const verifier = verifierCookie.split(';')[0].split('=')[1];
+    expect(verifier.length).toBe(86);
+    const location = new URL(res.headers.get('Location') ?? '');
+    expect(location.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(location.searchParams.get('code_challenge')).toBe(
+      await pkceChallengeOf(verifier),
+    );
+  });
+
+  it('P-SameSite: OAUTH_REDIRECT_BASE mengganti basis redirect_uri', async () => {
+    const env = makeEnv(new FakeD1(), {
+      OAUTH_REDIRECT_BASE: 'https://laras.adipmusic.my.id',
+    });
+    const res = await call(env, '/api/auth/login?provider=google');
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get('Location') ?? '');
+    expect(location.searchParams.get('redirect_uri')).toBe(
+      'https://laras.adipmusic.my.id/api/auth/callback',
+    );
+  });
+
+  it('P-SameSite: tanpa OAUTH_REDIRECT_BASE, redirect_uri = origin worker', async () => {
+    const env = makeEnv(new FakeD1());
+    const res = await call(env, '/api/auth/login?provider=google');
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get('Location') ?? '');
+    expect(location.searchParams.get('redirect_uri')).toBe(
+      `${WORKER_ORIGIN}/api/auth/callback`,
+    );
+  });
 });
 
 describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => {
@@ -1574,18 +1725,25 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     const env = makeEnv(db);
     // 1) Login untuk mendapat cookie state.
     const login = await call(env, '/api/auth/login?provider=google');
-    const stateCookie = login.headers
-      .getSetCookie()
-      .find((c) => c.startsWith('laras_oauth_state=')) as string;
-    const stateValue = stateCookie
-      .split(';')[0]
-      .split('=')[1];
+    const loginCookies = login.headers.getSetCookie();
+    const stateCookie = loginCookies.find((c) =>
+      c.startsWith('laras_oauth_state='),
+    ) as string;
+    const verifierCookie = loginCookies.find((c) =>
+      c.startsWith('laras_oauth_verifier='),
+    ) as string;
+    const stateValue = stateCookie.split(';')[0].split('=')[1];
+    const verifierValue = verifierCookie.split(';')[0].split('=')[1];
     const state = stateValue.split('.')[0];
-    // 2) Callback dengan state yang cocok.
+    // 2) Callback dengan state + verifier yang cocok.
     const res = await call(
       env,
       `/api/auth/callback?code=code-abc&state=${state}`,
-      { headers: { Cookie: `laras_oauth_state=${stateValue}` } },
+      {
+        headers: {
+          Cookie: `laras_oauth_state=${stateValue}; laras_oauth_verifier=${verifierValue}`,
+        },
+      },
     );
     expect(res.status).toBe(302);
     expect(res.headers.get('Location')).toBe(
@@ -1631,15 +1789,24 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     const env = makeEnv(db);
     const doLogin = async () => {
       const login = await call(env, '/api/auth/login?provider=google');
-      const stateCookie = login.headers
-        .getSetCookie()
-        .find((c) => c.startsWith('laras_oauth_state=')) as string;
+      const loginCookies = login.headers.getSetCookie();
+      const stateCookie = loginCookies.find((c) =>
+        c.startsWith('laras_oauth_state='),
+      ) as string;
+      const verifierCookie = loginCookies.find((c) =>
+        c.startsWith('laras_oauth_verifier='),
+      ) as string;
       const stateValue = stateCookie.split(';')[0].split('=')[1];
+      const verifierValue = verifierCookie.split(';')[0].split('=')[1];
       const state = stateValue.split('.')[0];
       return call(
         env,
         `/api/auth/callback?code=code-abc&state=${state}`,
-        { headers: { Cookie: `laras_oauth_state=${stateValue}` } },
+        {
+          headers: {
+            Cookie: `laras_oauth_state=${stateValue}; laras_oauth_verifier=${verifierValue}`,
+          },
+        },
       );
     };
     await doLogin();
@@ -1650,20 +1817,37 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
 
   // ---- Blue 3 (Red 3 S6): rate limit callback + state sekali pakai ----
 
-  /** Login dari satu IP, kembalikan nilai cookie state + state-nya. */
+  /** Login dari satu IP, kembalikan nilai cookie state + verifier + state-nya. */
   async function loginState(
     env: ReturnType<typeof makeEnv>,
     ip: string,
-  ): Promise<{ stateValue: string; state: string }> {
+  ): Promise<{
+    stateValue: string;
+    state: string;
+    verifierValue: string;
+  }> {
     const login = await call(env, '/api/auth/login?provider=google', {
       headers: { 'CF-Connecting-IP': ip },
     });
     expect(login.status).toBe(302);
-    const stateCookie = login.headers
-      .getSetCookie()
-      .find((c) => c.startsWith('laras_oauth_state=')) as string;
+    const loginCookies = login.headers.getSetCookie();
+    const stateCookie = loginCookies.find((c) =>
+      c.startsWith('laras_oauth_state='),
+    ) as string;
+    const verifierCookie = loginCookies.find((c) =>
+      c.startsWith('laras_oauth_verifier='),
+    ) as string;
     const stateValue = stateCookie.split(';')[0].split('=')[1];
-    return { stateValue, state: stateValue.split('.')[0] };
+    const verifierValue = verifierCookie.split(';')[0].split('=')[1];
+    return { stateValue, state: stateValue.split('.')[0], verifierValue };
+  }
+
+  /** Header Cookie lengkap untuk callback (state + verifier). */
+  function callbackCookie(l: {
+    stateValue: string;
+    verifierValue: string;
+  }): string {
+    return `laras_oauth_state=${l.stateValue}; laras_oauth_verifier=${l.verifierValue}`;
   }
 
   it('S6: 11 callback cepat dari satu IP -> 10 diproses + 1 ditolak 429', async () => {
@@ -1680,16 +1864,13 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     for (let i = 0; i < 11; i++) {
       // Login dari IP berbeda tiap kali supaya rate limit login
       // (10/mnt/IP) tidak menghalangi pembuatan 11 state valid.
-      const { stateValue, state } = await loginState(
-        env,
-        `198.51.100.${i + 1}`,
-      );
+      const login = await loginState(env, `198.51.100.${i + 1}`);
       const res = await call(
         env,
-        `/api/auth/callback?code=kode-palsu&state=${state}`,
+        `/api/auth/callback?code=kode-palsu&state=${login.state}`,
         {
           headers: {
-            Cookie: `laras_oauth_state=${stateValue}`,
+            Cookie: callbackCookie(login),
             'CF-Connecting-IP': callbackIp,
           },
         },
@@ -1706,11 +1887,11 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     stubGoogleProfile('Nama Google');
     const db = new FakeD1();
     const env = makeEnv(db);
-    const { stateValue, state } = await loginState(env, '203.0.113.5');
+    const login = await loginState(env, '203.0.113.5');
     const first = await call(
       env,
-      `/api/auth/callback?code=code-abc&state=${state}`,
-      { headers: { Cookie: `laras_oauth_state=${stateValue}` } },
+      `/api/auth/callback?code=code-abc&state=${login.state}`,
+      { headers: { Cookie: callbackCookie(login) } },
     );
     expect(first.status).toBe(302);
     expect(first.headers.get('Location')).toBe(
@@ -1719,8 +1900,8 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     expect(db.sessions.size).toBe(1);
     const second = await call(
       env,
-      `/api/auth/callback?code=code-abc&state=${state}`,
-      { headers: { Cookie: `laras_oauth_state=${stateValue}` } },
+      `/api/auth/callback?code=code-abc&state=${login.state}`,
+      { headers: { Cookie: callbackCookie(login) } },
     );
     expect(second.status).toBe(302);
     expect(second.headers.get('Location')).toContain('auth=error&reason=state');
@@ -1738,8 +1919,10 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
       '/api/auth/callback?code=code-abc&state=0123456789abcdef0123456789abcdef',
       {
         headers: {
+          // Verifier palsu supaya alur mencapai pemeriksaan state
+          // (tanpa verifier, yang gagal duluan adalah PKCE).
           Cookie:
-            'laras_oauth_state=0123456789abcdef0123456789abcdef.google',
+            'laras_oauth_state=0123456789abcdef0123456789abcdef.google; laras_oauth_verifier=verifier-palsu-0123456789abcdef0123456789abcdef0123',
         },
       },
     );
@@ -1754,10 +1937,10 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     stubGoogleProfile('Nama Google');
     const db = new FakeD1();
     const env = makeEnv(db);
-    const { stateValue, state } = await loginState(env, '203.0.113.5');
+    const login = await loginState(env, '203.0.113.5');
     const doCallback = () =>
-      call(env, `/api/auth/callback?code=code-abc&state=${state}`, {
-        headers: { Cookie: `laras_oauth_state=${stateValue}` },
+      call(env, `/api/auth/callback?code=code-abc&state=${login.state}`, {
+        headers: { Cookie: callbackCookie(login) },
       });
     // Dengan SELECT-lalu-DELETE (kode lama), keduanya lolos
     // SELECT sebelum salah satu DELETE; dengan DELETE
@@ -1788,7 +1971,11 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     const res = await call(
       env,
       `/api/auth/callback?code=code-abc&state=${state}`,
-      { headers: { Cookie: `laras_oauth_state=${state}.google` } },
+      {
+        headers: {
+          Cookie: `laras_oauth_state=${state}.google; laras_oauth_verifier=verifier-palsu-0123456789abcdef0123456789abcdef0123`,
+        },
+      },
     );
     expect(res.status).toBe(302);
     expect(res.headers.get('Location')).toContain('auth=error&reason=state');
@@ -1808,11 +1995,147 @@ describe('Worker sync: /api/auth/callback (OAuth Google, fetch di-stub)', () => 
     const res = await call(
       env,
       `/api/auth/callback?code=code-abc&state=${state}`,
-      { headers: { Cookie: `laras_oauth_state=${state}.google` } },
+      {
+        headers: {
+          Cookie: `laras_oauth_state=${state}.google; laras_oauth_verifier=verifier-palsu-0123456789abcdef0123456789abcdef0123`,
+        },
+      },
     );
     expect(res.status).toBe(302);
     expect(res.headers.get('Location')).toContain('auth=error&reason=state');
     expect(db.users.size).toBe(0);
+  });
+
+  // ---- P-Auth: PKCE + rotasi sesi + sapu malas ----
+
+  it('P-Auth: callback mengirim code_verifier ke token endpoint', async () => {
+    let tokenBody = '';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes('oauth2.googleapis.com/token')) {
+          tokenBody = String(init?.body ?? '');
+          return Response.json({ access_token: 'access-123' });
+        }
+        if (u.includes('openidconnect.googleapis.com')) {
+          return Response.json({ sub: 'google-sub-9', name: 'Nama Google' });
+        }
+        throw new Error(`fetch tak terduga: ${u}`);
+      }),
+    );
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const login = await loginState(env, '203.0.113.5');
+    const res = await call(
+      env,
+      `/api/auth/callback?code=code-abc&state=${login.state}`,
+      { headers: { Cookie: callbackCookie(login) } },
+    );
+    expect(res.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=ok`,
+    );
+    expect(new URLSearchParams(tokenBody).get('code_verifier')).toBe(
+      login.verifierValue,
+    );
+  });
+
+  it('P-Auth: callback tanpa cookie verifier -> reason=pkce, state tidak terbakar', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const login = await loginState(env, '203.0.113.5');
+    // Kirim HANYA cookie state (verifier hilang — mis. cookie
+    // dibersihkan di tengah alur).
+    const res = await call(
+      env,
+      `/api/auth/callback?code=code-abc&state=${login.state}`,
+      { headers: { Cookie: `laras_oauth_state=${login.stateValue}` } },
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toContain('auth=error&reason=pkce');
+    expect(db.users.size).toBe(0);
+    // State TIDAK terbakar oleh kegagalan PKCE: ulangi dengan
+    // verifier yang benar -> berhasil.
+    const retry = await call(
+      env,
+      `/api/auth/callback?code=code-abc&state=${login.state}`,
+      { headers: { Cookie: callbackCookie(login) } },
+    );
+    expect(retry.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=ok`,
+    );
+  });
+
+  it('P-Auth: rotasi — login kedua mematikan sesi lama', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const doLogin = async (extraCookie = '') => {
+      const login = await loginState(env, '203.0.113.5');
+      const cookie = extraCookie
+        ? `${callbackCookie(login)}; ${extraCookie}`
+        : callbackCookie(login);
+      return call(
+        env,
+        `/api/auth/callback?code=code-abc&state=${login.state}`,
+        { headers: { Cookie: cookie } },
+      );
+    };
+    const first = await doLogin();
+    expect(first.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=ok`,
+    );
+    const sessionA = first.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('laras_session='))!
+      .split(';')[0];
+    expect(db.sessions.size).toBe(1);
+    // Login kedua dari browser yang sama (membawa sesi lama).
+    const second = await doLogin(sessionA);
+    expect(second.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=ok`,
+    );
+    expect(db.sessions.size).toBe(1);
+    // Token lama mati.
+    const meOld = await call(env, '/api/auth/me', {
+      headers: { Cookie: sessionA },
+    });
+    expect(meOld.status).toBe(401);
+    // Token baru hidup.
+    const sessionB = second.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('laras_session='))!
+      .split(';')[0];
+    const meNew = await call(env, '/api/auth/me', {
+      headers: { Cookie: sessionB },
+    });
+    expect(meNew.status).toBe(200);
+  });
+
+  it('P-Auth: sapu malas — login menghapus sesi kedaluwarsa', async () => {
+    stubGoogleProfile('Nama Google');
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    db.sessions.set('session-kedaluwarsa', {
+      id: 'session-kedaluwarsa',
+      user_id: 'user-lain',
+      token_hash: 'hash-palsu',
+      expires_at: Date.now() - 1000,
+      created_at: Date.now() - 31 * 24 * 60 * 60 * 1000,
+    });
+    expect(db.sessions.size).toBe(1);
+    const login = await loginState(env, '203.0.113.5');
+    const res = await call(
+      env,
+      `/api/auth/callback?code=code-abc&state=${login.state}`,
+      { headers: { Cookie: callbackCookie(login) } },
+    );
+    expect(res.headers.get('Location')).toBe(
+      `${APP_ORIGIN}/settings?auth=ok`,
+    );
+    expect(db.sessions.has('session-kedaluwarsa')).toBe(false);
+    expect(db.sessions.size).toBe(1); // hanya sesi baru
   });
 });
 
@@ -1842,6 +2165,53 @@ describe('Worker sync: /api/auth/logout + /api/auth/delete', () => {
       headers: { Cookie: cookie, Origin: 'https://jahat.example' },
     });
     expect(res.status).toBe(403);
+  });
+
+  it('P-Auth: logout-all mencabut semua sesi pengguna, bukan pengguna lain', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // Sesi kedua milik pengguna yang sama (perangkat lain).
+    db.sessions.set('session-user-1-kedua', {
+      id: 'session-user-1-kedua',
+      user_id: userId,
+      token_hash: await sha256Hex('token-kedua'),
+      expires_at: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      created_at: Date.now(),
+    });
+    // Sesi milik pengguna lain.
+    const other = await seedSession(db, { userId: 'user-2' });
+    expect(db.sessions.size).toBe(3);
+    const res = await call(env, '/api/auth/logout-all', {
+      method: 'POST',
+      headers: { Cookie: cookie, Origin: APP_ORIGIN },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { loggedOutEverywhere: boolean; revoked: number };
+    };
+    expect(body.data).toEqual({ loggedOutEverywhere: true, revoked: 2 });
+    expect(db.sessions.size).toBe(1);
+    expect(db.sessions.has('session-user-2')).toBe(true);
+    // Sesi pengguna lain tetap hidup; sesi sendiri mati.
+    const meOther = await call(env, '/api/auth/me', {
+      headers: { Cookie: other.cookie },
+    });
+    expect(meOther.status).toBe(200);
+    const me = await call(env, '/api/auth/me', {
+      headers: { Cookie: cookie },
+    });
+    expect(me.status).toBe(401);
+  });
+
+  it('P-Auth: logout-all tanpa sesi ditolak 401', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const res = await call(env, '/api/auth/logout-all', {
+      method: 'POST',
+      headers: { Origin: APP_ORIGIN },
+    });
+    expect(res.status).toBe(401);
   });
 
   it('hapus akun menghapus pengguna + semua data sync-nya', async () => {
@@ -1884,6 +2254,30 @@ describe('Worker sync: /api/sync/pull + /api/sync/push', () => {
         await push(env, '', { deviceId: 'dev-1' })
       ).status,
     ).toBe(401);
+  });
+
+  it('P-SameSite: pull dari origin tidak dikenal ditolak 403', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie } = await seedSession(db);
+    const res = await call(env, '/api/sync/pull?since=0', {
+      headers: { Cookie: cookie, Origin: 'https://jahat.example' },
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as {
+      error: { code: string };
+    };
+    expect(body.error.code).toBe('ORIGIN_NOT_ALLOWED');
+  });
+
+  it('P-SameSite: pull tanpa Origin diizinkan (navigasi langsung)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie } = await seedSession(db);
+    const res = await call(env, '/api/sync/pull?since=0', {
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(200);
   });
 
   it('pull kosong untuk pengguna baru', async () => {
@@ -1999,6 +2393,11 @@ describe('Worker sync: /api/sync/pull + /api/sync/push', () => {
       deviceId: 'dev-1',
       playlists: [{ clientId: 'dev-1:1', nama: 'Satu', deskripsi: null }],
     });
+    // Dorong hapus di milidetik yang sama dengan dorong buat membuat
+    // guard LWW kalah tiebreak (deviceId sama) sehingga UPDATE hapus
+    // jadi no-op dan deletedAt tetap null — flaky di CI (Koordinator #15).
+    // Pola sama dengan tes `since` di atas: tunggu 2 ms.
+    await new Promise((r) => setTimeout(r, 2));
     await push(env, cookie, {
       deviceId: 'dev-1',
       deletedPlaylists: [{ clientId: 'dev-1:1' }],
@@ -3193,13 +3592,20 @@ describe('Worker sync: Blue 6 (S10/S11/S12/I21/I22/I23)', () => {
   ): Promise<Response> {
     const login = await call(env, '/api/auth/login?provider=google');
     expect(login.status).toBe(302);
-    const stateCookie = login.headers
-      .getSetCookie()
-      .find((c) => c.startsWith('laras_oauth_state=')) as string;
+    const loginCookies = login.headers.getSetCookie();
+    const stateCookie = loginCookies.find((c) =>
+      c.startsWith('laras_oauth_state='),
+    ) as string;
+    const verifierCookie = loginCookies.find((c) =>
+      c.startsWith('laras_oauth_verifier='),
+    ) as string;
     const stateValue = stateCookie.split(';')[0].split('=')[1];
+    const verifierValue = verifierCookie.split(';')[0].split('=')[1];
     const state = stateValue.split('.')[0];
     return call(env, `/api/auth/callback?code=code-abc&state=${state}`, {
-      headers: { Cookie: `laras_oauth_state=${stateValue}` },
+      headers: {
+        Cookie: `laras_oauth_state=${stateValue}; laras_oauth_verifier=${verifierValue}`,
+      },
     });
   }
 
@@ -3594,23 +4000,24 @@ describe('Worker sync: Blue 6 (S10/S11/S12/I21/I22/I23)', () => {
     }
   }, 30000);
 
-  it('S11b: batas anggaran baca persis — 36.000 ditolak, 35.998 lolos', async () => {
+  it('S11b: batas anggaran baca persis — 36.000 ditolak, 35.994 lolos', async () => {
     const db = new FakeD1();
     const env = makeEnv(db);
     const a = await seedSession(db, { userId: 'user-a' });
     const b = await seedSession(db, { userId: 'user-b' });
-    // Cadangan per pull 4.002: 36.000 + 4.002 = 40.002 > 40.000.
+    // Cadangan per pull 4.006 (P-Pull: 4 x 1001 probe + 1 + 1):
+    // 36.000 + 4.006 = 40.006 > 40.000.
     db.readBudget.set(`${a.userId}|${todayDay()}`, 36000);
     const over = await pull(env, a.cookie);
     expect(over.status).toBe(429);
     const overBody = (await over.json()) as { error: { code: string } };
     expect(overBody.error.code).toBe('DAILY_READ_BUDGET_EXCEEDED');
-    // 35.998 + 4.002 = 40.000 persis (lolos); pull kosong
-    // mengembalikan 0 baris -> refund 4.001, bersih 35.999.
-    db.readBudget.set(`${b.userId}|${todayDay()}`, 35998);
+    // 35.994 + 4.006 = 40.000 persis (lolos); pull kosong
+    // mengembalikan 0 baris -> refund 4.005, bersih 35.995.
+    db.readBudget.set(`${b.userId}|${todayDay()}`, 35994);
     const ok = await pull(env, b.cookie);
     expect(ok.status).toBe(200);
-    expect(readBudgetUsed(db, b.userId)).toBe(35999);
+    expect(readBudgetUsed(db, b.userId)).toBe(35995);
   });
 
   // ---- S12: tulis rate-limit residual ----
@@ -3995,13 +4402,20 @@ describe('Worker sync: Blue 7 (S13/S14/R21/I24/I25/I26)', () => {
   ): Promise<Response> {
     const login = await call(env, '/api/auth/login?provider=google');
     expect(login.status).toBe(302);
-    const stateCookie = login.headers
-      .getSetCookie()
-      .find((c) => c.startsWith('laras_oauth_state=')) as string;
+    const loginCookies = login.headers.getSetCookie();
+    const stateCookie = loginCookies.find((c) =>
+      c.startsWith('laras_oauth_state='),
+    ) as string;
+    const verifierCookie = loginCookies.find((c) =>
+      c.startsWith('laras_oauth_verifier='),
+    ) as string;
     const stateValue = stateCookie.split(';')[0].split('=')[1];
+    const verifierValue = verifierCookie.split(';')[0].split('=')[1];
     const state = stateValue.split('.')[0];
     return call(env, `/api/auth/callback?code=code-abc&state=${state}`, {
-      headers: { Cookie: `laras_oauth_state=${stateValue}` },
+      headers: {
+        Cookie: `laras_oauth_state=${stateValue}; laras_oauth_verifier=${verifierValue}`,
+      },
     });
   }
 
@@ -4552,5 +4966,253 @@ describe('Worker sync: Blue 7 (S13/S14/R21/I24/I25/I26)', () => {
     const retry = await push(env, cookie, body1);
     expect(retry.status).toBe(200);
     expect(budgetUsed(db, userId)).toBe(7);
+  });
+});
+
+describe('Worker sync: /health (P-Health)', () => {
+  it('DB sehat -> 200, db ok, failOpen false, x-request-id ada', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const res = await call(env, '/health');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-request-id')).toBeTruthy();
+    const body = (await res.json()) as {
+      success: boolean;
+      data: {
+        ok: boolean;
+        worker: string;
+        version: string;
+        db: string;
+        failOpen: boolean;
+        time: string;
+      };
+    };
+    expect(body.success).toBe(true);
+    expect(body.data.ok).toBe(true);
+    expect(body.data.worker).toBe('sync');
+    expect(body.data.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(body.data.db).toBe('ok');
+    expect(body.data.failOpen).toBe(false);
+    expect(Date.parse(body.data.time)).not.toBeNaN();
+  });
+
+  it('tanpa binding DB -> 200, db unbound, failOpen true', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db, { DB: undefined });
+    const res = await call(env, '/health');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { db: string; failOpen: boolean };
+    };
+    expect(body.data.db).toBe('unbound');
+    expect(body.data.failOpen).toBe(true);
+  });
+
+  it('D1 gagal -> 200, db fail, failOpen true', async () => {
+    const db = new FakeD1();
+    const throwing = {
+      prepare() {
+        return {
+          bind() {
+            return this;
+          },
+          async first(): Promise<never> {
+            throw new Error('D1 mati (simulasi)');
+          },
+        };
+      },
+    };
+    const env = makeEnv(db, { DB: throwing });
+    const res = await call(env, '/health');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { db: string; failOpen: boolean };
+    };
+    expect(body.data.db).toBe('fail');
+    expect(body.data.failOpen).toBe(true);
+  });
+
+  it('metode bukan GET -> 405', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const res = await call(env, '/health', { method: 'POST' });
+    expect(res.status).toBe(405);
+  });
+
+  it('CF-Ray dipakai sebagai x-request-id', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const res = await call(env, '/health', {
+      headers: { 'CF-Ray': 'ray-sync-789' },
+    });
+    expect(res.headers.get('x-request-id')).toBe('ray-sync-789');
+  });
+});
+
+describe('Worker sync: paginasi pull (P-Pull)', () => {
+  // Seed langsung ke D1 palsu: lewat push butuh 11x push (batas
+  // 100 entri/koleksi) dan menghabiskan anggaran tulis.
+  function seedLikes(
+    db: FakeD1,
+    userId: string,
+    updatedAts: number[],
+  ): void {
+    updatedAts.forEach((updatedAt, i) => {
+      db.likes.set(`${userId}|vid-${i}`, {
+        user_id: userId,
+        video_id: `vid-${i}`,
+        liked_at: 1000 + i,
+        device_id: 'dev-1',
+        updated_at: updatedAt,
+        deleted_at: null,
+        title: `Lagu ${i}`,
+        artist: null,
+      });
+    });
+  }
+
+  function seedHistory(
+    db: FakeD1,
+    userId: string,
+    updatedAts: number[],
+  ): void {
+    updatedAts.forEach((updatedAt, i) => {
+      db.history.set(`${userId}|vid-h${i}|${5000 + i}`, {
+        user_id: userId,
+        video_id: `vid-h${i}`,
+        played_at: 5000 + i,
+        seconds_played: 10,
+        device_id: 'dev-1',
+        updated_at: updatedAt,
+        title: `Riwayat ${i}`,
+        artist: null,
+      });
+    });
+  }
+
+  interface PullPage {
+    hasMore: boolean;
+    nextSince: number | null;
+    maxUpdatedAt: number;
+    tieOverflow: boolean;
+    likes: Array<{ videoId: string; updatedAt: number }>;
+    history: Array<{ videoId: string; updatedAt: number }>;
+  }
+
+  async function pullPage(
+    env: ReturnType<typeof makeEnv>,
+    cookie: string,
+    since: number,
+  ): Promise<PullPage> {
+    const res = await pull(env, cookie, since);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: PullPage };
+    return body.data;
+  }
+
+  it('1005 suka: halaman 1 = 1000 + hasMore, halaman 2 = 5 + selesai', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // updated_at 1000..2004 (1005 baris, tanpa kembar).
+    seedLikes(
+      db,
+      userId,
+      Array.from({ length: 1005 }, (_, i) => 1000 + i),
+    );
+    const page1 = await pullPage(env, cookie, 0);
+    expect(page1.likes).toHaveLength(1000);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.tieOverflow).toBe(false);
+    expect(page1.nextSince).toBe(1999);
+    expect(page1.maxUpdatedAt).toBe(1999);
+    const page2 = await pullPage(env, cookie, page1.nextSince!);
+    expect(page2.likes).toHaveLength(5);
+    expect(page2.hasMore).toBe(false);
+    expect(page2.nextSince).toBeNull();
+    expect(page2.maxUpdatedAt).toBe(2004);
+    // Tidak ada yang hilang / ganda di gabungan kedua halaman.
+    const ids = new Set([
+      ...page1.likes.map((l) => l.videoId),
+      ...page2.likes.map((l) => l.videoId),
+    ]);
+    expect(ids.size).toBe(1005);
+  });
+
+  it('grup timestamp di batas tidak terbelah', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    // 999 baris 1000..1998 + 10 baris di 1999 (grup melewati batas).
+    seedLikes(db, userId, [
+      ...Array.from({ length: 999 }, (_, i) => 1000 + i),
+      ...Array.from({ length: 10 }, () => 1999),
+    ]);
+    const page1 = await pullPage(env, cookie, 0);
+    // Grup 1999 TIDAK ikut halaman 1 (dipotong di batas grup).
+    expect(page1.likes).toHaveLength(999);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.nextSince).toBe(1998);
+    const page2 = await pullPage(env, cookie, page1.nextSince!);
+    expect(page2.likes).toHaveLength(10);
+    expect(page2.hasMore).toBe(false);
+    const ids = new Set([
+      ...page1.likes.map((l) => l.videoId),
+      ...page2.likes.map((l) => l.videoId),
+    ]);
+    expect(ids.size).toBe(1009);
+  });
+
+  it('nextSince = minimum lintas koleksi (bukan maksimum global)', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    seedLikes(
+      db,
+      userId,
+      Array.from({ length: 1005 }, (_, i) => 1000 + i),
+    );
+    seedHistory(db, userId, [5000, 5001, 5002, 5003, 5004]);
+    const page1 = await pullPage(env, cookie, 0);
+    expect(page1.likes).toHaveLength(1000);
+    expect(page1.history).toHaveLength(5);
+    // Suka terpotong di 1999, riwayat sampai 5004 — kursor WAJIB
+    // 1999; kursor 5004 akan melewatkan sisa suka (2000..2004).
+    expect(page1.nextSince).toBe(1999);
+    expect(page1.maxUpdatedAt).toBe(5004);
+    const page2 = await pullPage(env, cookie, page1.nextSince!);
+    expect(page2.likes).toHaveLength(5);
+    // Riwayat terambil ulang (duplikat, digabung LWW) — wajar.
+    expect(page2.history).toHaveLength(5);
+    const likeIds = new Set([
+      ...page1.likes.map((l) => l.videoId),
+      ...page2.likes.map((l) => l.videoId),
+    ]);
+    expect(likeIds.size).toBe(1005);
+  });
+
+  it('tieOverflow: 1001 suka di 1 ms -> kursor tidak aman', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    seedLikes(db, userId, Array.from({ length: 1001 }, () => 5000));
+    const page1 = await pullPage(env, cookie, 0);
+    expect(page1.likes).toHaveLength(1000);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.tieOverflow).toBe(true);
+    expect(page1.nextSince).toBeNull();
+  });
+
+  it('tanpa pemotongan: hasMore false, nextSince null', async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { cookie, userId } = await seedSession(db);
+    seedLikes(db, userId, [1000, 1001, 1002]);
+    const page = await pullPage(env, cookie, 0);
+    expect(page.likes).toHaveLength(3);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextSince).toBeNull();
+    expect(page.maxUpdatedAt).toBe(1002);
+    expect(page.tieOverflow).toBe(false);
   });
 });

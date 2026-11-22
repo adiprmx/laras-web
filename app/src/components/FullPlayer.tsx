@@ -30,6 +30,7 @@ import { PLAYBACK_RATES } from '../player/types';
 import { sleepTimerText } from '../player/sleepTimer';
 import { strings } from '../strings/id';
 import QueueList from './QueueList';
+import { coverSrcSet } from './coverSrc';
 import FavoriteButton from './library/FavoriteButton';
 
 const LyricsPanel = lazy(() => import('../lyrics/LyricsPanel'));
@@ -57,6 +58,8 @@ export default function FullPlayer() {
   const audioPath = usePlayerStore((s) => s.audioPath);
   const sleepTimer = usePlayerStore((s) => s.sleepTimer);
   const setFullPlayerOpen = usePlayerStore((s) => s.setFullPlayerOpen);
+  // Sampul tampil maks. 320px: 1x cukup 320w, retina 480w.
+  const cover = coverSrcSet(track?.artwork, '320px');
   const dismissNotice = usePlayerStore((s) => s.dismissNotice);
 
   const [dragValue, setDragValue] = useState<number | null>(null);
@@ -87,6 +90,21 @@ export default function FullPlayer() {
       document.body.style.overflow = prev;
     };
   }, [open ]);
+
+  // P-A11y: Esc menutup layar penuh (pemutar penuh adalah layar,
+  // bukan kartu dialog — jadi bukan <dialog>, cukup listener Esc).
+  // Dipasang hanya saat terbuka, dan diabaikan bila ada dialog
+  // modal di atasnya (dialog native sudah menangani Esc sendiri).
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return;
+      if (document.querySelector('dialog[open]')) return;
+      setFullPlayerOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, setFullPlayerOpen]);
 
   if (!open || !track) return null;
 
@@ -133,6 +151,8 @@ export default function FullPlayer() {
           {track.artwork ? (
             <img
               src={track.artwork}
+              srcSet={cover?.srcSet}
+              sizes={cover?.sizes}
               alt=""
               width={480}
               height={360}

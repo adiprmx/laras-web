@@ -173,6 +173,32 @@ const MAX_STRING = '\uffff';
 /** Batas atas angka untuk rentang kunci. */
 const MAX_NUMBER = Number.MAX_SAFE_INTEGER;
 
+/**
+ * Dorong delta (P-PushDelta): setiap perubahan lokal pada koleksi
+ * yang disinkronkan ditandai dengan kunci meta `sync-dirty:<koleksi>:<ref>`
+ * di app_meta, sehingga sync hanya mendorong baris yang berubah
+ * (bukan seluruh state seperti sebelumnya). Penanda eksplisit dipilih
+ * atas watermark timestamp: baris playlist-items tidak punya timestamp
+ * modifikasi (reorder tidak meninggalkan jejak waktu) dan watermark
+ * skalar punya lubang tie milidetik — penanda benar secara konstruksi.
+ *
+ * Nilai penanda berversi `${Date.now()}:${counter}`: sync menghapus
+ * penanda hanya bila versinya masih sama dengan snapshot yang
+ * didorong, jadi edit yang terjadi DI TENGAH sync tidak ikut
+ * terhapus dan tetap terdorong pada sync berikutnya.
+ */
+export const SYNC_DIRTY_PREFIX = 'sync-dirty:';
+export type SyncDirtyCollection = 'playlists' | 'playlist-items' | 'likes';
+export interface SyncDirtyEntry {
+  collection: SyncDirtyCollection;
+  /** playlists: id lokal; playlist-items: `<id playlist>:<videoId>`; likes: videoId. */
+  ref: string;
+  /** Nilai versi penanda (untuk penghapusan berversi). */
+  value: string;
+}
+
+let dirtyMarkCounter = 0;
+
 function now(): number {
   return Date.now();
 }
@@ -267,6 +293,10 @@ export class LibraryService {
     if (items.length === 0) return;
     const at = now();
     const addToLibrary = opts.addToLibrary ?? true;
+    // Lagu BARU yang masuk sudah disukai (mis. impor backup) harus
+    // ikut didorong ke server; lagu yang sudah ada tidak berubah
+    // status sukanya di sini (spread ...existing mempertahankan liked).
+    const likedNewSongIds: string[] = [];
     await this.db.transaction(
       'rw',
       [this.db.songs, this.db.albums, this.db.artists, this.db.song_artists, this.db.token_index],
@@ -353,6 +383,7 @@ export class LibraryService {
             : (song.albumId ?? null);
           const existing = existingSongs[i];
           if (!existing) {
+            if (song.liked === 1) likedNewSongIds.push(song.id);
             rowsToPut.push({
               id: song.id,
               title: song.title,
@@ -440,6 +471,11 @@ export class LibraryService {
           await this.db.token_index.bulkAdd(tokenRows);
         }
       },
+    );
+    // Penanda dirty ditulis SESUDAH transaksi (app_meta tidak
+    // termasuk tabel transaksi di atas).
+    await this.markSyncDirtyMany(
+      likedNewSongIds.map((id) => ({ collection: 'likes' as const, ref: id })),
     );
     this.notify();
   }
@@ -831,8 +867,13 @@ export class LibraryService {
       ...(liked === 1 ? { inLibrary: 1 } : {}),
       dateModified: now(),
     });
-    // Batal suka adalah penghapusan yang harus ikut tersinkron.
-    if (liked === 0) await this.recordTombstone('like', songId);
+    if (liked === 1) {
+      await this.markSyncDirty('likes', songId);
+    } else {
+      // Batal suka adalah penghapusan yang harus ikut tersinkron.
+      await this.clearSyncDirty('likes', songId);
+      await this.recordTombstone('like', songId);
+    }
     this.notify();
     return liked === 1;
   }
@@ -882,6 +923,9 @@ export class LibraryService {
         }
       }
     }
+    // Lagu sudah tidak disukai dan tidak di playlist mana pun:
+    // tidak ada lagi yang perlu didorong untuknya (quiet atau tidak).
+    await this.clearSyncDirtyForSong(songId);
     this.notify();
   }
 
@@ -1080,6 +1124,7 @@ export class LibraryService {
       createdAt: at,
       updatedAt: at,
     });
+    await this.markSyncDirty('playlists', String(id));
     this.notify();
     return id as number;
   }
@@ -1092,6 +1137,7 @@ export class LibraryService {
       name: trimmed,
       updatedAt: now(),
     });
+    await this.markSyncDirty('playlists', String(id));
     this.notify();
   }
 
@@ -1105,6 +1151,7 @@ export class LibraryService {
       description: description?.trim() ?? null,
       updatedAt: now(),
     });
+    await this.markSyncDirty('playlists', String(id));
     this.notify();
   }
 
@@ -1130,6 +1177,10 @@ export class LibraryService {
         await this.db.playlists.delete(id);
       },
     );
+    // Penanda dirty ikut dibersihkan (quiet atau tidak): playlist
+    // sudah tidak ada, tidak ada lagi yang perlu didorong untuknya;
+    // tombstone menangani penghapusan di server.
+    await this.clearSyncDirtyForPlaylist(id);
     if (playlist?.clientId) {
       await this.recordTombstone('playlist', playlist.clientId);
     }
@@ -1203,8 +1254,14 @@ export class LibraryService {
         await this.touchPlaylist(playlistId, at);
         return true;
       },
-    ).then((added) => {
-      if (added) this.notify();
+    ).then(async (added) => {
+      if (added) {
+        await this.markSyncDirty(
+          'playlist-items',
+          `${playlistId}:${songId}`,
+        );
+        this.notify();
+      }
       return added;
     });
   }
@@ -1248,6 +1305,10 @@ export class LibraryService {
         `${playlist.clientId}:${songId}`,
       );
     }
+    // Item yang dihapus tidak perlu didorong (tombstone menangani);
+    // item yang tersisa posisinya dirapatkan renumber -> tandai semua.
+    await this.clearSyncDirty('playlist-items', `${playlistId}:${songId}`);
+    await this.markSyncDirtyForPlaylistItems(playlistId);
     this.notify();
   }
 
@@ -1279,6 +1340,8 @@ export class LibraryService {
         await this.touchPlaylist(playlistId, now());
       },
     );
+    // Reorder menulis ulang posisi SEMUA item -> tandai semua.
+    await this.markSyncDirtyForPlaylistItems(playlistId);
     this.notify();
   }
 
@@ -2390,6 +2453,138 @@ export class LibraryService {
   }
 
   // ------------------------------------------------------------------
+  // Penanda dirty untuk dorong delta (P-PushDelta)
+  // ------------------------------------------------------------------
+
+  private dirtyKey(collection: SyncDirtyCollection, ref: string): string {
+    return `${SYNC_DIRTY_PREFIX}${collection}:${ref}`;
+  }
+
+  /** Tandai satu baris sebagai berubah. Mengembalikan nilai versi. */
+  async markSyncDirty(
+    collection: SyncDirtyCollection,
+    ref: string,
+  ): Promise<string> {
+    const value = `${Date.now()}:${dirtyMarkCounter++}`;
+    await this.db.app_meta.put({
+      key: this.dirtyKey(collection, ref),
+      value,
+    });
+    return value;
+  }
+
+  /**
+   * Hapus penanda dirty. Bila `expectedValue` diberikan, hapus hanya
+   * bila nilainya masih sama (edit di tengah sync tidak ikut terhapus).
+   * Mengembalikan true bila penanda benar-benar dihapus.
+   */
+  async clearSyncDirty(
+    collection: SyncDirtyCollection,
+    ref: string,
+    expectedValue?: string,
+  ): Promise<boolean> {
+    const key = this.dirtyKey(collection, ref);
+    if (expectedValue !== undefined) {
+      const row = await this.db.app_meta.get(key);
+      if (!row || row.value !== expectedValue) return false;
+    }
+    await this.db.app_meta.delete(key);
+    return true;
+  }
+
+  /** Semua penanda dirty yang ada saat ini (snapshot untuk sync). */
+  async listSyncDirty(): Promise<SyncDirtyEntry[]> {
+    const rows = await this.db.app_meta
+      .where('key')
+      .startsWith(SYNC_DIRTY_PREFIX)
+      .toArray();
+    const out: SyncDirtyEntry[] = [];
+    for (const row of rows) {
+      const rest = row.key.slice(SYNC_DIRTY_PREFIX.length);
+      const sep = rest.indexOf(':');
+      if (sep === -1) continue;
+      const collection = rest.slice(0, sep) as SyncDirtyCollection;
+      if (
+        collection !== 'playlists' &&
+        collection !== 'playlist-items' &&
+        collection !== 'likes'
+      ) {
+        continue;
+      }
+      out.push({ collection, ref: rest.slice(sep + 1), value: row.value });
+    }
+    return out;
+  }
+
+  /** True bila ada setidaknya satu penanda dirty (cek murah, limit 1). */
+  async hasSyncDirty(): Promise<boolean> {
+    const count = await this.db.app_meta
+      .where('key')
+      .startsWith(SYNC_DIRTY_PREFIX)
+      .limit(1)
+      .count();
+    return count > 0;
+  }
+
+  /** Hapus semua penanda milik satu playlist (playlist + item-itemnya). */
+  async clearSyncDirtyForPlaylist(playlistId: number): Promise<void> {
+    await this.db.app_meta.delete(
+      this.dirtyKey('playlists', String(playlistId)),
+    );
+    const itemKeys = await this.db.app_meta
+      .where('key')
+      .startsWith(this.dirtyKey('playlist-items', `${playlistId}:`))
+      .primaryKeys();
+    await this.db.app_meta.bulkDelete(itemKeys);
+  }
+
+  /** Hapus penanda suka + keanggotaan playlist milik satu lagu. */
+  async clearSyncDirtyForSong(songId: string): Promise<void> {
+    await this.db.app_meta.delete(this.dirtyKey('likes', songId));
+    const itemKeys = await this.db.app_meta
+      .where('key')
+      .startsWith(this.dirtyKey('playlist-items', ''))
+      .primaryKeys();
+    const doomed = (itemKeys as string[]).filter((k) =>
+      k.endsWith(`:${songId}`),
+    );
+    if (doomed.length > 0) await this.db.app_meta.bulkDelete(doomed);
+  }
+
+  /** Tandai banyak baris sekaligus (impor/restore backup). */
+  async markSyncDirtyMany(
+    entries: Array<{ collection: SyncDirtyCollection; ref: string }>,
+  ): Promise<void> {
+    if (entries.length === 0) return;
+    const at = Date.now();
+    await this.db.app_meta.bulkPut(
+      entries.map((e) => ({
+        key: this.dirtyKey(e.collection, e.ref),
+        value: `${at}:${dirtyMarkCounter++}`,
+      })),
+    );
+  }
+
+  /** Tandai semua item satu playlist sebagai berubah (reorder/renumber). */
+  async markSyncDirtyForPlaylistItems(playlistId: number): Promise<void> {
+    const rows = await this.db.playlist_songs
+      .where('playlistId')
+      .equals(playlistId)
+      .toArray();
+    if (rows.length === 0) return;
+    const at = Date.now();
+    await this.db.app_meta.bulkPut(
+      rows.map((r) => ({
+        key: this.dirtyKey(
+          'playlist-items',
+          `${playlistId}:${r.songId}`,
+        ),
+        value: `${at}:${dirtyMarkCounter++}`,
+      })),
+    );
+  }
+
+  // ------------------------------------------------------------------
   // Backup dan impor (P8): snapshot + merge satu transaksi
   // ------------------------------------------------------------------
 
@@ -2486,6 +2681,13 @@ export class LibraryService {
    */
   async mergeBackupData(data: BackupData): Promise<BackupMergeResult> {
     const at = now();
+    // Kolektor penanda dirty: restore bisa memasukkan suka,
+    // playlist, dan item yang belum pernah ada di server.
+    // Ditandai SESUDAH transaksi (app_meta di luar tabel transaksi).
+    const dirtyEntries: Array<{
+      collection: SyncDirtyCollection;
+      ref: string;
+    }> = [];
     const result = await this.db.transaction(
       'rw',
       [
@@ -2612,9 +2814,15 @@ export class LibraryService {
               unplayable: song.unplayable ? 1 : 0,
             });
             newSongIds.add(song.id);
+            if (song.liked) {
+              dirtyEntries.push({ collection: 'likes', ref: song.id });
+            }
             songsAdded++;
           } else {
             songsExisted++;
+            if (song.liked && existing.liked === 0) {
+              dirtyEntries.push({ collection: 'likes', ref: song.id });
+            }
             if (existing.title !== song.title) {
               retitledSongIds.push(song.id);
             }
@@ -2730,6 +2938,10 @@ export class LibraryService {
               updatedAt: at,
             };
             byName.set(safeName, target);
+            dirtyEntries.push({
+              collection: 'playlists',
+              ref: String(target.id),
+            });
             playlistsCreated++;
           }
           const members = await this.db.playlist_songs
@@ -2757,6 +2969,10 @@ export class LibraryService {
               songId,
               position,
               dateAdded: at,
+            });
+            dirtyEntries.push({
+              collection: 'playlist-items',
+              ref: `${target.id}:${songId}`,
             });
             memberIds.add(songId);
             position++;
@@ -2927,6 +3143,7 @@ export class LibraryService {
         };
       },
     );
+    await this.markSyncDirtyMany(dirtyEntries);
     this.notify();
     return result;
   }
@@ -3060,8 +3277,14 @@ export class LibraryService {
       ...(liked ? { inLibrary: 1 } : {}),
       dateModified: now(),
     });
-    if (!liked && !opts.quiet) {
-      await this.recordTombstone('like', songId);
+    if (!opts.quiet) {
+      if (liked) {
+        await this.markSyncDirty('likes', songId);
+      } else {
+        // Batal suka tidak perlu didorong (tombstone menangani).
+        await this.clearSyncDirty('likes', songId);
+        await this.recordTombstone('like', songId);
+      }
     }
     this.notify();
   }

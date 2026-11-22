@@ -34,11 +34,16 @@ import {
 } from './settingsMarkers';
 import {
   applyPull,
+  AUTO_SYNC_STALE_MS,
   collectPushBody,
+  MAX_PULL_PAGES,
   parseSettingsPayload,
+  shouldAutoSync,
   syncNow,
   SYNC_LAST_PULL_KEY,
+  SYNC_LAST_SYNC_AT_KEY,
   SYNC_HISTORY_PUSHED_KEY,
+  SYNC_PUSH_DELTA_INIT_KEY,
   type SyncSettingsPayload,
 } from './syncService';
 import type { PullData, PushBody } from './syncClient';
@@ -437,7 +442,7 @@ describe('syncService', () => {
         timestamp: 5000,
         playTimeMs: 60_000,
       });
-      const body = await collectPushBody(library, deviceId);
+      const { body } = await collectPushBody(library, deviceId);
       expect(body.deviceId).toBe(deviceId);
       expect(body.playlists).toHaveLength(1);
       expect(body.playlists?.[0].clientId).toBe(`${deviceId}:${id}`);
@@ -464,7 +469,7 @@ describe('syncService', () => {
       await library.setLiked('vid-1', true);
       await library.toggleLiked('vid-1');
       await library.deletePlaylist(id);
-      const body = await collectPushBody(library, deviceId);
+      const { body } = await collectPushBody(library, deviceId);
       expect(body.deletedPlaylists).toEqual([{ clientId: 'dev-x:1' }]);
       expect(body.deletedPlaylistItems).toEqual([
         { playlistClientId: 'dev-x:1', videoId: 'vid-1' },
@@ -475,24 +480,24 @@ describe('syncService', () => {
     it('pengaturan hanya dikirim bila berubah sejak terakhir sinkron', async () => {
       const deviceId = await getDeviceId();
       // Belum pernah berubah: tidak ada settings di body.
-      const first = await collectPushBody(library, deviceId);
+      const { body: first } = await collectPushBody(library, deviceId);
       expect(first.settings).toBeUndefined();
       // Ubah EQ: penanda lokal naik, settings ikut.
       await markSettingsChanged();
-      const second = await collectPushBody(library, deviceId);
+      const { body: second } = await collectPushBody(library, deviceId);
       expect(second.settings).toBeDefined();
       const parsed = parseSettingsPayload(second.settings?.settingsJson ?? '');
       expect(parsed?.version).toBe(1);
       // Sesudah "sinkron", tidak dikirim lagi.
       await setSettingsAppliedAt(Date.now() + 1000);
-      const third = await collectPushBody(library, deviceId);
+      const { body: third } = await collectPushBody(library, deviceId);
       expect(third.settings).toBeUndefined();
     });
 
     it('penanda hapus riwayat ikut terkirim', async () => {
       const deviceId = await getDeviceId();
       await library.setMeta(SYNC_HISTORY_CLEARED_KEY, '12345');
-      const body = await collectPushBody(library, deviceId);
+      const { body } = await collectPushBody(library, deviceId);
       expect(body.historyClearedBefore).toBe(12345);
     });
   });
@@ -696,6 +701,305 @@ describe('syncService', () => {
       };
       await syncNow(deps2);
       expect(await library.getMeta(SYNC_HISTORY_CLEARED_KEY)).toBe('');
+    });
+  });
+
+  describe('syncNow: paginasi pull (P-Pull)', () => {
+    function pagedPull(pages: PullData[]) {
+      const sinceArgs: number[] = [];
+      return {
+        sinceArgs,
+        pull: async (since: number): Promise<PullData> => {
+          sinceArgs.push(since);
+          const page = pages.shift();
+          if (!page) throw new Error('tidak ada halaman lagi');
+          return page;
+        },
+      };
+    }
+
+    it('menarik 2 halaman, menggabung, penanda = watermark (bukan serverTime)', async () => {
+      const { sinceArgs, pull } = pagedPull([
+        {
+          ...emptyPull(20_000),
+          hasMore: true,
+          nextSince: 9000,
+          maxUpdatedAt: 9000,
+          playlists: [
+            {
+              clientId: 'dev-x:1',
+              nama: 'Satu',
+              deskripsi: null,
+              updatedAt: 9000,
+              deletedAt: null,
+            },
+          ],
+        },
+        {
+          ...emptyPull(20_100),
+          hasMore: false,
+          nextSince: null,
+          maxUpdatedAt: 9500,
+          playlists: [
+            {
+              clientId: 'dev-x:2',
+              nama: 'Dua',
+              deskripsi: null,
+              updatedAt: 9500,
+              deletedAt: null,
+            },
+          ],
+        },
+      ]);
+      const result = await syncNow({
+        pull,
+        push: async () => ({ serverTime: 21_000, applied: 0 }),
+      });
+      expect(sinceArgs).toEqual([0, 9000]);
+      expect(result.pullIncomplete).toBe(false);
+      expect(await library.playlistByClientId('dev-x:1')).not.toBeNull();
+      expect(await library.playlistByClientId('dev-x:2')).not.toBeNull();
+      // Watermark 9500 — BUKAN serverTime dorong 21000.
+      expect(await library.getMeta(SYNC_LAST_PULL_KEY)).toBe('9500');
+    });
+
+    it('tieOverflow: penanda berhenti di watermark halaman sebelumnya', async () => {
+      const { pull } = pagedPull([
+        {
+          ...emptyPull(20_000),
+          hasMore: true,
+          nextSince: 9000,
+          maxUpdatedAt: 9000,
+          playlists: [
+            {
+              clientId: 'dev-x:1',
+              nama: 'Satu',
+              deskripsi: null,
+              updatedAt: 9000,
+              deletedAt: null,
+            },
+          ],
+        },
+        {
+          ...emptyPull(20_100),
+          hasMore: true,
+          nextSince: null,
+          maxUpdatedAt: 9500,
+          tieOverflow: true,
+          playlists: [],
+        },
+      ]);
+      let pushed = 0;
+      const result = await syncNow({
+        pull,
+        push: async () => {
+          pushed += 1;
+          return { serverTime: 21_000, applied: 0 };
+        },
+      });
+      expect(result.pullIncomplete).toBe(true);
+      // Dorong tetap jalan; penanda di 9000 (halaman 2 TIDAK
+      // dimajukan — datanya belum lengkap).
+      expect(pushed).toBe(1);
+      expect(await library.getMeta(SYNC_LAST_PULL_KEY)).toBe('9000');
+    });
+
+    it('batas halaman: berhenti sesudah MAX_PULL_PAGES dengan jujur', async () => {
+      const sinceArgs: number[] = [];
+      const result = await syncNow({
+        pull: async (since: number) => {
+          sinceArgs.push(since);
+          return {
+            ...emptyPull(20_000),
+            hasMore: true,
+            nextSince: since + 100,
+            maxUpdatedAt: since + 100,
+          };
+        },
+        push: async () => ({ serverTime: 21_000, applied: 0 }),
+      });
+      expect(sinceArgs).toHaveLength(MAX_PULL_PAGES);
+      expect(result.pullIncomplete).toBe(true);
+      // Watermark = nextSince halaman terakhir (1000).
+      expect(await library.getMeta(SYNC_LAST_PULL_KEY)).toBe('1000');
+    });
+
+    it('server lama (tanpa field paginasi): penanda = serverTime tarik', async () => {
+      const result = await syncNow({
+        pull: async () => emptyPull(20_000),
+        push: async () => ({ serverTime: 21_000, applied: 0 }),
+      });
+      expect(result.pullIncomplete).toBe(false);
+      // P-PushDelta: body dorong kosong -> push dilewati, jadi
+      // serverTime = waktu tarik (20000), bukan waktu dorong
+      // (21000). Ini LEBIH benar untuk server lama: penanda 21000
+      // akan melewatkan baris yang ditulis server di antara tarik
+      // dan dorong; penanda 20000 tidak bisa melewatkan apa pun
+      // (baris sendiri yang baru didorong ikut tertarik sekali,
+      // dan applyPull idempotent).
+      expect(await library.getMeta(SYNC_LAST_PULL_KEY)).toBe('20000');
+    });
+  });
+
+  describe('dorong delta (P-PushDelta)', () => {
+    /** Tiru keadaan sesudah baseline: flag init + penanda bersih. */
+    async function setDeltaBaseline(): Promise<void> {
+      await library.setMeta(SYNC_PUSH_DELTA_INIT_KEY, '1');
+      const dirty = await library.listSyncDirty();
+      for (const d of dirty) {
+        await library.clearSyncDirty(d.collection, d.ref);
+      }
+    }
+
+    it('tanpa flag init: dorong penuh (baseline) + snapshot dirty', async () => {
+      const deviceId = await getDeviceId();
+      const id = await library.createPlaylist('Satu');
+      await seedSong(library, 'vid-1', 'Lagu Satu');
+      await library.addSongToPlaylist(id, 'vid-1');
+      await library.setLiked('vid-1', true);
+      const { body, dirty, fullPush } = await collectPushBody(
+        library,
+        deviceId,
+      );
+      expect(fullPush).toBe(true);
+      expect(body.playlists).toHaveLength(1);
+      expect(body.playlistItems).toHaveLength(1);
+      expect(body.likes).toHaveLength(1);
+      expect(dirty.length).toBeGreaterThan(0);
+    });
+
+    it('sesudah baseline: hanya playlist yang diubah yang didorong', async () => {
+      const deviceId = await getDeviceId();
+      const a = await library.createPlaylist('Tetap');
+      const b = await library.createPlaylist('Ubah');
+      await setDeltaBaseline();
+      await library.renamePlaylist(b, 'Ubah Baru');
+      const { body, fullPush } = await collectPushBody(library, deviceId);
+      expect(fullPush).toBe(false);
+      expect(body.playlists).toHaveLength(1);
+      expect(body.playlists?.[0].nama).toBe('Ubah Baru');
+      expect(body.playlistItems).toHaveLength(0);
+      expect(body.likes).toHaveLength(0);
+      void a;
+    });
+
+    it('delta item: hanya item baru, playlist tidak ikut; clientId tetap diberi', async () => {
+      const deviceId = await getDeviceId();
+      const id = await library.createPlaylist('Satu');
+      await seedSong(library, 'vid-1', 'Lagu Satu');
+      await setDeltaBaseline();
+      await library.addSongToPlaylist(id, 'vid-1');
+      const { body } = await collectPushBody(library, deviceId);
+      expect(body.playlists).toHaveLength(0);
+      expect(body.playlistItems).toHaveLength(1);
+      expect(body.playlistItems?.[0].playlistClientId).toBe(
+        `${deviceId}:${id}`,
+      );
+      expect(body.playlistItems?.[0].videoId).toBe('vid-1');
+    });
+
+    it('delta suka: hanya like baru yang didorong', async () => {
+      const deviceId = await getDeviceId();
+      await seedSong(library, 'vid-1', 'Lagu Satu');
+      await seedSong(library, 'vid-2', 'Lagu Dua');
+      await library.setLiked('vid-1', true);
+      await setDeltaBaseline();
+      await library.setLiked('vid-2', true);
+      const { body } = await collectPushBody(library, deviceId);
+      expect(body.likes).toHaveLength(1);
+      expect(body.likes?.[0].videoId).toBe('vid-2');
+    });
+
+    it('syncNow: baseline set flag + bersihkan dirty; sync kedua tanpa perubahan tidak memanggil push', async () => {
+      const deviceId = await getDeviceId();
+      const id = await library.createPlaylist('Satu');
+      await seedSong(library, 'vid-1', 'Lagu Satu');
+      await library.setLiked('vid-1', true);
+      let pushCalls = 0;
+      const deps = {
+        pull: async () => emptyPull(20_000),
+        push: async () => {
+          pushCalls++;
+          return { serverTime: 21_000, applied: 2 };
+        },
+      };
+      await syncNow(deps);
+      expect(pushCalls).toBe(1);
+      expect(await library.getMeta(SYNC_PUSH_DELTA_INIT_KEY)).toBe('1');
+      expect(await library.listSyncDirty()).toHaveLength(0);
+      const lastSyncAt = Number(
+        await library.getMeta(SYNC_LAST_SYNC_AT_KEY),
+      );
+      expect(lastSyncAt).toBeGreaterThan(0);
+      void deviceId;
+      void id;
+      // Sync kedua: tidak ada yang berubah -> push dilewati total.
+      const result = await syncNow(deps);
+      expect(pushCalls).toBe(1);
+      expect(result.pushed).toBe(0);
+      // Sync ketiga sesudah rename: push jalan lagi, hanya 1 playlist.
+      // Holder object (bukan `let`): TS mempersempit `let` yang
+      // hanya ditugaskan di dalam closure menjadi `null`/`never`.
+      const pushed: { body: PushBody | null } = { body: null };
+      await library.renamePlaylist(id, 'Satu Baru');
+      await syncNow({
+        pull: async () => emptyPull(22_000),
+        push: async (body: PushBody) => {
+          pushed.body = body;
+          return { serverTime: 23_000, applied: 1 };
+        },
+      });
+      expect(pushed.body?.playlists).toHaveLength(1);
+      expect(pushed.body?.playlists?.[0].nama).toBe('Satu Baru');
+      // Koleksi kosong tidak ada di body ronde (chunk kosong).
+      expect(pushed.body?.likes ?? []).toHaveLength(0);
+    });
+
+    it('syncNow: edit di tengah dorong tidak ikut terhapus', async () => {
+      const id = await library.createPlaylist('Satu');
+      await syncNow({
+        pull: async () => emptyPull(20_000),
+        push: async () => {
+          // Edit pengguna mendarat DI TENGAH dorong (sesudah
+          // snapshot diambil): penanda baru harus selamat.
+          await library.markSyncDirty('playlists', String(id));
+          return { serverTime: 21_000, applied: 1 };
+        },
+      });
+      const dirty = await library.listSyncDirty();
+      expect(dirty).toHaveLength(1);
+      expect(dirty[0]).toMatchObject({
+        collection: 'playlists',
+        ref: String(id),
+      });
+    });
+  });
+
+  describe('shouldAutoSync (P-PushDelta)', () => {
+    it('true bila belum pernah dorong penuh (butuh baseline)', async () => {
+      expect(await shouldAutoSync()).toBe(true);
+    });
+
+    it('true bila ada perubahan lokal yang belum terdorong', async () => {
+      await library.setMeta(SYNC_PUSH_DELTA_INIT_KEY, '1');
+      await library.setMeta(SYNC_LAST_SYNC_AT_KEY, String(Date.now()));
+      await library.createPlaylist('Satu');
+      expect(await shouldAutoSync()).toBe(true);
+    });
+
+    it('false bila bersih dan sinkron terakhir masih segar', async () => {
+      await library.setMeta(SYNC_PUSH_DELTA_INIT_KEY, '1');
+      await library.setMeta(SYNC_LAST_SYNC_AT_KEY, String(Date.now()));
+      expect(await shouldAutoSync()).toBe(false);
+    });
+
+    it('true bila bersih tapi sinkron terakhir sudah >1 jam', async () => {
+      await library.setMeta(SYNC_PUSH_DELTA_INIT_KEY, '1');
+      await library.setMeta(
+        SYNC_LAST_SYNC_AT_KEY,
+        String(Date.now() - AUTO_SYNC_STALE_MS - 1000),
+      );
+      expect(await shouldAutoSync()).toBe(true);
     });
   });
 });

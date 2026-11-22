@@ -56,13 +56,14 @@ Detail + aritmetika kuota: `docs/blue7-red7-fixes.md`.
    ```sh
    wrangler d1 migrations apply laras-web-sync --local=false
    # atau satu per satu:
-   wrangler d1 execute laras-web-sync --file=workers/sync/0001_init.sql --remote
-   wrangler d1 execute laras-web-sync --file=workers/sync/0002_ratelimit.sql --remote
-   wrangler d1 execute laras-web-sync --file=workers/sync/0003_item_meta.sql --remote
+   wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0001_init.sql --remote
+   wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0002_ratelimit.sql --remote
+   wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0003_item_meta.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0004_oauth_states_item_owner.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0005_sync_quotas.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0006_blue6_quotas.sql --remote
    wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0007_blue7_deleted_rows.sql --remote
+   wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0008_resolve_cache.sql --remote
    ```
    Migrasi 0003 WAJIB sebelum deploy Worker ini — SQL push/pull
    memakai kolom `title`/`artist` dari 0003. Migrasi 0004 WAJIB
@@ -86,8 +87,12 @@ Detail + aritmetika kuota: `docs/blue7-red7-fixes.md`.
    perilaku Blue 6: cooldown tetap 24 jam untuk semua akun,
    tanpa tanggal buka kunci di redirect, sehingga mitigasi S13
    tidak aktif sampai 0007 diterapkan).
-2. **Aplikasi OAuth (langkah owner — BELUM DIBUAT saat P7 ditulis).**
-   Buat aplikasi OAuth Google + GitHub, daftarkan redirect URI:
+   Migrasi 0008 WAJIB sebelum deploy Worker proxy pasca-P3 — endpoint
+   /api/resolve-cache (GET + POST) memakai tabel `resolve_cache` dan
+   `cache_targets` dari 0008 (tanpa tabelnya, endpoint gagal dan app
+   jatuh ke perilaku lama tanpa cache resolve).
+2. **Aplikasi OAuth (SUDAH DIBUAT 19 Nov 2026, live).**
+   Aplikasi OAuth Google + GitHub sudah ada, dengan redirect URI:
    `https://laras-sync.hiroohengkerr.workers.dev/api/auth/callback`
    (satu URI untuk kedua provider).
 3. **Secrets** (client id/secret lewat Secure Vault, jangan chat):
@@ -110,9 +115,19 @@ Detail + aritmetika kuota: `docs/blue7-red7-fixes.md`.
 - Cookie sesi memakai `SameSite=None` karena Worker di domain
   workers.dev dan app di adipmusic.my.id (cookie Lax tidak
   dikirim fetch lintas situs). Mitigasi CSRF: semua POST
-  memvalidasi header `Origin` terhadap `ALLOWED_ORIGINS`.
-  Bila Worker pindah ke subdomain app (same-site), set
-  `COOKIE_SAMESITE=Lax` di vars untuk memperketat.
+  memvalidasi header `Origin` terhadap `ALLOWED_ORIGINS`,
+  dan GET /pull menolak Origin yang ada tapi tidak diizinkan
+  (P-SameSite). Jalan ke `SameSite=Lax` BUKAN memindahkan
+  worker ke subdomain (zone dan worker beda akun Cloudflare
+  — route lintas akun tidak bisa), melainkan proxy Pages
+  Functions same-origin — kode + runbook lengkap di
+  `docs/same-site-sync.md`. JANGAN set `COOKIE_SAMESITE=Lax`
+  sebelum proxy live dan login OAuth terverifikasi lewat
+  proxy (Lax dulu = auth putus total).
+- OAuth memakai PKCE S256 (P-Auth): verifier di cookie
+  HttpOnly, challenge di authorize URL; sesi dirotasi saat
+  login ulang; sesi kedaluwarsa disapu malas saat login;
+  "keluar dari semua perangkat" di POST /api/auth/logout-all.
 - Rate limit D1 fail-open: auth 10/mnt/IP, auth-callback
   10/mnt/IP, sync 30/mnt/user, me 60/mnt/IP. Bila D1 mati,
   request diizinkan (layanan tetap jalan, bukan mati total).

@@ -31,7 +31,7 @@ youtubei 403 tanpa header CORS; base.js 200 tanpa header CORS).
 - Timeout: InnerTube 30 dtk, base.js 90 dtk, media 120 dtk, Spotify 15 dtk.
 - Rate limit: 60/menit endpoint InnerTube, 10/menit media, 10/menit Spotify, per IP,
   disimpan di D1 (tabel `rate_limits`, migrasi
-  `workers/sync/0002_ratelimit.sql`). Fail-open: bila D1 tidak
+  `workers/sync/migrations/0002_ratelimit.sql`). Fail-open: bila D1 tidak
   terikat atau gagal, request diizinkan dan kegagalan dicatat di
   log worker (rate limit yang mati tidak boleh mematikan layanan).
 - CORS: hanya origin di `ALLOWED_ORIGINS`, bukan `*`. Produksi
@@ -49,15 +49,16 @@ python3 ~/workspace/custom-connectors/custom.cloudflare-workers/bin/cfw_t.py \
   -F 'index.js=@workers/proxy/src/index.js;type=application/javascript+module'
 ```
 
-CATATAN REDEPLOY (Blue 1, Red 1 S3): perintah di atas memakai
-`@workers/proxy/src/index.js` saja, tetapi `index.js` sekarang
-mengimpor `./rateLimit.js` — upload satu file TIDAK cukup lagi.
-Sebelum redeploy, koordinator wajib menggabungkan kedua modul
-(mis. esbuild `index.js --bundle --format=esm`, atau unggah
-multi-part sesuai API Workers) dan menjalankan migrasi D1:
+CATATAN REDEPLOY (Blue 1, Red 1 S3; diperbarui P-Shared): perintah
+di atas memakai `@workers/proxy/src/index.js` saja, tetapi
+`index.js` sekarang mengimpor modul bersama di `workers/shared/`
+(http.js, log.js, rateLimit.js) — upload satu file TIDAK cukup
+lagi. Sebelum redeploy, koordinator wajib membundel (esbuild
+`index.js --bundle --format=esm`, seperti deploy_proxy.py — JANGAN
+upload file mentah) dan menjalankan migrasi D1:
 
 ```
-wrangler d1 execute laras-web-sync --file=workers/sync/0002_ratelimit.sql
+wrangler d1 execute laras-web-sync --file=workers/sync/migrations/0002_ratelimit.sql
 ```
 
 Tanpa binding `DB`, worker tetap jalan tetapi rate limit nonaktif

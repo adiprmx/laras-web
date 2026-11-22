@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   fetchAuthMe,
   fetchLogout,
+  fetchLogoutAll,
   fetchPull,
   fetchPush,
   SyncApiError,
@@ -76,6 +77,24 @@ describe('syncClient', () => {
     await expect(
       fetchLogout(fetchMock as unknown as typeof fetch),
     ).rejects.toMatchObject({ status: 0, code: 'NETWORK' });
+  });
+
+  it('P-Auth: fetchLogoutAll POST /api/auth/logout-all + kembalikan revoked', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        success: true,
+        data: { loggedOutEverywhere: true, revoked: 3 },
+      }),
+    );
+    const result = await fetchLogoutAll(fetchMock as unknown as typeof fetch);
+    expect(result).toEqual({ loggedOutEverywhere: true, revoked: 3 });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe(`${SYNC_API_BASE_URL}/api/auth/logout-all`);
+    expect(init.method).toBe('POST');
+    expect(init.credentials).toBe('include');
   });
 
   it('fetchPush mengirim JSON + since di URL pull', async () => {

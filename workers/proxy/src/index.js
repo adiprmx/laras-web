@@ -12,7 +12,7 @@
 // Batas yang ditegakkan (arsitektur.md §4.1):
 //   JSON youtubei maks 10 MB, script player maks 8 MB,
 //   body POST maks 1 MB, media streaming cap 100 MB per request.
-// Rate limit di D1 (Red 1 S3, migrasi workers/sync/0002_ratelimit.sql):
+// Rate limit di D1 (Red 1 S3, migrasi workers/sync/migrations/0002_ratelimit.sql):
 // satu baris per (IP, jendela menit). Fail-open: bila D1 tidak
 // terikat atau gagal, request diizinkan + dicatat — rate limit yang
 // mati tidak boleh mematikan layanan. Binding D1: `DB`
@@ -21,7 +21,17 @@
 // segmen sinkron handler (validasi + bangun respons), di luar waktu
 // tunggu jaringan upstream. Header ini dicabut di deployment produksi.
 
-import { isRateLimited } from './rateLimit.js';
+// Helper bersama (P-Shared): HTTP, log/observabilitas, rate limit.
+// Dibundel esbuild saat deploy (deploy_proxy.py), jadi impor
+// lintas direktori aman.
+import {
+  MAX_BODY_BYTES,
+  corsHeaders,
+  jsonError,
+  readCapped,
+} from '../../shared/http.js';
+import { checkDb, logInfo, logWarn, newRequestId } from '../../shared/log.js';
+import { checkRateLimit } from '../../shared/rateLimit.js';
 
 const INNERTUBE_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'; // kunci publik InnerTube
 const YT_HOST = 'https://www.youtube.com';
@@ -35,7 +45,6 @@ const ROUTES = {
   '/api/innertube/suggestions': { upstream: `${YTM_HOST}/youtubei/v1/music/get_search_suggestions`, timeoutMs: 30000, capBytes: 10 * 1024 * 1024, kind: 'innertube' },
 };
 
-const MAX_BODY_BYTES = 1 * 1024 * 1024;
 const PLAYER_SCRIPT_CAP = 8 * 1024 * 1024;
 const PLAYER_SCRIPT_TIMEOUT_MS = 90000;
 const MEDIA_CAP = 100 * 1024 * 1024;
@@ -80,39 +89,8 @@ const MEDIA_CONTENT_TYPES = ['audio/', 'video/', 'application/octet-stream'];
 // fetch ke YouTube. Produksi membaca daftar ini dari config remote.
 const PLAYER_HASHES = new Set(['fad7e4e9', 'ad8d59ae', 'b559f50c']);
 
-// Rate limit D1 (Red 1 S3) dengan fail-open: bila binding DB tidak
-// ada atau D1 gagal, request DIIZINKAN dan kegagalan dicatat lewat
-// console.warn (tampil di log Cloudflare). Kunci (yang memuat IP)
-// TIDAK PERNAH dicatat. Peringatan "binding tidak ada" ditulis
-// sekali per isolate supaya log tidak dibanjiri tiap request.
-let warnedMissingDb = false;
-async function checkRateLimit(env, key, limit) {
-  if (!env.DB) {
-    if (!warnedMissingDb) {
-      warnedMissingDb = true;
-      console.warn('rate limit: binding D1 (DB) tidak ada, rate limit nonaktif');
-    }
-    return false;
-  }
-  try {
-    return await isRateLimited(env.DB, key, limit);
-  } catch (e) {
-    console.warn(
-      'rate limit: D1 gagal, request diizinkan:',
-      e instanceof Error ? e.message : 'unknown',
-    );
-    return false;
-  }
-}
-
-function corsHeaders(env, request) {
-  const origin = request.headers.get('Origin') || '';
-  const allowed = (env.ALLOWED_ORIGINS || 'https://laras.adipmusic.my.id')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-  const h = { 'Vary': 'Origin' };
-  if (allowed.includes(origin)) h['Access-Control-Allow-Origin'] = origin;
-  return h;
-}
+// Versi worker — naikkan saat perilaku berubah (dilaporkan /health).
+const WORKER_VERSION = '1.1.0';
 
 // Bandingkan dua string dalam waktu yang tidak bergantung pada
 // posisi beda pertama (menghindari tebakan kunci lewat timing).
@@ -127,45 +105,25 @@ function safeEqual(a, b) {
   return diff === 0;
 }
 
-function jsonError(status, code, message, extraHeaders = {}) {
-  return new Response(JSON.stringify({ success: false, error: { code, message } }), {
-    status,
-    headers: { 'Content-Type': 'application/json', ...extraHeaders },
-  });
-}
-
-// Baca body dengan cap: kembalikan { tooBig: true } bila melewati
-// cap, TANPA mem-buffer seluruh body (stream dibatalkan begitu cap
-// terlampaui). Dipakai untuk respons upstream DAN body request
-// (Red 1 S1); pemanggil yang memutuskan kode galatnya (502/413).
-async function readCapped(body, capBytes) {
-  const reader = body.getReader();
-  const chunks = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > capBytes) {
-      try { await reader.cancel(); } catch { /* abaikan */ }
-      return { tooBig: true };
-    }
-    chunks.push(value);
-  }
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) { out.set(c, off); off += c.byteLength; }
-  return { tooBig: false, bytes: out };
-}
-
 export default {
   async fetch(request, env) {
     const tStart = performance.now();
+    const requestId = newRequestId(request);
     let cpuMs = 0;
     const mark = (t0) => { cpuMs += performance.now() - t0; };
     const withCpu = (res) => {
       const h = new Headers(res.headers);
       h.set('x-proxy-cpu-ms', cpuMs.toFixed(3));
+      h.set('x-request-id', requestId);
+      // Satu baris log per request (P-Health): metode, jalur, status,
+      // durasi. Path saja yang dicatat — query TIDAK (bisa berisi URL).
+      logInfo('request', {
+        requestId,
+        method: request.method,
+        path: new URL(request.url).pathname,
+        status: res.status,
+        ms: Number((performance.now() - tStart).toFixed(1)),
+      });
       // Spike saja: buka header ukur ke JS browser (tanpa ini nilainya
       // tidak terbaca dari fetch; dicabut bersama headernya di produksi).
       // GABUNG, jangan timpa: /api/media mengekspos Content-Range
@@ -196,6 +154,33 @@ export default {
             'Access-Control-Allow-Headers': 'Content-Type, X-YouTube-Client-Name, X-YouTube-Client-Version, X-Cache-Key, Range',
             'Access-Control-Max-Age': '86400',
           },
+        }));
+      }
+
+      // ---- /health: liveness + status dependensi (P-Health) ----
+      // Tanpa rate limit, tanpa auth — monitor uptime harus bisa
+      // menjangkaunya bebas. Selalu 200 bila worker merespons;
+      // field `db` melaporkan D1 (rate limit fail-open bila bukan ok).
+      if (url.pathname === '/health') {
+        if (request.method !== 'GET') {
+          mark(t0);
+          return withCpu(jsonError(405, 'METHOD_NOT_ALLOWED', 'Metode tidak diizinkan', cors));
+        }
+        const db = await checkDb(env);
+        mark(t0);
+        return withCpu(new Response(JSON.stringify({
+          success: true,
+          data: {
+            ok: true,
+            worker: 'proxy',
+            version: WORKER_VERSION,
+            db,
+            failOpen: db !== 'ok',
+            time: new Date().toISOString(),
+          },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...cors },
         }));
       }
 
@@ -456,7 +441,13 @@ export default {
         }
         const resHeaders = new Headers(cors);
         resHeaders.set('Content-Type', 'text/javascript');
-        resHeaders.set('Cache-Control', 'public, max-age=86400');
+        // max-age 1 jam (bukan 24 jam): isi per hash TIDAK abadi dari
+        // sudut pandang app — bila proxy suatu hari ganti varian
+        // (player_es6 vs varian lain, insiden 22 Nov 2026: base.js
+        // ias basi di HTTP cache browser membuat uji /spike tetap
+        // 0/5 SESUDAH worker diperbaiki), cache basi maksimal 1 jam.
+        // App juga fetch dengan cache: 'no-store' (resolve.ts).
+        resHeaders.set('Cache-Control', 'public, max-age=3600');
         mark(t0);
         return withCpu(new Response(read.bytes, { status: upstream.status, headers: resHeaders }));
       }
@@ -567,7 +558,7 @@ export default {
               'FROM resolve_cache WHERE video_id = ? AND expires_at > ?',
             ).bind(videoId, nowS).first();
           } catch (e) {
-            console.warn('resolve-cache GET: D1 gagal:', e instanceof Error ? e.message : 'unknown');
+            logWarn('resolve-cache GET: D1 gagal', { error: e instanceof Error ? e.message : 'unknown' });
             mark(t0);
             return withCpu(jsonError(503, 'CACHE_UNAVAILABLE', 'Cache belum tersedia', cors));
           }
@@ -679,7 +670,7 @@ export default {
               'DELETE FROM resolve_cache WHERE expires_at <= ?',
             ).bind(nowS).run();
           } catch (e) {
-            console.warn('resolve-cache POST: D1 gagal:', e instanceof Error ? e.message : 'unknown');
+            logWarn('resolve-cache POST: D1 gagal', { error: e instanceof Error ? e.message : 'unknown' });
             mark(t0);
             return withCpu(jsonError(503, 'CACHE_UNAVAILABLE', 'Cache belum tersedia', cors));
           }

@@ -27,6 +27,7 @@ import {
 import { getPlayerService } from '../../player/service';
 import { useLibraryStore } from '../../store/library';
 import { strings } from '../../strings/id';
+import AppLink from '../AppLink';
 import SkeletonList from '../SkeletonList';
 import ConfirmDialog from '../library/ConfirmDialog';
 import { tracksFromViews } from '../library/trackFromView';
@@ -424,14 +425,14 @@ export default function DownloadsPage({
               <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-zinc-400">
                 {strings.storageEmptyBody}
               </p>
-              <button
-                type="button"
-                onClick={() => onNavigate('/search')}
-                data-testid="downloads-empty-find"
-                className="mt-6 h-11 rounded-full bg-white px-6 text-sm font-medium text-black transition-transform active:scale-95"
+              <AppLink
+                to="/search"
+                onNavigate={onNavigate}
+                testId="downloads-empty-find"
+                className="mt-6 inline-flex h-11 items-center rounded-full bg-white px-6 text-sm font-medium text-black transition-transform active:scale-95"
               >
                 {strings.findSong}
-              </button>
+              </AppLink>
             </div>
           ) : null}
         </>

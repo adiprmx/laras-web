@@ -30,4 +30,6 @@ The maintainer confirms receipt, investigates, and fixes the issue in a new rele
 
 ## Scope notes
 
-Laras Web has no login of its own and no backend that stores user data, so most reports concern the web app itself: local storage in the browser, the update config it fetches from GitHub, the requests it makes to YouTube, Google, and the lyrics provider, and the optional sync Worker. Reports about YouTube, Google, or Cloudflare services belong to those providers, not here.
+Login is optional and only for sync: the user signs in with GitHub or Google OAuth, and only after turning sync on. Playing music never needs a login. When sync is on, the sync Worker stores the user's library data (playlists, likes, history) in a Cloudflare D1 database so it can follow the user across devices. The app does not store OAuth access tokens, and the OAuth scopes do not request the user's email. The user can delete the synced account from Settings; deletion also removes the stored library data after a short re-registration cooldown.
+
+So most reports concern the web app itself: local storage in the browser, the update config it fetches from GitHub, the requests it makes to YouTube, Google, and the lyrics provider, and the optional sync Worker and its stored library data. Reports about YouTube, Google, or Cloudflare services belong to those providers, not here.

@@ -26,6 +26,7 @@ import {
 } from '../../resilience/playerLog';
 import { useResilienceStore } from '../../resilience/store';
 import { strings } from '../../strings/id';
+import AppLink from '../AppLink';
 import { getLyricsService } from '../../lyrics/lyricsService';
 import { loginUrl } from '../../sync/auth';
 import { useSyncStore } from '../../sync/syncStore';
@@ -112,6 +113,7 @@ function AccountSection() {
   const refreshAuth = useSyncStore((s) => s.refreshAuth);
   const syncNow = useSyncStore((s) => s.syncNow);
   const signOut = useSyncStore((s) => s.signOut);
+  const signOutEverywhere = useSyncStore((s) => s.signOutEverywhere);
   const deleteAccount = useSyncStore((s) => s.deleteAccount);
 
   const [authError, setAuthError] = useState(false);
@@ -124,6 +126,8 @@ function AccountSection() {
     null,
   );
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmSignOutEverywhere, setConfirmSignOutEverywhere] =
+    useState(false);
   const [deleteDone, setDeleteDone] = useState(false);
   const [deleteFailed, setDeleteFailed] = useState(false);
   const handledQuery = useRef(false);
@@ -185,9 +189,11 @@ function AccountSection() {
   const errorText =
     error === 'syncErrorRateLimited'
       ? strings.settingsAccountRateLimited
-      : error === 'syncErrorNetwork' || error === 'syncErrorServer'
-        ? strings.settingsAccountSyncError
-        : null;
+      : error === 'syncErrorPullIncomplete'
+        ? strings.settingsAccountPullIncomplete
+        : error === 'syncErrorNetwork' || error === 'syncErrorServer'
+          ? strings.settingsAccountSyncError
+          : null;
 
   return (
     <Section title={strings.settingsAccountSection} testId="settings-account">
@@ -294,7 +300,28 @@ function AccountSection() {
             >
               {strings.settingsAccountSignOut}
             </button>
+            <button
+              type="button"
+              onClick={() => setConfirmSignOutEverywhere(true)}
+              data-testid="settings-sign-out-everywhere"
+              className="h-11 rounded-full border border-white/15 px-6 text-sm font-medium transition-colors hover:bg-white/5 active:scale-95"
+            >
+              {strings.settingsAccountSignOutEverywhere}
+            </button>
           </div>
+          {confirmSignOutEverywhere ? (
+            <ConfirmDialog
+              title={strings.settingsAccountSignOutEverywhereTitle}
+              body={strings.settingsAccountSignOutEverywhereBody}
+              confirmLabel={strings.settingsAccountSignOut}
+              onConfirm={() => {
+                setConfirmSignOutEverywhere(false);
+                void signOutEverywhere();
+              }}
+              onCancel={() => setConfirmSignOutEverywhere(false)}
+              testId="settings-sign-out-everywhere-dialog"
+            />
+          ) : null}
           <div className="mt-4">
             <Row
               label={strings.settingsAccountLastSync}
@@ -487,15 +514,15 @@ export default function SettingsPage({
 
   return (
     <div data-testid="settings-page" className="pt-2">
-      <button
-        type="button"
-        onClick={() => onNavigate('/')}
-        data-testid="settings-back"
+      <AppLink
+        to="/"
+        onNavigate={onNavigate}
+        testId="settings-back"
         className="flex h-11 items-center gap-2 rounded-full px-3 text-sm font-medium text-zinc-400 transition-colors hover:text-zinc-100 active:scale-95"
       >
         <ArrowLeft size={18} aria-hidden="true" />
         {strings.backToHome}
-      </button>
+      </AppLink>
       <h1 className="mt-2 text-xl font-bold tracking-tight">
         {strings.settingsTitle}
       </h1>

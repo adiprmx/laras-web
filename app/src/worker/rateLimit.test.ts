@@ -1,7 +1,7 @@
 /**
  * Tes Vitest rate limit D1 proxy (Red 1 S3).
  *
- * Modul worker (`workers/proxy/src/rateLimit.js`) diimpor langsung
+ * Modul worker (`workers/shared/rateLimit.js`) diimpor langsung
  * dengan D1 palsu in-memory yang meniru tiga pernyataan SQL yang
  * dipakai modul itu (upsert, select hitungan, sapu). Ini menguji
  * logika jendela + hitungan tanpa Cloudflare; perilaku D1 aslinya
@@ -15,7 +15,7 @@ import {
   windowStartFor,
   type D1DatabaseLike,
   type D1Statement,
-} from '../../../workers/proxy/src/rateLimit';
+} from '../../../workers/shared/rateLimit';
 
 /** D1 palsu in-memory: cukup untuk tiga pernyataan rateLimit.js. */
 class FakeD1 implements D1DatabaseLike {

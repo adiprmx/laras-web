@@ -10,6 +10,7 @@
  * ada di mesin ini, grup base.js penuh dilewati dengan alasan jelas
  * (bukan gagal diam-diam).
  */
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -26,6 +27,7 @@ import {
   extractSigCallSite,
   extractSignatureTimestamp,
   extractStringTable,
+  extractStringTableInfo,
   parseStringTable,
   solveExpression,
 } from './playerScript';
@@ -553,8 +555,7 @@ describe('pengerasan Blue 4 (R4-I3): validasi identifier URL', () => {
   });
 });
 
-describe('base.js ASLI ketiga hash yang sedang live', () => {
-  const hashes = [
+describe('base.js ASLI ketiga hash yang sedang live', () => {  const hashes = [
     {
       hash: 'fad7e4e9',
       sts: 20767,
@@ -579,7 +580,7 @@ describe('base.js ASLI ketiga hash yang sedang live', () => {
       setIndex: 6,
       middle: 'dy',
     },
-  ] as const;
+  ];
 
   for (const expected of hashes) {
     it(`buildPlayerScript ${expected.hash}: hash, sts, rantai, kelas URL`, () => {
@@ -648,4 +649,207 @@ describe('base.js ASLI ketiga hash yang sedang live', () => {
     expect(table).not.toBeNull();
     expect(table).toMatch(/\.split\(";"\);$/);
   });
+});
+
+describe('varian player_ias b559f50c (generalisasi 22 Nov 2026)', () => {
+  const kJsUrlIas = '/s/player/b559f50c/player_ias.vflset/en_US/base.js';
+  const loadIas = () => loadFixture('base-js-ias-b559f50c.js');
+  const kDriverArgs = {
+    cipherUrl: 'https://rr1---sn-x.googlevideo.com/videoplayback?n=abc',
+    cipheredS: 's-ciphered',
+    sigParam: 'sig',
+  };
+
+  it('extractStringTableInfo membaca nama variabel tabel aa', () => {
+    const info = extractStringTableInfo(loadIas());
+    expect(info).not.toBeNull();
+    expect(info!.varName).toBe('aa');
+    expect(info!.statement).toMatch(/^aa="n\{\{call\{push\{/);
+    expect(info!.statement).toMatch(/\.split\("\{"\);$/);
+    // Kompatibel: extractStringTable tetap mengembalikan pernyataannya.
+    expect(extractStringTable(loadIas())).toBe(info!.statement);
+  });
+
+  it('parseStringTable mengurai token aa (set/ff/prototype/url/call)', () => {
+    const table = extractStringTable(loadIas());
+    const tokens = parseStringTable(table!);
+    expect(tokens).not.toBeNull();
+    expect(tokens!.length).toBe(101);
+    expect(tokens![28]).toBe('set');
+    expect(tokens![71]).toBe('ff');
+    expect(tokens![21]).toBe('prototype');
+    expect(tokens![25]).toBe('url');
+    expect(tokens![2]).toBe('call');
+    expect(tokens![1]).toBe('');
+  });
+
+  it('extractSigCallSite: Hx / Go / cN + helper N_ + setIdx 28', () => {
+    const site = extractSigCallSite(loadIas(), 'aa');
+    expect(site).not.toBeNull();
+    expect(site!.innerName).toBe('Hx');
+    expect(site!.innerA).toBe(34);
+    expect(site!.innerB).toBe(743);
+    expect(site!.middleName).toBe('Go');
+    expect(site!.middleA).toBe(4);
+    expect(site!.middleB).toBe(5086);
+    expect(site!.outerName).toBe('cN');
+    expect(site!.outerA).toBe(1);
+    expect(site!.outerB).toBe(8797);
+    expect(site!.helperObjectName).toBe('N_');
+    expect(site!.setMethodTableIndex).toBe(28);
+  });
+
+  it('solveExpression merangkai rantai ias dengan benar', () => {
+    const site = extractSigCallSite(loadIas(), 'aa');
+    expect(solveExpression(site!, '__s')).toBe(
+      'cN(1,8797,Go(4,5086,Hx(34,743,__s)))',
+    );
+  });
+
+  it('buildPlayerScript ias: hash, sts, rantai, kelas Rs, set, ff', () => {
+    const script = buildPlayerScript(kJsUrlIas, loadIas());
+    expect(script.hash).toBe('b559f50c');
+    expect(script.signatureTimestamp).toBe(20770);
+    expect(script.sigCallSite.innerName).toBe('Hx');
+    expect(script.sigCallSite.middleName).toBe('Go');
+    expect(script.sigCallSite.outerName).toBe('cN');
+    expect(script.sigCallSite.helperObjectName).toBe('N_');
+    expect(script.sigCallSite.setMethodTableIndex).toBe(28);
+    expect(script.urlClassName).toBe('Rs');
+    expect(script.urlSetMethod).toBe('set');
+    expect(script.urlSerializeMethod).toBe('ff');
+    // Prelude memuat tabel aa + rantai + helper N_.
+    expect(script.preludeCode).toContain('aa="');
+    expect(script.preludeCode).toContain('Go=function');
+    expect(script.preludeCode).toContain('Hx=function');
+    expect(script.preludeCode).toContain('cN=function');
+    expect(script.preludeCode).toContain('N_={');
+    expect(script.preludeCode).toContain('var g = _yt_player;');
+    expect(script.preludeCode.length).toBeGreaterThan(1000);
+    expect(script.preludeCode.length).toBeLessThan(1024 * 1024);
+  });
+
+  it('buildSolveDriver ias memakai rantai + kelas Rs + ff', () => {
+    const script = buildPlayerScript(kJsUrlIas, loadIas());
+    const driver = buildSolveDriver(script, kDriverArgs);
+    expect(driver).toContain('cN(1,8797,Go(4,5086,Hx(34,743,__s)))');
+    expect(driver).toContain('new _yt_player.Rs(');
+    expect(driver).toContain('__u.set(');
+    expect(driver).toContain('__u.ff();');
+    expect(driver).not.toContain('_yt_player.JH');
+    expect(driver).not.toContain('__u.gf();');
+  });
+
+  it('pola lama (tabel `w`) gagal di base.js ias', () => {
+    // Bukti kontrol: pola lama mengasumsikan tabel `w` - tidak ada di
+    // varian ias, jadi langkah 2 call site (m[aa[28]]...) tidak cocok.
+    // (Kegagalan buildPlayerScript kode ASLI di file ini juga dibuktikan
+    // Tim #16: kontrol /tmp/laras-exp/test-patched.js -> THROW.)
+    expect(extractSigCallSite(loadIas())).toBeNull();
+  });
+});
+
+describe('non-regresi es6: prelude+driver byte-identik pra-patch', () => {
+  // Hash sha256 direkam dari kode ASLI sebelum patch (22 Nov 2026,
+  // tes temporer __baseline.test.ts, 7/7): generalisasi tabel/ran-
+  // tai/serialize TIDAK BOLEH mengubah satu byte pun keluaran es6.
+  const kDriverArgs = {
+    cipherUrl: 'https://rr1---sn-x.googlevideo.com/videoplayback?n=abc',
+    cipheredS: 's-ciphered',
+    sigParam: 'sig',
+  };
+  const sha = (s: string): string =>
+    createHash('sha256').update(s, 'utf8').digest('hex');
+
+  const kCases: Array<{
+    label: string;
+    fixture: string | null;
+    archive: string | null;
+    url: string;
+    prelude: string;
+    driver: string;
+  }> = [
+    {
+      label: 'cuplikan fad7e4e9',
+      fixture: 'base-js-snippet.js',
+      archive: null,
+      url: '/s/player/fad7e4e9/player_es6.vflset/en_US/base.js',
+      prelude:
+        'bff628a1595fdfaa4ed789574fd4b1afc15d31eb47227fe6d426658aa2826d21',
+      driver:
+        'b21a1b7dce13d576bc430ce733b4b63e632af2e6a31dfeb03558927989e18708',
+    },
+    {
+      label: 'cuplikan ad8d59ae',
+      fixture: 'base-js-snippet-ad8d59ae.js',
+      archive: null,
+      url: '/s/player/ad8d59ae/player_es6.vflset/en_US/base.js',
+      prelude:
+        'f4a3779707b1511b08623af39107a892fa8e3f1a7a7a043bc1235167daf56af3',
+      driver:
+        'cd29ea926e53a58f8007ec1c9a87627c4ce9d5bce272ef0cb2903b3c128c6790',
+    },
+    {
+      label: 'cuplikan b559f50c',
+      fixture: 'base-js-snippet-b559f50c.js',
+      archive: null,
+      url: '/s/player/b559f50c/player_es6.vflset/en_US/base.js',
+      prelude:
+        'e1ab4f1bab415435e26c3e1133687a074e3d2a9c0b6b5be71f009b6af6350a85',
+      driver:
+        '94c112806f2edce810c7c4baa895d99891dcb9c710c439aca1207845b23f6b91',
+    },
+    {
+      label: 'base.js penuh fad7e4e9',
+      fixture: null,
+      url: '/s/player/fad7e4e9/player_es6.vflset/en_US/base.js',
+      archive: 'fad7e4e9',
+      prelude:
+        'da1e13370d61ac9f87b43ba7deb8c6ab0c92ce051b6c938dc84b03e58adda3f5',
+      driver:
+        'b21a1b7dce13d576bc430ce733b4b63e632af2e6a31dfeb03558927989e18708',
+    },
+    {
+      label: 'base.js penuh ad8d59ae',
+      fixture: null,
+      url: '/s/player/ad8d59ae/player_es6.vflset/en_US/base.js',
+      archive: 'ad8d59ae',
+      prelude:
+        'f4a3779707b1511b08623af39107a892fa8e3f1a7a7a043bc1235167daf56af3',
+      driver:
+        'cd29ea926e53a58f8007ec1c9a87627c4ce9d5bce272ef0cb2903b3c128c6790',
+    },
+    {
+      label: 'base.js penuh b559f50c es6',
+      fixture: null,
+      url: '/s/player/b559f50c/player_es6.vflset/en_US/base.js',
+      archive: 'b559f50c',
+      prelude:
+        'e1ab4f1bab415435e26c3e1133687a074e3d2a9c0b6b5be71f009b6af6350a85',
+      driver:
+        '94c112806f2edce810c7c4baa895d99891dcb9c710c439aca1207845b23f6b91',
+    },
+  ] as const;
+
+  for (const expected of kCases) {
+    it(`${expected.label}: prelude+driver byte-identik`, () => {
+      const baseJs =
+        expected.fixture !== null
+          ? loadFixture(expected.fixture)
+          : expected.archive !== null
+            ? loadFullBaseJs(expected.archive)
+            : null;
+      if (baseJs === null) {
+        console.warn(
+          `base.js ${expected.label} tidak ditemukan di arsip; tes dilewati`,
+        );
+        return;
+      }
+      const script = buildPlayerScript(expected.url, baseJs);
+      expect(sha(script.preludeCode)).toBe(expected.prelude);
+      expect(sha(buildSolveDriver(script, kDriverArgs))).toBe(
+        expected.driver,
+      );
+    });
+  }
 });

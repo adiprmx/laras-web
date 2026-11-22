@@ -60,30 +60,35 @@ export default function BrowseShelves({
             </ul>
           ) : (
             <div className="mt-2 flex snap-x snap-mandatory gap-3 overflow-x-auto pb-2">
-              {shelf.items.map((item, itemIndex) => (
-                <BrowseCard
-                  key={`${item.browseId ?? item.videoId ?? item.title}-${itemIndex}`}
-                  item={item}
-                  testId={`${testIdPrefix}-card-${item.browseId ?? item.videoId ?? itemIndex}`}
-                  onClick={() => {
-                    if (item.kind === 'song') {
-                      playBrowseShelfItems(shelf.items, itemIndex);
-                      return;
+              {shelf.items.map((item, itemIndex) => {
+                // P-Links: kartu non-lagu adalah tautan (AppLink
+                // lewat prop `to` BrowseCard); lagu tetap tombol
+                // putar. browseId dari respons YTM bisa mengandung
+                // `/` atau `%` (Red 1 R2): tanpa encode, rute
+                // rusak atau parseRoute crash.
+                const params = item.browseParams
+                  ? `?params=${encodeURIComponent(item.browseParams)}`
+                  : '';
+                const to =
+                  item.kind !== 'song' && item.browseId
+                    ? `/browse/${encodeURIComponent(item.browseId)}${params}`
+                    : undefined;
+                return (
+                  <BrowseCard
+                    key={`${item.browseId ?? item.videoId ?? item.title}-${itemIndex}`}
+                    item={item}
+                    testId={`${testIdPrefix}-card-${item.browseId ?? item.videoId ?? itemIndex}`}
+                    to={to}
+                    onNavigate={onNavigate}
+                    onClick={
+                      item.kind === 'song'
+                        ? () =>
+                            playBrowseShelfItems(shelf.items, itemIndex)
+                        : undefined
                     }
-                    if (item.browseId) {
-                      const params = item.browseParams
-                        ? `?params=${encodeURIComponent(item.browseParams)}`
-                        : '';
-                      // browseId datang dari respons YTM dan bisa
-                      // mengandung `/` atau `%` (Red 1 R2): tanpa
-                      // encode, rute rusak atau parseRoute crash.
-                      onNavigate(
-                        `/browse/${encodeURIComponent(item.browseId)}${params}`,
-                      );
-                    }
-                  }}
-                />
-              ))}
+                  />
+                );
+              })}
             </div>
           )}
         </div>

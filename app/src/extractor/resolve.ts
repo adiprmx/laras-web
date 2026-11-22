@@ -23,6 +23,7 @@
  * panjang URL.
  */
 import { buildPlayerScript, type PlayerScript } from '../solver/playerScript';
+import { ExtractorException } from '../solver/errors';
 import { isAllowedStreamUrl } from '../solver/urlAllowlist';
 import {
   defaultDelay,
@@ -528,7 +529,14 @@ export class StreamResolver {
     if (cached) return cached;
     const res = await fetchWithTimeout(
       `${PROXY_BASE_URL}/api/player-script?hash=${encodeURIComponent(hash)}`,
-      { headers: { Accept: 'text/javascript' } },
+      {
+        headers: { Accept: 'text/javascript' },
+        // Jangan pernah pakai ulang base.js basi dari HTTP cache
+        // browser (proxy mengirim max-age=86400): hash boleh sama
+        // sementara isi base.js sudah berubah di sisi YouTube.
+        // Dedup dalam satu sesi tetap lewat cache memori scriptByHash.
+        cache: 'no-store',
+      },
       BASE_JS_TIMEOUT_MS,
     );
     if (!res.ok) {
@@ -748,8 +756,14 @@ export class StreamResolver {
             };
           } catch (error) {
             roundAttempts.push(`${client.name}=solver-gagal`);
-            if (error instanceof ResolveError) {
-              // Cipher gagal dipecahkan: coba client berikut.
+            if (
+              error instanceof ResolveError ||
+              error instanceof ExtractorException
+            ) {
+              // Cipher gagal dipecahkan (termasuk buildPlayerScript
+              // yang melempar ExtractorException, mis. base.js berubah
+              // strukturnya, dan solverTimeout dari solverClient):
+              // coba client berikut, jangan matikan resolve.
               continue;
             }
             throw error;

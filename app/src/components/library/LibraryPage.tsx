@@ -29,6 +29,9 @@ import type {
 import { getPlayerService } from '../../player/service';
 import { useLibraryService, useLibraryStore } from '../../store/library';
 import { strings } from '../../strings/id';
+import AppLink from '../AppLink';
+import { coverSrcSet } from '../coverSrc';
+import VirtualList from '../VirtualList';
 import ConfirmDialog from './ConfirmDialog';
 import PlaylistDialog from './PlaylistDialog';
 import SongMenu from './SongMenu';
@@ -522,7 +525,7 @@ export default function LibraryPage({
         ) : tab === 'playlists' ? (
           <PlaylistListBlock
             playlists={playlists}
-            onOpen={(id) => onNavigate(`/library/playlist/${id}`)}
+            onNavigate={onNavigate}
             onCreate={() => setShowCreatePlaylist(true)}
           />
         ) : (
@@ -728,17 +731,20 @@ function SongListBlock({
     return <EmptyState title={emptyTitle} body={emptyBody} />;
   }
   return (
-    <ul className="divide-y divide-white/5" data-testid={testId}>
-      {songs.map((view, index) => (
+    <VirtualList
+      items={songs}
+      renderItem={(view, index) => (
         <SongRow
-          key={view.song.id}
           view={view}
           onPlay={() => onPlay(index)}
           onMenu={() => onMenu(view)}
           testId={`song-${view.song.id}`}
         />
-      ))}
-    </ul>
+      )}
+      keyOf={(view) => view.song.id}
+      testId={testId}
+      className="divide-y divide-white/5"
+    />
   );
 }
 
@@ -758,9 +764,12 @@ function ArtistListBlock({
     );
   }
   return (
-    <ul className="divide-y divide-white/5" data-testid="artist-list">
-      {artists.map((a) => (
-        <li key={a.artist.id}>
+    <VirtualList
+      items={artists}
+      renderItem={(a) => {
+        const cover = coverSrcSet(a.artist.thumbnailUrl, '48px');
+        return (
+        <li>
           <button
             type="button"
             onClick={() => onOpen(a)}
@@ -770,6 +779,8 @@ function ArtistListBlock({
             {a.artist.thumbnailUrl ? (
               <img
                 src={a.artist.thumbnailUrl}
+                srcSet={cover?.srcSet}
+                sizes={cover?.sizes}
                 alt=""
                 width={48}
                 height={48}
@@ -794,8 +805,12 @@ function ArtistListBlock({
             </span>
           </button>
         </li>
-      ))}
-    </ul>
+        );
+      }}
+      keyOf={(a) => a.artist.id}
+      testId="artist-list"
+      className="divide-y divide-white/5"
+    />
   );
 }
 
@@ -815,9 +830,12 @@ function AlbumListBlock({
     );
   }
   return (
-    <ul className="divide-y divide-white/5" data-testid="album-list">
-      {albums.map((a) => (
-        <li key={a.album.id}>
+    <VirtualList
+      items={albums}
+      renderItem={(a) => {
+        const cover = coverSrcSet(a.album.thumbnailUrl, '48px');
+        return (
+        <li>
           <button
             type="button"
             onClick={() => onOpen(a)}
@@ -827,6 +845,8 @@ function AlbumListBlock({
             {a.album.thumbnailUrl ? (
               <img
                 src={a.album.thumbnailUrl}
+                srcSet={cover?.srcSet}
+                sizes={cover?.sizes}
                 alt=""
                 width={48}
                 height={48}
@@ -852,18 +872,22 @@ function AlbumListBlock({
             </span>
           </button>
         </li>
-      ))}
-    </ul>
+        );
+      }}
+      keyOf={(a) => a.album.id}
+      testId="album-list"
+      className="divide-y divide-white/5"
+    />
   );
 }
 
 function PlaylistListBlock({
   playlists,
-  onOpen,
+  onNavigate,
   onCreate,
 }: {
   playlists: PlaylistWithCount[];
-  onOpen: (id: number) => void;
+  onNavigate: (path: string) => void;
   onCreate: () => void;
 }) {
   return (
@@ -885,13 +909,14 @@ function PlaylistListBlock({
           />
         </div>
       ) : (
-        <ul className="mt-4 divide-y divide-white/5" data-testid="playlist-list">
-          {playlists.map(({ playlist, songCount }) => (
-            <li key={playlist.id}>
-              <button
-                type="button"
-                onClick={() => onOpen(playlist.id)}
-                data-testid={`playlist-${playlist.id}`}
+        <VirtualList
+          items={playlists}
+          renderItem={({ playlist, songCount }) => (
+            <li>
+              <AppLink
+                to={`/library/playlist/${playlist.id}`}
+                onNavigate={onNavigate}
+                testId={`playlist-${playlist.id}`}
                 className="flex w-full items-center gap-3 rounded-xl px-2 py-3 text-left transition-colors hover:bg-white/5 active:scale-[0.98]"
               >
                 <span
@@ -908,10 +933,13 @@ function PlaylistListBlock({
                     {formatCount(songCount)} {strings.songsLabel}
                   </span>
                 </span>
-              </button>
+              </AppLink>
             </li>
-          ))}
-        </ul>
+          )}
+          keyOf={({ playlist }) => playlist.id}
+          testId="playlist-list"
+          className="mt-4 divide-y divide-white/5"
+        />
       )}
     </div>
   );
@@ -949,18 +977,21 @@ function HistoryListBlock({
           {strings.clearHistory}
         </button>
       </div>
-      <ul className="divide-y divide-white/5" data-testid="history-list">
-        {history.map((entry, index) => (
+      <VirtualList
+        items={history}
+        renderItem={(entry, index) => (
           <SongRow
-            key={entry.event.id}
             view={entry.song}
             subtitle={formatPlayedAt(entry.event.timestamp)}
             onPlay={() => onPlay(index)}
             onMenu={() => onMenu(entry)}
             testId={`history-${entry.event.id}`}
           />
-        ))}
-      </ul>
+        )}
+        keyOf={(entry) => entry.event.id}
+        testId="history-list"
+        className="divide-y divide-white/5"
+      />
     </div>
   );
 }

@@ -319,7 +319,8 @@ test.describe('Playlist', () => {
 
     // Buka playlist: dua lagu ada, urut tambah.
     await page.getByTestId('tab-playlists').click();
-    await page.getByRole('button', { name: /Campuran Uji/ }).click();
+    // P-Links: baris playlist kini tautan (<a>), bukan tombol.
+    await page.getByRole('link', { name: /Campuran Uji/ }).click();
     await expect(page.getByTestId('playlist-detail')).toBeVisible();
     const playlistRows = page
       .getByTestId('playlist-song-list')

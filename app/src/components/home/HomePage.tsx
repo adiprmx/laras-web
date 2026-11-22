@@ -32,6 +32,7 @@ import { getPlayerService } from '../../player/service';
 import { useLibraryStore } from '../../store/library';
 import { strings } from '../../strings/id';
 import StatusBanner from '../../resilience/StatusBanner';
+import AppLink from '../AppLink';
 import SkeletonList from '../SkeletonList';
 import TrackRow from '../TrackRow';
 import BrowseShelves from '../browse/BrowseShelves';
@@ -77,22 +78,30 @@ function Section({
   );
 }
 
+// P-Links: "Lihat semua" adalah tautan (AppLink); onClick
+// opsional hanya untuk efek samping sebelum navigasi (mis.
+// set sort di seksi "Sering diputar").
 function ViewAllButton({
+  to,
+  onNavigate,
   onClick,
   testId,
 }: {
-  onClick: () => void;
+  to: string;
+  onNavigate: (path: string) => void;
+  onClick?: () => void;
   testId: string;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      data-testid={testId}
+    <AppLink
+      to={to}
+      onNavigate={onNavigate}
+      onBeforeNavigate={onClick}
+      testId={testId}
       className="shrink-0 rounded-full px-3 py-2 text-xs font-medium text-zinc-400 transition-colors hover:text-zinc-100 active:scale-95"
     >
       {strings.viewAll}
-    </button>
+    </AppLink>
   );
 }
 
@@ -277,14 +286,14 @@ export default function HomePage({
           <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-zinc-400">
             {strings.homeEmptyBody}
           </p>
-          <button
-            type="button"
-            onClick={() => onNavigate('/search')}
-            data-testid="home-empty-find"
-            className="mt-6 h-11 rounded-full bg-white px-6 text-sm font-medium text-black transition-transform active:scale-95"
+          <AppLink
+            to="/search"
+            onNavigate={onNavigate}
+            testId="home-empty-find"
+            className="mt-6 inline-flex h-11 items-center rounded-full bg-white px-6 text-sm font-medium text-black transition-transform active:scale-95"
           >
             {strings.findSong}
-          </button>
+          </AppLink>
         </div>
       ) : null}
 
@@ -301,7 +310,8 @@ export default function HomePage({
               action={
                 <ViewAllButton
                   testId="home-recent-view-all"
-                  onClick={() => onNavigate('/library?tab=history')}
+                  to="/library?tab=history"
+                  onNavigate={onNavigate}
                 />
               }
             >
@@ -344,10 +354,11 @@ export default function HomePage({
               action={
                 <ViewAllButton
                   testId="home-most-played-view-all"
-                  onClick={() => {
-                    useLibraryStore.getState().setSort('mostPlayed');
-                    onNavigate('/library');
-                  }}
+                  to="/library"
+                  onNavigate={onNavigate}
+                  onClick={() =>
+                    useLibraryStore.getState().setSort('mostPlayed')
+                  }
                 />
               }
             >
@@ -362,19 +373,18 @@ export default function HomePage({
               action={
                 <ViewAllButton
                   testId="home-playlists-view-all"
-                  onClick={() => onNavigate('/library?tab=playlists')}
+                  to="/library?tab=playlists"
+                  onNavigate={onNavigate}
                 />
               }
             >
               <ul className="divide-y divide-white/5">
                 {local.playlists.map((p) => (
                   <li key={p.playlist.id}>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onNavigate(`/library/playlist/${p.playlist.id}`)
-                      }
-                      data-testid={`home-playlist-${p.playlist.id}`}
+                    <AppLink
+                      to={`/library/playlist/${p.playlist.id}`}
+                      onNavigate={onNavigate}
+                      testId={`home-playlist-${p.playlist.id}`}
                       className="flex w-full items-center gap-3 py-2 text-left transition-colors hover:bg-white/5 active:bg-white/10"
                     >
                       <span
@@ -391,7 +401,7 @@ export default function HomePage({
                           {p.songCount} {strings.songsLabel}
                         </span>
                       </span>
-                    </button>
+                    </AppLink>
                   </li>
                 ))}
               </ul>
@@ -405,7 +415,8 @@ export default function HomePage({
               action={
                 <ViewAllButton
                   testId="home-downloads-view-all"
-                  onClick={() => onNavigate('/downloads')}
+                  to="/downloads"
+                  onNavigate={onNavigate}
                 />
               }
             >
@@ -437,7 +448,8 @@ export default function HomePage({
               </button>
               <ViewAllButton
                 testId="home-browse-view-all"
-                onClick={() => onNavigate('/browse')}
+                to="/browse"
+                onNavigate={onNavigate}
               />
             </span>
           ) : undefined

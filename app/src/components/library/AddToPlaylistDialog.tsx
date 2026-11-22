@@ -7,6 +7,7 @@ import { Plus } from '@phosphor-icons/react';
 import { getLibraryService } from '../../data/library';
 import type { PlaylistWithCount } from '../../data/types';
 import { strings } from '../../strings/id';
+import Dialog from '../Dialog';
 import PlaylistDialog from './PlaylistDialog';
 
 interface AddToPlaylistDialogProps {
@@ -81,18 +82,12 @@ export default function AddToPlaylistDialog({
   }
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={strings.addToPlaylist}
-      data-testid="add-to-playlist-dialog"
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center"
-      onClick={onCancel}
+    <Dialog
+      title={strings.addToPlaylist}
+      onClose={onCancel}
+      testId="add-to-playlist-dialog"
+      maxHeight="80dvh"
     >
-      <div
-        className="max-h-[80dvh] w-full max-w-sm overflow-y-auto rounded-2xl border border-white/10 bg-zinc-900 p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
         <h2 className="text-base font-semibold text-zinc-100">
           {strings.addToPlaylist}
         </h2>
@@ -147,7 +142,6 @@ export default function AddToPlaylistDialog({
             {strings.cancel}
           </button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

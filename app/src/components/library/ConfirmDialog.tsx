@@ -1,5 +1,6 @@
 /** Dialog konfirmasi sederhana (hapus playlist, hapus riwayat). */
 import { strings } from '../../strings/id';
+import Dialog from '../Dialog';
 
 interface ConfirmDialogProps {
   title: string;
@@ -19,18 +20,12 @@ export default function ConfirmDialog({
   testId,
 }: ConfirmDialogProps) {
   return (
-    <div
+    <Dialog
+      title={title}
       role="alertdialog"
-      aria-modal="true"
-      aria-label={title}
-      data-testid={testId ?? 'confirm-dialog'}
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center"
-      onClick={onCancel}
+      onClose={onCancel}
+      testId={testId ?? 'confirm-dialog'}
     >
-      <div
-        className="w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900 p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
         <h2 className="text-base font-semibold text-zinc-100">{title}</h2>
         <p className="mt-2 text-sm leading-relaxed text-zinc-400">{body}</p>
         <div className="mt-5 flex justify-end gap-2">
@@ -51,7 +46,6 @@ export default function ConfirmDialog({
             {confirmLabel}
           </button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

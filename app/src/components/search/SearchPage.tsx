@@ -15,7 +15,13 @@
  * sisa hasil lagu ke antrean. Query yang gagal total karena
  * jaringan tidak masuk riwayat.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useTransition,
+} from 'react';
 import { Clock, MagnifyingGlass, MusicNote, X } from '@phosphor-icons/react';
 import {
   getLibraryService,
@@ -156,6 +162,10 @@ export default function SearchPage({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  // P-React19: commit hasil cari (s.d. 250 baris) dibungkus
+  // transition supaya ketikan tetap responsif selama React
+  // me-render daftar baru — input tidak tersendat.
+  const [, startTransition] = useTransition();
   const runIdRef = useRef(0);
   const suggestIdRef = useRef(0);
   const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -204,13 +214,17 @@ export default function SearchPage({
         localResults = { songs: [], artists: [] };
       }
       if (runId !== runIdRef.current) return;
-      setLocal(localResults);
+      startTransition(() => {
+        setLocal(localResults);
+      });
       const localNonEmpty =
         localResults.songs.length > 0 || localResults.artists.length > 0;
 
       // Pencarian jaringan: hanya bila online.
       if (!navigator.onLine) {
-        setGrouped(EMPTY_GROUPED);
+        startTransition(() => {
+          setGrouped(EMPTY_GROUPED);
+        });
         setState('ready');
         // Offline bukan "gagal total" bila hasil lokal ada.
         if (localNonEmpty) {
@@ -225,7 +239,9 @@ export default function SearchPage({
           timeoutMs: SEARCH_UI_TIMEOUT_MS,
         });
         if (runId !== runIdRef.current) return;
-        setGrouped(results);
+        startTransition(() => {
+          setGrouped(results);
+        });
         setState('ready');
         // Simpan riwayat: jaringan sukses (atau hasil lokal ada).
         void service.addSearchQuery(trimmed).then(() => {
@@ -266,7 +282,9 @@ export default function SearchPage({
         setErrorText(causeText);
         if (localNonEmpty) {
           // Hasil lokal tetap tampil; galat jaringan jadi banner.
-          setGrouped(EMPTY_GROUPED);
+          startTransition(() => {
+            setGrouped(EMPTY_GROUPED);
+          });
           setState('ready');
           void service.addSearchQuery(trimmed).then(() => {
             void refreshRecent();
@@ -794,7 +812,8 @@ export default function SearchPage({
                       .join(' • ')}
                     thumbnailUrl={album.thumbnailUrl}
                     testId={`search-album-${album.browseId}`}
-                    onClick={() => onNavigate(`/browse/${album.browseId}`)}
+                    to={`/browse/${album.browseId}`}
+                    onNavigate={onNavigate}
                   />
                 ))}
               </ul>
@@ -825,7 +844,8 @@ export default function SearchPage({
                     subtitle={artist.subscribersText}
                     thumbnailUrl={artist.thumbnailUrl}
                     testId={`search-artist-${artist.channelId}`}
-                    onClick={() => onNavigate(`/browse/${artist.channelId}`)}
+                    to={`/browse/${artist.channelId}`}
+                    onNavigate={onNavigate}
                   />
                 ))}
               </ul>
@@ -856,9 +876,8 @@ export default function SearchPage({
                     subtitle={playlist.subtitle}
                     thumbnailUrl={playlist.thumbnailUrl}
                     testId={`search-playlist-${playlist.browseId}`}
-                    onClick={() =>
-                      onNavigate(`/browse/${playlist.browseId}`)
-                    }
+                    to={`/browse/${playlist.browseId}`}
+                    onNavigate={onNavigate}
                   />
                 ))}
               </ul>

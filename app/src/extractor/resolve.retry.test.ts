@@ -7,7 +7,9 @@ import {
   createConfigLoader,
   createMemoryStorage,
 } from '../resilience/configStore';
+import { ExtractorException } from '../solver/errors';
 import { RESOLVE_RETRY_BACKOFF_MS } from '../resilience/retry';
+import type { CachedStream } from './resolveCache';
 
 const CONFIG_JSON = {
   clients: [
@@ -77,13 +79,14 @@ function jsonResponse(body: unknown, status = 200): Response {
  */
 async function makeResolver(
   configJson: unknown = CONFIG_JSON,
+  cacheLookup?: (videoId: string) => Promise<CachedStream | null>,
 ): Promise<StreamResolver> {
   const loader = createConfigLoader({
     fetchFn: (async () =>
       jsonResponse(configJson)) as unknown as typeof fetch,
     storage: createMemoryStorage(),
   });
-  const resolver = new StreamResolver({ configLoader: loader });
+  const resolver = new StreamResolver({ configLoader: loader, cacheLookup });
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
@@ -342,5 +345,151 @@ describe('StreamResolver retry lintas waktu (P6)', () => {
     });
     expect(resolver.primaryClientVersion).toBe('1.20261110.04.00');
     expect(resolver.playerHash).toBe('b559f50c');
+  });
+});
+
+/**
+ * Hardening solver-gagal (P5): ExtractorException dari buildPlayerScript
+ * di cabang cipher TIDAK BOLEH fatal — perlakukan seperti ResolveError
+ * (lanjut ke client berikut), lalu tryCache tetap jalan. Juga:
+ * loadPlayerScript wajib fetch dengan cache 'no-store' supaya base.js
+ * basi dari HTTP cache browser tidak pernah dipakai ulang.
+ */
+describe('StreamResolver solver-gagal bukan fatal (ExtractorException)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Format cipher itag 251 yang parse-nya valid (URL googlevideo). */
+  function cipherBody(): Record<string, unknown> {
+    return {
+      playabilityStatus: { status: 'OK' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 251,
+            mimeType: 'audio/webm; codecs="opus"',
+            bitrate: 160000,
+            signatureCipher:
+              `s=abc123&sp=sig&url=${encodeURIComponent(STREAM_URL)}`,
+          },
+        ],
+      },
+    };
+  }
+
+  const CACHED: CachedStream = {
+    videoId: 'hhn-nGSuenM',
+    title: 'Semua Tentang Kita',
+    url: 'https://rr2---sn-b.googlevideo.com/videoplayback?expire=1999999999&itag=140',
+    itag: 140,
+    bitrate: 128000,
+    client: 'ANDROID_VR',
+    expiresAtMs: Date.now() + 3600 * 1000,
+    resolvedAtMs: Date.now() - 60 * 1000,
+  };
+
+  /**
+   * Stub fetch: client scripted (WEB_REMIX/MWEB) selalu mengembalikan
+   * cipher, ANDROID_VR mengembalikan URL langsung. base.js yang
+   * diambil loadPlayerScript SELALU sampah -> buildPlayerScript
+   * melempar ExtractorException (unknownPlayerHash). `scriptCalls`
+   * merekam init fetch player-script untuk assert cache-busting.
+   */
+  function stubCipherClients(opts: {
+    vrDirect?: boolean;
+    scriptCalls?: RequestInit[];
+  } = {}): void {
+    const { vrDirect = true, scriptCalls } = opts;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.includes('/api/player-script')) {
+          scriptCalls?.push(init ?? {});
+          return new Response('bukan base.js sama sekali', { status: 200 });
+        }
+        if (url.includes('/api/innertube/player')) {
+          const headers = init?.headers as Record<string, string>;
+          const clientId = headers['X-YouTube-Client-Name'];
+          if (clientId === '14' && vrDirect) {
+            return jsonResponse(playerBody('OK', true));
+          }
+          return jsonResponse(cipherBody());
+        }
+        throw new Error(`fetch tak terduga: ${url}`);
+      }),
+    );
+  }
+
+  it('(a) ExtractorException di WEB_REMIX -> lanjut ke ANDROID_VR, sukses via URL langsung', async () => {
+    const resolver = await makeResolver();
+    stubCipherClients();
+    const resolved = await resolver.resolve(
+      { videoId: 'hhn-nGSuenM', title: 'Semua Tentang Kita' },
+      { maxRounds: 1, delay: async () => undefined },
+    );
+    expect(resolved.client).toBe('ANDROID_VR');
+    expect(resolved.url).toBe(STREAM_URL);
+    expect(resolved.usedSolver).toBe(false);
+    expect(resolved.fromCache).toBeUndefined();
+    // WEB_REMIX dan MWEB sama-sama solver-gagal sebelum VR lolos.
+    expect(resolver.lastResolve?.clientsTried).toEqual([
+      'WEB_REMIX',
+      'MWEB',
+      'ANDROID_VR',
+    ]);
+  });
+
+  it('(b) ExtractorException di semua client scripted -> tryCache jalan, entri cache kembali', async () => {
+    const lookup = vi.fn(async () => CACHED);
+    const resolver = await makeResolver(CONFIG_JSON, lookup);
+    stubCipherClients({ vrDirect: false });
+    const resolved = await resolver.resolve(
+      { videoId: 'hhn-nGSuenM', title: 'Semua Tentang Kita' },
+      { maxRounds: 1, delay: async () => undefined },
+    );
+    expect(resolved.url).toBe(CACHED.url);
+    expect(resolved.itag).toBe(140);
+    expect(resolved.fromCache).toBe(true);
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
+  it('(c) ExtractorException di mana-mana + cache kosong -> ResolveError (bukan ExtractorException mentah)', async () => {
+    const lookup = vi.fn(async () => null);
+    const resolver = await makeResolver(CONFIG_JSON, lookup);
+    stubCipherClients({ vrDirect: false });
+    let caught: unknown;
+    try {
+      await resolver.resolve(
+        { videoId: 'hhn-nGSuenM', title: 'Semua Tentang Kita' },
+        { maxRounds: 1, delay: async () => undefined },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ResolveError);
+    expect(caught).not.toBeInstanceOf(ExtractorException);
+    const attempts = (caught as ResolveError).attempts;
+    expect(attempts.filter((a) => a.endsWith('=solver-gagal'))).toEqual([
+      'WEB_REMIX=solver-gagal',
+      'MWEB=solver-gagal',
+      'ANDROID_VR=solver-gagal',
+    ]);
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
+  it('(d) loadPlayerScript fetch dengan cache no-store', async () => {
+    const resolver = await makeResolver();
+    const scriptCalls: RequestInit[] = [];
+    stubCipherClients({ vrDirect: false, scriptCalls });
+    await expect(
+      resolver.resolve(
+        { videoId: 'hhn-nGSuenM', title: 'Semua Tentang Kita' },
+        { maxRounds: 1, delay: async () => undefined },
+      ),
+    ).rejects.toBeInstanceOf(ResolveError);
+    // Tiap client scripted + VR (cipher) memicu satu fetch base.js.
+    expect(scriptCalls.length).toBeGreaterThan(0);
+    expect(scriptCalls.every((init) => init.cache === 'no-store')).toBe(true);
   });
 });

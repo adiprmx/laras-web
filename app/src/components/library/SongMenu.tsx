@@ -22,6 +22,7 @@ import { getPlayerService } from '../../player/service';
 import { useLibraryStore } from '../../store/library';
 import { strings } from '../../strings/id';
 import DownloadQualityDialog from '../downloads/DownloadQualityDialog';
+import Dialog from '../Dialog';
 import AddToPlaylistDialog from './AddToPlaylistDialog';
 import ConfirmDialog from './ConfirmDialog';
 import { trackFromView } from './trackFromView';
@@ -162,18 +163,12 @@ export default function SongMenu({
     'flex h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-[15px] text-zinc-100 transition-colors hover:bg-white/5 active:scale-[0.98]';
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={view.song.title}
-      data-testid="song-menu"
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center"
-      onClick={onClose}
+    <Dialog
+      title={view.song.title}
+      onClose={onClose}
+      testId="song-menu"
+      padding="sm"
     >
-      <div
-        className="w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900 p-3"
-        onClick={(e) => e.stopPropagation()}
-      >
         <p className="truncate px-3 pb-2 pt-1 text-sm font-medium text-zinc-100">
           {view.song.title}
         </p>
@@ -359,7 +354,6 @@ export default function SongMenu({
         >
           {strings.cancel}
         </button>
-      </div>
-    </div>
+    </Dialog>
   );
 }

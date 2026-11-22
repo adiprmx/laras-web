@@ -329,10 +329,17 @@ export const strings = {
   settingsAccountLastSync: 'Terakhir sinkron',
   settingsAccountNeverSynced: 'Belum pernah sinkron',
   settingsAccountSignOut: 'Keluar',
+  // P-Auth: keluar dari semua perangkat.
+  settingsAccountSignOutEverywhere: 'Keluar dari semua perangkat',
+  settingsAccountSignOutEverywhereTitle: 'Keluar dari semua perangkat?',
+  settingsAccountSignOutEverywhereBody:
+    'Semua perangkat yang masuk dengan akun ini akan keluar, termasuk perangkat ini. Data di perangkat ini tetap ada.',
   settingsAccountSyncError:
     'Sinkron gagal. Periksa internet kamu, lalu coba lagi.',
   settingsAccountRateLimited:
     'Terlalu sering sinkron. Coba lagi sebentar lagi.',
+  settingsAccountPullIncomplete:
+    'Sinkron belum selesai, masih ada data yang belum tertarik. Coba sinkronkan lagi.',
   settingsAccountSyncDone: 'Sinkron selesai.',
   settingsAccountFilesNote:
     'File lagu yang diunduh tidak ikut disinkronkan. Unduh ulang di perangkat lain.',

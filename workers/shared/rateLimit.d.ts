@@ -31,3 +31,10 @@ export declare function sweepExpiredWindows(
   db: D1DatabaseLike,
   nowMs?: number,
 ): Promise<void>;
+// Pembungkus fail-open (P-Shared). env minimal: { DB?: D1DatabaseLike }.
+export declare function checkRateLimit(
+  env: { DB?: D1DatabaseLike },
+  key: string,
+  limit: number,
+  windowMs?: number,
+): Promise<boolean>;

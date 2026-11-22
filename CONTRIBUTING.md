@@ -23,7 +23,7 @@ Thank you for reading this before you start. Laras is a small project with one m
 1. Fork the repo and create a branch from `main`. One branch per change.
 2. Make the change. Keep it focused: one issue, one pull request.
 3. Add or update tests for behavior you changed. Pure logic needs unit tests (Vitest). A screen needs a Playwright test for the states it can show (loading, empty, error, offline) where relevant.
-4. Run the checks below locally. CI runs the same checks and fails on any warning.
+4. Run the checks below locally. CI runs the same checks and fails on any error.
 5. Open a pull request against `main` and fill in the template. Describe what changed, why, and how you tested it.
 
 ## Checks (must pass before you open a PR)
@@ -38,7 +38,7 @@ npm run build
 npm run test:e2e
 ```
 
-- `npm run typecheck` and `npm run lint` must report zero warnings. A warning is a failure.
+- `npm run typecheck` and `npm run lint` must report zero warnings before you open a PR. CI fails on errors; warnings are a project standard, not a CI gate — fix them anyway, do not land new warnings.
 - New user-facing strings go in the copy module for the screen. Do not hardcode strings scattered in components.
 - New screens follow the design tokens in `app/src/index.css` and `docs/arsitektur.md`. Do not invent colors, radii, or font sizes inline.
 - Keep the bundle small. CI fails if the initial JavaScript bundle goes over 200 KB (gzip).

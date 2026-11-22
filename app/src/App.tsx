@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { Gear } from '@phosphor-icons/react';
 import { strings } from './strings/id';
 import { getPlayerService } from './player/service';
@@ -6,8 +6,10 @@ import { initLibraryStore } from './store/library';
 import MiniPlayer from './components/MiniPlayer';
 import FullPlayer from './components/FullPlayer';
 import BottomNav, { type NavCurrent } from './components/BottomNav';
+import AppLink from './components/AppLink';
 import HomePage from './components/home/HomePage';
-import type { LibraryTab } from './components/library/LibraryPage';
+import { useRoute } from './router/router';
+import { registerRoutePreload } from './router/prefetch';
 
 // Rute tersembunyi (tidak ditautkan dari mana pun di beranda):
 // /player-test = halaman uji pemutar P2 (nada lokal),
@@ -31,7 +33,8 @@ import type { LibraryTab } from './components/library/LibraryPage';
 // tetap di produksi. Itu alat verifikasi §5 yang dijalankan
 // koordinator dari preview, non-destruktif (hanya memutar lagu
 // kanari dan menyalin laporan), bukan halaman uji destruktif.
-const SpikePage = lazy(() => import('./spike/SpikePage'));
+const loadSpikePage = () => import('./spike/SpikePage');
+const SpikePage = lazy(loadSpikePage);
 const PlayerTestPage = import.meta.env.DEV
   ? lazy(() => import('./test-pages/PlayerTestPage'))
   : null;
@@ -53,97 +56,31 @@ const P7TestPage = import.meta.env.DEV
 const P8TestPage = import.meta.env.DEV
   ? lazy(() => import('./test-pages/P8TestPage'))
   : null;
-const DownloadsPage = lazy(
-  () => import('./components/downloads/DownloadsPage'),
-);
-const SettingsPage = lazy(
-  () => import('./components/settings/SettingsPage'),
-);
-const LibraryPage = lazy(() => import('./components/library/LibraryPage'));
-const PlaylistDetailPage = lazy(
-  () => import('./components/library/PlaylistDetailPage'),
-);
-const SearchPage = lazy(() => import('./components/search/SearchPage'));
-const BrowsePage = lazy(() => import('./components/browse/BrowsePage'));
+const loadDownloadsPage = () =>
+  import('./components/downloads/DownloadsPage');
+const DownloadsPage = lazy(loadDownloadsPage);
+const loadSettingsPage = () => import('./components/settings/SettingsPage');
+const SettingsPage = lazy(loadSettingsPage);
+const loadLibraryPage = () => import('./components/library/LibraryPage');
+const LibraryPage = lazy(loadLibraryPage);
+const loadPlaylistDetailPage = () =>
+  import('./components/library/PlaylistDetailPage');
+const PlaylistDetailPage = lazy(loadPlaylistDetailPage);
+const loadSearchPage = () => import('./components/search/SearchPage');
+const SearchPage = lazy(loadSearchPage);
+const loadBrowsePage = () => import('./components/browse/BrowsePage');
+const BrowsePage = lazy(loadBrowsePage);
 
-type Route =
-  | { name: 'home' }
-  | { name: 'search'; query: string }
-  | { name: 'browse'; browseId?: string; browseParams?: string }
-  | { name: 'library'; tab?: LibraryTab }
-  | { name: 'playlist'; id: number }
-  | { name: 'downloads' }
-  | { name: 'settings' }
-  | { name: 'spike' }
-  | { name: 'player-test' }
-  | { name: 'library-test' }
-  | { name: 'p4-test' }
-  | { name: 'p5-test' }
-  | { name: 'p6-test' }
-  | { name: 'p7-test' }
-  | { name: 'p8-test' };
-
-const LIBRARY_TABS: LibraryTab[] = [
-  'songs',
-  'albums',
-  'artists',
-  'playlists',
-  'favorites',
-  'history',
-];
-
-function parseRoute(pathname: string, search: string): Route {
-  const path = pathname.replace(/\/$/, '') || '/';
-  const params = new URLSearchParams(search);
-  if (path === '/spike') return { name: 'spike' };
-  // Rute uji hanya ada di build dev (Red 1 H1): di produksi
-  // ketujuhnya jatuh ke beranda di bawah.
-  if (import.meta.env.DEV) {
-    if (path === '/player-test') return { name: 'player-test' };
-    if (path === '/library-test') return { name: 'library-test' };
-    if (path === '/p4-test') return { name: 'p4-test' };
-    if (path === '/p5-test') return { name: 'p5-test' };
-    if (path === '/p6-test') return { name: 'p6-test' };
-    if (path === '/p7-test') return { name: 'p7-test' };
-    if (path === '/p8-test') return { name: 'p8-test' };
-  }
-  if (path === '/downloads') return { name: 'downloads' };
-  if (path === '/settings') return { name: 'settings' };
-  if (path === '/search') {
-    return { name: 'search', query: params.get('q') ?? '' };
-  }
-  if (path === '/browse') return { name: 'browse' };
-  const browse = /^\/browse\/([^/]+)$/.exec(path);
-  if (browse) {
-    // decodeURIComponent melempar URIError untuk segmen persen
-    // yang rusak (tautan crafted); tanpa tangkapan, lemparan di
-    // initializer useState meruntuhkan seluruh app (Red 1 R2).
-    // Segmen rusak berarti tautan tidak valid: ke beranda.
-    let browseId: string;
-    try {
-      browseId = decodeURIComponent(browse[1]);
-    } catch {
-      return { name: 'home' };
-    }
-    return {
-      name: 'browse',
-      browseId,
-      browseParams: params.get('params') ?? undefined,
-    };
-  }
-  if (path === '/library') {
-    const tab = params.get('tab');
-    return {
-      name: 'library',
-      tab: LIBRARY_TABS.includes(tab as LibraryTab)
-        ? (tab as LibraryTab)
-        : undefined,
-    };
-  }
-  const playlist = /^\/library\/playlist\/(\d+)$/.exec(path);
-  if (playlist) return { name: 'playlist', id: Number(playlist[1]) };
-  return { name: 'home' };
-}
+// P-Links: daftarkan pemuat untuk prefetch on-intent (hover /
+// fokus di AppLink). Awalan terpanjang menang ('/library/playlist'
+// mengalahkan '/library').
+registerRoutePreload('/spike', loadSpikePage);
+registerRoutePreload('/downloads', loadDownloadsPage);
+registerRoutePreload('/settings', loadSettingsPage);
+registerRoutePreload('/library', loadLibraryPage);
+registerRoutePreload('/library/playlist', loadPlaylistDetailPage);
+registerRoutePreload('/search', loadSearchPage);
+registerRoutePreload('/browse', loadBrowsePage);
 
 function LoadingPage() {
   return (
@@ -151,26 +88,6 @@ function LoadingPage() {
       Memuat halaman.
     </div>
   );
-}
-
-function useRoute(): [Route, (path: string) => void] {
-  const [route, setRoute] = useState<Route>(() =>
-    parseRoute(window.location.pathname, window.location.search),
-  );
-  useEffect(() => {
-    const onPopState = (): void => {
-      setRoute(parseRoute(window.location.pathname, window.location.search));
-    };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
-  const navigate = useCallback((path: string) => {
-    window.history.pushState(null, '', path);
-    const [pathname, search] = path.split('?');
-    setRoute(parseRoute(pathname, search ? `?${search}` : ''));
-    window.scrollTo(0, 0);
-  }, []);
-  return [route, navigate];
 }
 
 export default function App() {
@@ -201,22 +118,28 @@ export default function App() {
         }, 20000);
       })
       .catch(() => undefined);
-    // Sinkronisasi (P7): periksa sesi + sinkron sekali di latar
-    // sesudah jeda 20 detik (tidak berebut jaringan dengan muat
-    // awal). Best-effort dan diam: gagal tidak mengganggu
-    // pemutaran; pengguna yang belum masuk tidak merasakan apa
-    // pun. Impor dinamis supaya modul sync tidak masuk bundle
-    // awal.
+    // Sinkronisasi (P7 + P-PushDelta): periksa sesi + sinkron
+    // BERSYARAT sekali di latar sesudah jeda 20 detik (tidak
+    // berebut jaringan dengan muat awal) — diam bila tidak ada
+    // perubahan lokal dan sinkron terakhir masih segar.
+    // Best-effort: gagal tidak mengganggu pemutaran; pengguna
+    // yang belum masuk tidak merasakan apa pun. Impor dinamis
+    // supaya modul sync tidak masuk bundle awal.
     window.setTimeout(() => {
       void import('./sync/syncStore')
-        .then(async ({ useSyncStore }) => {
-          await useSyncStore.getState().refreshAuth();
-          if (useSyncStore.getState().status === 'signed-in') {
-            void useSyncStore.getState().syncNow();
-          }
-        })
+        .then(({ useSyncStore }) => useSyncStore.getState().bootSync())
         .catch(() => undefined);
     }, 20000);
+    // Kembali online: kejar ketinggalan (bersyarat juga).
+    const onOnline = (): void => {
+      void import('./sync/syncStore')
+        .then(({ useSyncStore }) => useSyncStore.getState().bootSync())
+        .catch(() => undefined);
+    };
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+    };
   }, []);
 
   const [route, navigate] = useRoute();
@@ -306,23 +229,23 @@ export default function App() {
   return (
     <div className="min-h-dvh bg-black text-zinc-100 min-[840px]:pl-[72px]">
       <header className="flex items-center justify-between px-4 py-3">
-        <button
-          type="button"
-          onClick={() => navigate('/')}
-          data-testid="nav-home-title"
+        <AppLink
+          to="/"
+          onNavigate={navigate}
+          testId="nav-home-title"
           className="text-xl font-bold tracking-tight"
         >
           {strings.appName}
-        </button>
-        <button
-          type="button"
-          onClick={() => navigate('/settings')}
-          aria-label={strings.settings}
-          data-testid="nav-settings"
+        </AppLink>
+        <AppLink
+          to="/settings"
+          onNavigate={navigate}
+          ariaLabel={strings.settings}
+          testId="nav-settings"
           className="flex h-11 w-11 items-center justify-center rounded-full text-zinc-400 transition-colors hover:text-zinc-100 active:scale-95"
         >
           <Gear size={22} aria-hidden="true" />
-        </button>
+        </AppLink>
       </header>
       {/* Padding bawah memberi ruang untuk bar putar (64 px) + bar
           navigasi (56 px) di HP; di desktop hanya bar putar. */}

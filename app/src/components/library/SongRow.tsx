@@ -2,6 +2,7 @@
 import { DotsThreeVertical } from '@phosphor-icons/react';
 import type { SongView } from '../../data/types';
 import { formatTime } from '../../player/format';
+import { coverSrcSet } from '../coverSrc';
 
 interface SongRowProps {
   view: SongView;
@@ -21,6 +22,8 @@ export default function SongRow({
 }: SongRowProps) {
   const { song, artistNames } = view;
   const artist = artistNames.join(', ');
+  // srcset 48px: browser 1x mengunduh 120px, bukan 480px.
+  const cover = coverSrcSet(song.thumbnailUrl, '48px');
   return (
     <li className="flex items-center gap-3 py-1" data-testid={testId}>
       <button
@@ -31,6 +34,8 @@ export default function SongRow({
         {song.thumbnailUrl ? (
           <img
             src={song.thumbnailUrl}
+            srcSet={cover?.srcSet}
+            sizes={cover?.sizes}
             alt=""
             width={48}
             height={48}

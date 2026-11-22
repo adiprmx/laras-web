@@ -10,6 +10,14 @@
     />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <!-- Preconnect (P-React19): hemat DNS+TLS+TCP pada pemakaian pertama.
+         googlevideo TIDAK di-preconnect: subdomain-nya berbeda per URL
+         audio (rr1---sn-....googlevideo.com) sehingga preconnect ke satu
+         host tidak berguna. -->
+    <link rel="preconnect" href="https://i.ytimg.com" />
+    <link rel="preconnect" href="https://lh3.googleusercontent.com" />
+    <link rel="preconnect" href="https://laras-proxy-spike.hiroohengkerr.workers.dev" />
+    <link rel="preconnect" href="https://laras-sync.hiroohengkerr.workers.dev" />
     <title>Laras — Musik Gratis, Tanpa Iklan, Offline</title>
   </head>
   <body>

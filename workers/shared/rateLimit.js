@@ -1,4 +1,7 @@
-// Rate limit proxy di D1 (Red 1 S3, arsitektur §4.1).
+// Rate limit D1 (Red 1 S3, arsitektur §4.1) — modul BERSAMA
+// (P-Shared): dipakai proxy DAN sync (satu database D1, satu
+// tabel rate_limits). Sebelumnya tinggal di proxy/src/ dan diimpor
+// sync lewat path lintas worker yang rapuh.
 //
 // Menggantikan bucket in-memory per isolate: satu IP tersebar ke
 // banyak isolate (batas mudah dilampaui) dan bucket tidak pernah
@@ -21,8 +24,12 @@
 // request itu sendiri. Baris kedaluwarsa disapu probabilistik
 // (1% request) supaya tabel tidak tumbuh tanpa batas.
 //
-// Fail-open diputuskan di pemanggil (index.js): bila D1 gagal,
-// request diizinkan + dicatat, bukan ditolak.
+// Fail-open diputuskan di checkRateLimit di bawah (dipakai kedua
+// worker): bila D1 gagal, request diizinkan + dicatat, bukan
+// ditolak. isRateLimited sendiri MELEMPAR bila D1 gagal — pemanggil
+// langsung (tes, skrip) yang memutuskan fallbacknya.
+
+import { logWarn } from './log.js';
 
 const WINDOW_MS = 60000;
 
@@ -115,4 +122,31 @@ export async function sweepExpiredWindows(db, nowMs = Date.now()) {
     .prepare('DELETE FROM rate_limits WHERE window_start < ?1')
     .bind(cutoff)
     .run();
+}
+
+// Pembungkus fail-open untuk worker (P-Shared — sebelumnya
+// diduplikasi di proxy dan sync dengan satu perbedaan: sync
+// memakai windowMs opsional, proxy tidak. Versi ini kanonis:
+// windowMs undefined = jendela bawaan 1 menit di isRateLimited,
+// jadi pemanggilan proxy lama (3 argumen) perilakunya identik.
+// Peringatan "binding tidak ada" ditulis sekali per isolate
+// supaya log tidak dibanjiri tiap request. Kunci (yang memuat
+// IP) TIDAK PERNAH dicatat.
+let warnedMissingDb = false;
+export async function checkRateLimit(env, key, limit, windowMs) {
+  if (!env.DB) {
+    if (!warnedMissingDb) {
+      warnedMissingDb = true;
+      logWarn('rate limit: binding D1 (DB) tidak ada, rate limit nonaktif');
+    }
+    return false;
+  }
+  try {
+    return await isRateLimited(env.DB, key, limit, Date.now(), windowMs);
+  } catch (e) {
+    logWarn('rate limit: D1 gagal, request diizinkan', {
+      error: e instanceof Error ? e.message : 'unknown',
+    });
+    return false;
+  }
 }

@@ -5,31 +5,50 @@
  *
  * Bila sampul gagal dimuat (offline / host gambar lambat),
  * tampil ubin huruf awal — bukan kotak kosong.
+ *
+ * P-Links: kartu yang membuka halaman memakai `to` (AppLink
+ * <a href> semantik); kartu lagu tetap <button> (aksi putar).
  */
 import { useState } from 'react';
 import { Play } from '@phosphor-icons/react';
 import type { BrowseItem } from '../extractor/searchParser';
+import AppLink from './AppLink';
+import { coverSrcSet } from './coverSrc';
 
 interface BrowseCardProps {
   item: BrowseItem;
-  onClick: () => void;
+  /** Aksi ketuk (putar lagu). Bila `to` diisi, kartu adalah tautan. */
+  onClick?: () => void;
+  /** P-Links: tujuan tautan (halaman browse album/artis/playlist). */
+  to?: string;
+  onNavigate?: (path: string) => void;
   testId?: string;
 }
 
-export default function BrowseCard({ item, onClick, testId }: BrowseCardProps) {
+export default function BrowseCard({
+  item,
+  onClick,
+  to,
+  onNavigate,
+  testId,
+}: BrowseCardProps) {
   const [imgFailed, setImgFailed] = useState(false);
   const showImg = item.thumbnailUrl != null && !imgFailed;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      data-testid={testId}
-      className="w-[132px] shrink-0 snap-start text-left transition-colors active:bg-white/5 sm:w-[148px]"
-    >
+  // Kartu 132px (HP) / 148px (sm+).
+  const cover = coverSrcSet(
+    item.thumbnailUrl,
+    '(min-width: 640px) 148px, 132px',
+  );
+  const cardClass =
+    'w-[132px] shrink-0 snap-start text-left transition-colors active:bg-white/5 sm:w-[148px]';
+  const inner = (
+    <>
       <span className="relative block">
         {showImg ? (
           <img
             src={item.thumbnailUrl}
+            srcSet={cover?.srcSet}
+            sizes={cover?.sizes}
             alt=""
             width={148}
             height={148}
@@ -63,6 +82,23 @@ export default function BrowseCard({ item, onClick, testId }: BrowseCardProps) {
           {item.subtitle}
         </span>
       ) : null}
+    </>
+  );
+  if (to && onNavigate) {
+    return (
+      <AppLink to={to} onNavigate={onNavigate} testId={testId} className={cardClass}>
+        {inner}
+      </AppLink>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-testid={testId}
+      className={cardClass}
+    >
+      {inner}
     </button>
   );
 }

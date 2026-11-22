@@ -30,6 +30,8 @@ import {
   type SearchErrorKind,
 } from '../../extractor/searchService';
 import { strings } from '../../strings/id';
+import AppLink from '../AppLink';
+import { coverSrcSet } from '../coverSrc';
 import SkeletonList from '../SkeletonList';
 import BrowseShelves from './BrowseShelves';
 import { playAllBrowseSongs } from './browsePlay';
@@ -119,19 +121,20 @@ export default function BrowsePage({
   }, [load]);
 
   const songs = page ? browsePageAllSongs(page) : [];
+  const headerCover = coverSrcSet(page?.thumbnailUrl, '96px');
 
   return (
     <div data-testid="browse-page" className="pt-2">
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onNavigate(isHome ? '/' : '/browse')}
-          aria-label={strings.browseBack}
-          data-testid="browse-back"
+        <AppLink
+          to={isHome ? '/' : '/browse'}
+          onNavigate={onNavigate}
+          ariaLabel={strings.browseBack}
+          testId="browse-back"
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-zinc-100 transition-colors hover:bg-white/5 active:scale-95"
         >
           <ArrowLeft size={20} />
-        </button>
+        </AppLink>
         <h2 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">
           {isHome ? strings.browseTitle : (page?.title ?? strings.browseTitle)}
         </h2>
@@ -188,6 +191,8 @@ export default function BrowsePage({
               {page.thumbnailUrl && !headerImgFailed ? (
                 <img
                   src={page.thumbnailUrl}
+                  srcSet={headerCover?.srcSet}
+                  sizes={headerCover?.sizes}
                   alt=""
                   width={96}
                   height={96}

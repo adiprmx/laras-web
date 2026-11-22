@@ -21,125 +21,33 @@ export class SyncApiError extends Error {
   }
 }
 
-export interface AuthMeData {
-  displayName: string;
-  provider: string;
-}
-
-export interface RemotePlaylist {
-  clientId: string;
-  nama: string;
-  deskripsi: string | null;
-  updatedAt: number;
-  deletedAt: number | null;
-}
-
-export interface RemotePlaylistItem {
-  playlistClientId: string;
-  videoId: string;
-  posisi: number;
-  title: string | null;
-  artist: string | null;
-  updatedAt: number;
-  deletedAt: number | null;
-}
-
-export interface RemoteLike {
-  videoId: string;
-  likedAt: number;
-  title: string | null;
-  artist: string | null;
-  updatedAt: number;
-  deletedAt: number | null;
-}
-
-export interface RemoteHistoryEvent {
-  videoId: string;
-  playedAt: number;
-  secondsPlayed: number;
-  title: string | null;
-  artist: string | null;
-  updatedAt: number;
-}
-
-export interface PullData {
-  serverTime: number;
-  playlists: RemotePlaylist[];
-  playlistItems: RemotePlaylistItem[];
-  likes: RemoteLike[];
-  history: RemoteHistoryEvent[];
-  settings: { settingsJson: string; updatedAt: number } | null;
-}
-
-export interface PushBody {
-  deviceId: string;
-  playlists?: Array<{
-    clientId: string;
-    nama: string;
-    deskripsi: string | null;
-  }>;
-  playlistItems?: Array<{
-    playlistClientId: string;
-    videoId: string;
-    posisi: number;
-    title: string | null;
-    artist: string | null;
-  }>;
-  likes?: Array<{
-    videoId: string;
-    likedAt: number;
-    title: string | null;
-    artist: string | null;
-  }>;
-  history?: Array<{
-    videoId: string;
-    playedAt: number;
-    secondsPlayed: number;
-    title: string | null;
-    artist: string | null;
-  }>;
-  deletedPlaylists?: Array<{ clientId: string }>;
-  deletedPlaylistItems?: Array<{
-    playlistClientId: string;
-    videoId: string;
-  }>;
-  deletedLikes?: Array<{ videoId: string }>;
-  settings?: { settingsJson: string };
-  historyClearedBefore?: number;
-}
-
-export interface PushData {
-  serverTime: number;
-  applied: number;
-  /** Baris tombstone/item yang disapu push ini (Blue 7, S14). */
-  pruned?: number;
-  /** Entri yang ditolak karena bukan milik pendorong (R11). */
-  skippedNotOwned?: number;
-  /** Entri yang dilewati karena melewati batas total per pengguna (S7). */
-  skippedOverLimit?: {
-    playlists: number;
-    playlistItems: number;
-    likes: number;
-    history: number;
-  };
-  /** Batas total server (arsitektur §4.3). */
-  limits?: {
-    playlists: number;
-    itemsPerPlaylist: number;
-    likes: number;
-    history: number;
-  };
-  /** Hapus riwayat diabaikan server (S8a: maks sekali per 24 jam). */
-  historyClearIgnored?: boolean;
-  /** Detik sampai hapus riwayat boleh dicoba lagi (S8a). */
-  historyClearRetryAfterSeconds?: number;
-}
-
-interface Envelope<T> {
-  success: boolean;
-  data?: T;
-  error?: { code: string; message: string };
-}
+// Tipe wire (P-Types): SATU sumber kebenaran di
+// workers/sync/src/contract.js + contract.d.ts — tipe di sini
+// diimpor, bukan didefinisikan ulang. Re-export supaya impor
+// yang sudah ada (syncService, syncStore, tes) tidak berubah.
+import {
+  validatePullResponse,
+  validatePushBody,
+  validatePushData,
+} from '../../../workers/sync/src/contract';
+import type {
+  ApiEnvelope,
+  AuthMeData,
+  PullData,
+  PushBody,
+  PushData,
+} from '../../../workers/sync/src/contract';
+export type {
+  ApiEnvelope,
+  AuthMeData,
+  PullData,
+  PushBody,
+  PushData,
+  RemoteHistoryEvent,
+  RemoteLike,
+  RemotePlaylist,
+  RemotePlaylistItem,
+} from '../../../workers/sync/src/contract';
 
 async function request<T>(
   path: string,
@@ -154,7 +62,7 @@ async function request<T>(
       credentials: 'include',
       signal: controller.signal,
     });
-    const body = (await res.json().catch(() => null)) as Envelope<T> | null;
+    const body = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
     if (!res.ok) {
       throw new SyncApiError(
         res.status,
@@ -194,6 +102,17 @@ export async function fetchLogout(
   await request('/api/auth/logout', { method: 'POST' }, fetchImpl);
 }
 
+/** Keluar dari SEMUA perangkat (P-Auth): cabut semua sesi pengguna. */
+export async function fetchLogoutAll(
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ loggedOutEverywhere: boolean; revoked: number }> {
+  return request<{ loggedOutEverywhere: boolean; revoked: number }>(
+    '/api/auth/logout-all',
+    { method: 'POST' },
+    fetchImpl,
+  );
+}
+
 export async function fetchDeleteAccount(
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
@@ -204,14 +123,31 @@ export async function fetchPull(
   since: number,
   fetchImpl: typeof fetch = fetch,
 ): Promise<PullData> {
-  return request<PullData>(`/api/sync/pull?since=${since}`, { method: 'GET' }, fetchImpl);
+  const data = await request<PullData>(
+    `/api/sync/pull?since=${since}`,
+    { method: 'GET' },
+    fetchImpl,
+  );
+  // P-Types: validasi bentuk respons (menangkap drift server).
+  const invalid = validatePullResponse(data);
+  if (invalid) {
+    throw new SyncApiError(200, 'BAD_RESPONSE', `Respons pull tidak valid: ${invalid}`);
+  }
+  return data;
 }
 
 export async function fetchPush(
   body: PushBody,
   fetchImpl: typeof fetch = fetch,
 ): Promise<PushData> {
-  return request<PushData>(
+  // P-Types: validasi SEBELUM kirim dengan validator yang SAMA
+  // dengan server — body yang cacat gagal lokal dengan pesan jelas,
+  // bukan sesudah round-trip (dan bukan diam-diam ditolak server).
+  const invalidBody = validatePushBody(body);
+  if (invalidBody) {
+    throw new SyncApiError(400, 'INVALID_PUSH_BODY', `Body push tidak valid: ${invalidBody}`);
+  }
+  const data = await request<PushData>(
     '/api/sync/push',
     {
       method: 'POST',
@@ -220,4 +156,9 @@ export async function fetchPush(
     },
     fetchImpl,
   );
+  const invalidData = validatePushData(data);
+  if (invalidData) {
+    throw new SyncApiError(200, 'BAD_RESPONSE', `Respons push tidak valid: ${invalidData}`);
+  }
+  return data;
 }

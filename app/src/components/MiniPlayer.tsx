@@ -11,6 +11,7 @@ import { selectCurrentTrack, usePlayerStore } from '../store/player';
 import { getPlayerService } from '../player/service';
 import { strings } from '../strings/id';
 import IframeFallbackPlayer from '../player/IframeFallbackPlayer';
+import { coverSrcSet } from './coverSrc';
 
 export default function MiniPlayer({
   withNav = false,
@@ -27,6 +28,7 @@ export default function MiniPlayer({
 
   if (!track) return null;
 
+  const cover = coverSrcSet(track.artwork, '48px');
   const playing = status === 'playing';
   const progress = duration > 0 ? (position / duration) * 100 : 0;
 
@@ -63,6 +65,8 @@ export default function MiniPlayer({
           {track.artwork ? (
             <img
               src={track.artwork}
+              srcSet={cover?.srcSet}
+              sizes={cover?.sizes}
               alt=""
               width={48}
               height={48}

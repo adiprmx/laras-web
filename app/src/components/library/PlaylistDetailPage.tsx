@@ -14,6 +14,8 @@ import type { PlaylistRow, PlaylistSongEntry } from '../../data/types';
 import { getPlayerService } from '../../player/service';
 import { useLibraryService, useLibraryStore } from '../../store/library';
 import { strings } from '../../strings/id';
+import AppLink from '../AppLink';
+import VirtualList from '../VirtualList';
 import ConfirmDialog from './ConfirmDialog';
 import PlaylistDialog from './PlaylistDialog';
 import SongMenu from './SongMenu';
@@ -161,14 +163,14 @@ export default function PlaylistDetailPage({
           <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-zinc-400">
             {strings.playlistNotFoundBody}
           </p>
-          <button
-            type="button"
-            onClick={() => onNavigate('/library')}
-            data-testid="playlist-not-found-back"
-            className="mt-4 h-11 rounded-xl bg-white px-4 text-sm font-medium text-black transition-transform duration-150 active:scale-95"
+          <AppLink
+            to="/library"
+            onNavigate={onNavigate}
+            testId="playlist-not-found-back"
+            className="mt-4 inline-flex h-11 items-center rounded-xl bg-white px-4 text-sm font-medium text-black transition-transform duration-150 active:scale-95"
           >
             {strings.backToLibrary}
-          </button>
+          </AppLink>
         </div>
       </div>
     );
@@ -177,15 +179,15 @@ export default function PlaylistDetailPage({
   return (
     <div className="mx-auto max-w-2xl px-4 pt-4" data-testid="playlist-detail">
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onNavigate('/library')}
-          aria-label={strings.backToLibrary}
-          data-testid="playlist-back"
+        <AppLink
+          to="/library"
+          onNavigate={onNavigate}
+          ariaLabel={strings.backToLibrary}
+          testId="playlist-back"
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-zinc-100 transition-colors hover:bg-white/10 active:scale-95"
         >
           <ArrowLeft size={22} />
-        </button>
+        </AppLink>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-xl font-bold tracking-tight">
             {playlist.name}
@@ -259,17 +261,20 @@ export default function PlaylistDetailPage({
           </p>
         </div>
       ) : (
-        <ul className="mt-4 divide-y divide-white/5" data-testid="playlist-song-list">
-          {entries.map((entry, index) => (
+        <VirtualList
+          items={entries}
+          renderItem={(entry, index) => (
             <SongRow
-              key={entry.song.song.id}
               view={entry.song}
               onPlay={() => playFrom(index)}
               onMenu={() => setMenuEntry(entry)}
               testId={`playlist-song-${entry.song.song.id}`}
             />
-          ))}
-        </ul>
+          )}
+          keyOf={(entry) => entry.song.song.id}
+          testId="playlist-song-list"
+          className="mt-4 divide-y divide-white/5"
+        />
       )}
 
       {!loading && !error && hasMore && (

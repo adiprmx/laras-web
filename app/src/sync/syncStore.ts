@@ -6,7 +6,10 @@
  * tidak pernah memblokir pemutaran). `syncNow` manual hanya
  * dari tombol di Pengaturan; tidak ada sinkronisasi otomatis
  * berkala di v1 (menghemat kuota D1 + baterai; pengguna yang
- * masuk menekan tombol saat butuh).
+ * masuk menekan tombol saat butuh). Yang otomatis hanyalah
+ * `bootSync` (sekali saat boot + saat kembali online), dan itu
+ * pun BERSYARAT (P-PushDelta): diam bila tidak ada perubahan
+ * lokal dan sinkron terakhir masih segar (<1 jam).
  *
  * Pesan galat disimpan sebagai kunci string (bukan teks
  * mentah) supaya UI bisa memakai copy strings/id.ts.
@@ -16,9 +19,10 @@ import {
   fetchAuthMe,
   fetchDeleteAccount,
   fetchLogout,
+  fetchLogoutAll,
   SyncApiError,
 } from './syncClient';
-import { syncNow as runSync } from './syncService';
+import { shouldAutoSync, syncNow as runSync } from './syncService';
 
 export type SyncStatus = 'unknown' | 'signed-out' | 'signed-in';
 export type SyncErrorKey =
@@ -26,6 +30,7 @@ export type SyncErrorKey =
   | 'syncErrorServer'
   | 'syncErrorRateLimited'
   | 'syncErrorSignedOut'
+  | 'syncErrorPullIncomplete'
   | null;
 
 interface SyncState {
@@ -39,7 +44,13 @@ interface SyncState {
   refreshAuth: () => Promise<void>;
   /** Satu putaran sinkronisasi penuh (hanya bila sudah masuk). */
   syncNow: () => Promise<void>;
+  /** Sinkronisasi bersyarat: hanya jalan bila shouldAutoSync() true. */
+  maybeAutoSync: () => Promise<void>;
+  /** Periksa sesi lalu sinkronisasi bersyarat (boot + kembali online). */
+  bootSync: () => Promise<void>;
   signOut: () => Promise<void>;
+  /** Keluar dari SEMUA perangkat (P-Auth): cabut semua sesi server. */
+  signOutEverywhere: () => Promise<void>;
   deleteAccount: () => Promise<void>;
 }
 
@@ -88,7 +99,13 @@ export const useSyncStore = create<SyncState>()((set, get) => ({
     set({ syncing: true, error: null });
     try {
       const result = await runSync();
-      set({ lastSyncAt: result.serverTime, syncing: false });
+      // P-Pull: tarik belum selesai BUKAN sukses diam-diam —
+      // tampilkan sebagai galat supaya pengguna menekan lagi.
+      set({
+        lastSyncAt: result.serverTime,
+        syncing: false,
+        error: result.pullIncomplete ? 'syncErrorPullIncomplete' : null,
+      });
     } catch (e) {
       const key = errorKeyOf(e);
       set({
@@ -101,12 +118,48 @@ export const useSyncStore = create<SyncState>()((set, get) => ({
     }
   },
 
+  maybeAutoSync: async () => {
+    if (get().syncing) return;
+    if (get().status !== 'signed-in') return;
+    let should = false;
+    try {
+      should = await shouldAutoSync();
+    } catch {
+      // Gagal baca penanda lokal: jangan sync membabi buta.
+      return;
+    }
+    if (!should) return;
+    await get().syncNow();
+  },
+
+  bootSync: async () => {
+    await get().refreshAuth();
+    if (get().status === 'signed-in') {
+      await get().maybeAutoSync();
+    }
+  },
+
   signOut: async () => {
     try {
       await fetchLogout();
     } catch {
       // Cookie sesi mungkin sudah tidak valid; keluar lokal
       // tetap dilakukan supaya pengguna tidak terjebak.
+    }
+    set({
+      status: 'signed-out',
+      displayName: null,
+      provider: null,
+      lastSyncAt: null,
+    });
+  },
+
+  signOutEverywhere: async () => {
+    try {
+      await fetchLogoutAll();
+    } catch {
+      // Seperti signOut: keluar lokal tetap dilakukan supaya
+      // pengguna tidak terjebak bila sesi sudah tidak valid.
     }
     set({
       status: 'signed-out',

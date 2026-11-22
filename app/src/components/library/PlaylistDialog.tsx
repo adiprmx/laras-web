@@ -5,6 +5,7 @@ import {
   MAX_PLAYLIST_NAME_LENGTH,
 } from '../../data/library';
 import { strings } from '../../strings/id';
+import Dialog from '../Dialog';
 
 interface PlaylistDialogProps {
   title: string;
@@ -47,18 +48,7 @@ export default function PlaylistDialog({
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      data-testid="playlist-dialog"
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center"
-      onClick={onCancel}
-    >
-      <div
-        className="w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900 p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Dialog title={title} onClose={onCancel} testId="playlist-dialog">
         <h2 className="text-base font-semibold text-zinc-100">{title}</h2>
         <label
           htmlFor="playlist-name"
@@ -119,7 +109,6 @@ export default function PlaylistDialog({
             {submitLabel}
           </button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

@@ -18,6 +18,7 @@ import { wipeAllData } from '../../backup/wipe';
 import { strings } from '../../strings/id';
 import { fetchLogout } from '../../sync/syncClient';
 import { useSyncStore } from '../../sync/syncStore';
+import Dialog from '../Dialog';
 
 /**
  * Batas tunggu refreshAuth saat status akun masih `unknown`
@@ -124,20 +125,12 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
   const showWarning = logoutFailed || statusUnknown;
 
   return (
-    <div
+    <Dialog
+      title={step === 1 ? strings.backupWipeTitle1 : strings.backupWipeTitle2}
       role="alertdialog"
-      aria-modal="true"
-      aria-label={
-        step === 1 ? strings.backupWipeTitle1 : strings.backupWipeTitle2
-      }
-      data-testid="wipe-dialog"
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center"
-      onClick={onClose}
+      onClose={onClose}
+      testId="wipe-dialog"
     >
-      <div
-        className="w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900 p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
         {step === 1 ? (
           <div>
             <h2 className="text-base font-semibold text-zinc-100">
@@ -263,7 +256,6 @@ export default function WipeFlow({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </Dialog>
   );
 }

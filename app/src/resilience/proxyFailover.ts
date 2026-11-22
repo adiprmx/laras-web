@@ -43,7 +43,12 @@ import {
 import { fetchInvidiousStream } from '../extractor/invidious';
 import { isRefusalPlayability } from './retry';
 
-/** URL dasar proxy Render (egress ketiga). Layanan belum dibuat. */
+/**
+ * URL dasar proxy Render (egress ketiga). Layanan SUDAH dibuat
+ * (19 Nov 2026) tapi DITOLAK: probe 0 OK / 18 ditolak YouTube.
+ * Tetap live $0 untuk uji ulang; JANGAN aktifkan failover
+ * (RENDER_FAILOVER_ENABLED = false) tanpa vonis BERSIH baru.
+ */
 export const RENDER_PROXY_BASE_URL = 'https://laras-proxy-render.onrender.com';
 
 /**
