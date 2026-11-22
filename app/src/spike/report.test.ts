@@ -24,6 +24,9 @@ function makeResult(patch: Partial<SongResult> = {}): SongResult {
     retries: 0,
     failCause: null,
     failDetail: null,
+    fromCache: false,
+    mediaErrorCode: null,
+    mediaErrorMessage: null,
     ...patch,
   };
 }
@@ -146,11 +149,96 @@ describe('formatReport', () => {
     expect(formatReport(withoutDetail, meta)).not.toContain('Detail:');
   });
 
+  it('menandai jalur dari cache bila fromCache true', () => {
+    const cached = [
+      makeResult({
+        status: 'selesai',
+        client: 'ANDROID_VR',
+        itag: 251,
+        fromCache: true,
+      }),
+    ];
+    expect(formatReport(cached, meta)).toContain(
+      'Jalur: ANDROID_VR, itag 251, URL langsung, dari cache',
+    );
+    const fresh = [
+      makeResult({
+        status: 'selesai',
+        client: 'ANDROID_VR',
+        itag: 251,
+        fromCache: false,
+      }),
+    ];
+    const freshReport = formatReport(fresh, meta);
+    expect(freshReport).toContain('Jalur: ANDROID_VR, itag 251, URL langsung');
+    expect(freshReport).not.toContain('dari cache');
+  });
+
+  it('menampilkan baris Media error dengan pesan bila kode dan pesan ada', () => {
+    const results = [
+      makeResult({
+        status: 'gagal',
+        failCause: 'Pemutar gagal memulai lagu.',
+        failDetail: 'play() ditolak: play failed',
+        mediaErrorCode: 2,
+        mediaErrorMessage: 'The network connection was lost.',
+      }),
+    ];
+    const report = formatReport(results, meta);
+    expect(report).toContain(
+      'Media error: kode 2 (The network connection was lost.)',
+    );
+    // Baris Media error muncul sesudah Detail.
+    expect(report.indexOf('Detail:')).toBeLessThan(
+      report.indexOf('Media error:'),
+    );
+  });
+
+  it('menampilkan kode saja bila pesan media error null', () => {
+    const results = [
+      makeResult({
+        status: 'gagal',
+        mediaErrorCode: 2,
+        mediaErrorMessage: null,
+      }),
+    ];
+    const report = formatReport(results, meta);
+    expect(report).toContain('Media error: kode 2');
+    expect(report).not.toContain('Media error: kode 2 (');
+  });
+
+  it('menyembunyikan baris Media error bila kode null', () => {
+    const results = [
+      makeResult({
+        status: 'gagal',
+        mediaErrorCode: null,
+        // Pesan tanpa kode tidak boleh memunculkan barisnya.
+        mediaErrorMessage: 'pesan tanpa kode',
+      }),
+    ];
+    expect(formatReport(results, meta)).not.toContain('Media error');
+  });
+
   it('tidak pernah memuat URL stream', () => {
     const results = [makeResult({ status: 'selesai' })];
     const report = formatReport(results, meta);
     expect(report).not.toContain('googlevideo.com');
     expect(report).not.toContain('videoplayback');
+  });
+
+  it('menyamarkan URL di pesan media error (PRD B2.1)', () => {
+    const results = [
+      makeResult({
+        status: 'gagal',
+        mediaErrorCode: 2,
+        mediaErrorMessage:
+          'gagal memuat https://example.invalid/x.webm karena jaringan',
+      }),
+    ];
+    const report = formatReport(results, meta);
+    expect(report).not.toContain('https://example.invalid');
+    expect(report).not.toContain('.webm');
+    expect(report).toContain('[tautan]');
   });
 
   it('melabeli mode penuh dan config bawaan', () => {

@@ -36,6 +36,12 @@ export interface SongResult {
    * tanpa probe tambahan.
    */
   failDetail: string | null;
+  /** True bila URL dari cache D1. */
+  fromCache: boolean;
+  /** Kode MediaError terakhir elemen audio (1-4), bila ada. */
+  mediaErrorCode: number | null;
+  /** Pesan MediaError terakhir elemen audio, bila ada. */
+  mediaErrorMessage: string | null;
 }
 
 export type SpikeMode = 'cepat' | 'penuh';
@@ -123,7 +129,9 @@ export function formatReport(
     lines.push(`${index + 1}. ${result.title} (${result.videoId}): ${statusText}`);
     if (result.client) {
       const via = result.usedSolver ? 'lewat solver' : 'URL langsung';
-      lines.push(`   Jalur: ${result.client}, itag ${result.itag ?? '?'}, ${via}`);
+      lines.push(
+        `   Jalur: ${result.client}, itag ${result.itag ?? '?'}, ${via}${result.fromCache ? ', dari cache' : ''}`,
+      );
     }
     if (result.resolveMs !== null) {
       lines.push(`   Waktu cari lagu: ${(result.resolveMs / 1000).toFixed(1)} detik`);
@@ -139,6 +147,21 @@ export function formatReport(
     }
     if (result.failDetail) {
       lines.push(`   Detail: ${result.failDetail}`);
+    }
+    if (result.mediaErrorCode !== null) {
+      // Pesan MediaError adalah teks tak tepercaya dari browser dan
+      // bisa berisi URL stream — samarkan URL-nya (PRD B2.1: laporan
+      // tidak boleh memuat URL stream). Bila pesan hanya berisi URL,
+      // tidak ada sisa yang layak tampil: kode saja, seperti saat
+      // pesan null.
+      const safeMessage = result.mediaErrorMessage
+        ?.replace(/https?:\/\/\S+/g, '[tautan]')
+        .trim();
+      const suffix =
+        safeMessage && safeMessage !== '[tautan]'
+          ? ` (${safeMessage})`
+          : '';
+      lines.push(`   Media error: kode ${result.mediaErrorCode}${suffix}`);
     }
   });
   return lines.join('\n');

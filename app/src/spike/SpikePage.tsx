@@ -51,6 +51,9 @@ function freshResults(): SongResult[] {
     retries: 0,
     failCause: null,
     failDetail: null,
+    fromCache: false,
+    mediaErrorCode: null,
+    mediaErrorMessage: null,
   }));
 }
 
@@ -194,15 +197,33 @@ export default function SpikePage() {
       index: number,
       runMode: SpikeMode,
       runId: number,
-    ): Promise<{ ok: boolean; cause: string | null; heard: number }> => {
+    ): Promise<{
+      ok: boolean;
+      cause: string | null;
+      heard: number;
+      mediaError: { code: number | null; message: string | null } | null;
+    }> => {
       const audio = audioRef.current;
-      if (!audio) return { ok: false, cause: 'Pemutar tidak tersedia.', heard: 0 };
+      if (!audio) {
+        return { ok: false, cause: 'Pemutar tidak tersedia.', heard: 0, mediaError: null };
+      }
       const resolver = resolverRef.current;
       const song = CANARY_SONGS[index];
       let currentUrl = track.url;
       let retries = 0;
       let heard = 0;
       let lastPosition = 0;
+      // MediaError terakhir yang tertangkap elemen audio. Dipasang
+      // SEBELUM play() pertama supaya gagal start awal (yang dulu
+      // tidak pernah tercatat karena listener baru dipasang sesudah
+      // play() sukses) ikut tertangkap dan masuk laporan.
+      let lastMediaError: { code: number | null; message: string | null } | null = null;
+      const captureMediaError = () => {
+        lastMediaError = {
+          code: audio.error?.code ?? null,
+          message: audio.error?.message ?? null,
+        };
+      };
 
       const setSourceAndPlay = async (): Promise<'playing' | 'blocked' | 'failed'> => {
         audio.src = currentUrl;
@@ -255,6 +276,7 @@ export default function SpikePage() {
             client: fresh.client,
             itag: fresh.itag,
             usedSolver: fresh.usedSolver,
+            fromCache: fresh.fromCache ?? false,
           });
         } catch {
           return false;
@@ -274,19 +296,29 @@ export default function SpikePage() {
         return true;
       };
 
+      // Pasang penangkap SEBELUM play() pertama: inti perbaikan ini.
+      audio.addEventListener('error', captureMediaError);
       const state = await setSourceAndPlay();
       if (state === 'blocked') {
         const resumed = await waitForUserPlay();
         if (!resumed) {
+          audio.removeEventListener('error', captureMediaError);
           return {
             ok: false,
             cause: 'Browser memblokir putar otomatis dan tombol putar tidak ditekan.',
             heard,
+            mediaError: lastMediaError,
           };
         }
         setGeneralNote(null);
       } else if (state === 'failed') {
-        return { ok: false, cause: 'Pemutar gagal memulai lagu.', heard };
+        audio.removeEventListener('error', captureMediaError);
+        return {
+          ok: false,
+          cause: 'Pemutar gagal memulai lagu.',
+          heard,
+          mediaError: lastMediaError,
+        };
       } else {
         setGeneralNote(null);
       }
@@ -303,7 +335,8 @@ export default function SpikePage() {
           window.clearInterval(poller);
           audio.removeEventListener('ended', onEnded);
           audio.removeEventListener('error', onError);
-          resolvePlay({ ok, cause, heard });
+          audio.removeEventListener('error', captureMediaError);
+          resolvePlay({ ok, cause, heard, mediaError: lastMediaError });
         };
 
         const onEnded = () => {
@@ -324,7 +357,12 @@ export default function SpikePage() {
               lastProgressAt = Date.now();
               return;
             }
-            finish(false, mediaErrorCause(code));
+            // Pakai kode SEGAR dari penangkap media error (S-1): bila
+            // retry ikut gagal dengan kode berbeda, penyebab harus
+            // cocok dengan baris Media error di laporan — baris itu
+            // juga dibaca dari lastMediaError. `code` hanya fallback
+            // bila belum ada MediaError yang tertangkap.
+            finish(false, mediaErrorCause(lastMediaError?.code ?? code));
           })();
         };
 
@@ -454,6 +492,7 @@ export default function SpikePage() {
           itag: track.itag,
           usedSolver: track.usedSolver,
           resolveMs: track.resolveMs,
+          fromCache: track.fromCache ?? false,
         });
         if ('mediaSession' in navigator) {
           try {
@@ -476,6 +515,8 @@ export default function SpikePage() {
             resultsRef.current[i].heardSeconds,
             played.heard,
           ),
+          mediaErrorCode: played.mediaError?.code ?? null,
+          mediaErrorMessage: played.mediaError?.message ?? null,
         });
       }
 
